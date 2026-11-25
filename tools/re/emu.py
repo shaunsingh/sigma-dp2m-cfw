@@ -144,6 +144,10 @@ class Machine:
 
         return self.uc.hook_add(UC_HOOK_CODE, hook, begin=va, end=(end or va + 1) - 1)
 
+    def watch(self, va: int, fn: Callable[[list[int]], object]) -> int:
+        """Call fn(r0..r3) whenever execution reaches va; the function still runs."""
+        return self.uc.hook_add(UC_HOOK_CODE, lambda *_: fn(self.args()), begin=va, end=va)
+
     @contextmanager
     def writes(self, *allowed: tuple[int, int]) -> Iterator[list[tuple[int, int]]]:
         """Log (addr, size) of writes outside the allowed [lo, hi) ranges while active."""
@@ -167,9 +171,11 @@ class Machine:
 
     # stock services
     def text(self, s: str, px: int, style: int = 0x22, rect: tuple[int, int, int, int] = (0, 600, 600, 100), lang: int = 0) -> np.ndarray:
-        """Coverage (0 none, 1 solid .. 15) of `s` drawn offscreen by the stock font engine, as the line buffer."""
+        """Draw `s` with the stock font engine; returns the coverage line buffer (0 none, 1 solid .. 15).
+
+        rect y >= 480 keeps the OSD untouched; the engine does not clear stale line-buffer rows.
+        """
         n = stock.LINE_W * stock.LINE_ROWS
-        self.wr(stock.LINE_BUF, bytes(n))
         self.wr(SCRATCH, struct.pack(">4H", *rect))
         self.wr(SCRATCH + 8, s.encode("latin1") + b"\0")
         self.call(stock.TEXT_DRAW, lang, SCRATCH + 8, MASK, px, stack=(5, 0, 1, SCRATCH, style, 0))

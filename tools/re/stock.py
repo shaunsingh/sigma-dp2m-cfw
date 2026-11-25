@@ -37,6 +37,8 @@ NV_BLOCK, NV_LEN, NV_PERSIST = 0xA0939684, 0x44C, 0x3C4
 NV_DEFAULTS = 0xA07F9E68
 NV_CM = 0xA09396C3
 NV_BKT_ORD = 0xA09396DF
+NV_ISO_STEP = 0xA09396DD  # 1: 1/3 EV ISO menu
+MENU_ISO = 0x01
 NV_EXPO = 0xA09396AC
 NV_CUR = 0xA09396C0  # shooting settings (0x8C B) a custom slot stores
 NV_LOAD = 0xA0040110  # (dst) boot load of NOR bank 0
@@ -48,7 +50,7 @@ GET_CM = 0xA0167926
 GET_EXPO_MODE = 0xA0167892
 BKT_COUNT = 0xA0168100
 BKT_EV_Q16 = 0xA0002FE4  # (shot) -> EV offset q16
-BKT_STEP_IDX = 0xA07FBE5A
+BKT_STEP_IDX, BKT_STEP_TBL = 0xA07FBE5A, 0xA0176F14  # EV step index -> q16 step
 AUTOISO_A = 0xA000D83E  # A mode min shutter `ldr r0,=..; b +8`
 AUTOISO_P = (0xA000D9A2, 0xA000D9E8)  # P mode `movs r0,#9; lsls r0,#16`
 IPC_CMD20 = 0xA00360A2  # capture IPC cmd 0x20 fill: r4 cmd, meta at sp + 0x14

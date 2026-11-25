@@ -130,14 +130,17 @@ class Index:
         return len(self.val)
 
     def refs(self, value: int, kinds: tuple[str, ...] | None = None) -> list[Ref]:
-        out = []
+        """References to value (either Thumb bit), plus literal loads whose slot is value."""
+        ks = list(np.nonzero((self.slot == value) & (self.slot != self.src))[0])
         for v in sorted({value & ~1, value | 1}):
             lo, hi = np.searchsorted(self.val, [v, v + 1])
-            for k in range(lo, hi):
-                kind = KINDS[self.kind[k]]
-                if kinds is None or kind in kinds:
-                    out.append(Ref(int(self.src[k]), int(self.val[k]), int(self.slot[k]), kind))
-        return sorted(out, key=lambda r: r.src)
+            ks += range(lo, hi)
+        out = []
+        for k in ks:
+            kind = KINDS[self.kind[k]]
+            if kinds is None or kind in kinds:
+                out.append(Ref(int(self.src[k]), int(self.val[k]), int(self.slot[k]), kind))
+        return sorted(set(out), key=lambda r: r.src)
 
     def callers(self, target: int) -> list[int]:
         return [r.src for r in self.refs(target, CALLS)]

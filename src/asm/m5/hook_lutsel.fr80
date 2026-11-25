@@ -1,0 +1,28 @@
+// 4096-entry hw lut selector @ 0x4E6414 (sRGB / AdobeRGB via 0x80001B88)
+
+.include "m5_addrs.inc"
+
+    cmp     #9, r5
+    blt     stock
+    ldi:8   #MAX_PACKED_MODE, r0
+    cmp     r0, r5
+    bgt     stock
+
+    mov     r5, r4
+    add2    #-9, r4
+    lsl     #12, r4
+
+    ldi:32  #SYM_COLORSPACE_RAM, r1
+    ld      @r1, r0
+    cmp     #2, r0
+    beq     use_argb
+    ldi:32  #VA_LUTS_SRGB, r0
+    add     r0, r4
+    ret
+use_argb:
+    ldi:32  #VA_LUTS_ARGB, r0
+    add     r0, r4
+    ret
+stock:
+    ldi:32  #SYM_STOCK_LUTSEL, r12
+    jmp     @r12

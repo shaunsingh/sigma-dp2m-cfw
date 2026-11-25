@@ -1,0 +1,25 @@
+# Local user config
+dp2m.fnl
+
+# Build outputs
+/target/
+/out/
+*.o
+*.elf
+*.map
+
+# Proprietary Sigma firmware binaries
+*.bin
+*.BIN
+!data/film_pack.bin
+*.X3F
+*.x3f
+*.zip
+*.tar.gz
+*.pkg
+
+# Python & OS artifacts
+__pycache__/
+*.pyc
+.venv/
+.DS_Store

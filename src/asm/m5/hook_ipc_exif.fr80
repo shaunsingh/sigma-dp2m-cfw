@@ -1,0 +1,50 @@
+// ipc unpack & colorspace bit-mask hooks
+
+.include "m5_addrs.inc"
+
+.section cs_set
+    ldi:8   #0x03, r0
+    and     r0, r4
+    ldi:32  #SYM_CS_SET_ORIG, r12
+    jmp     @r12
+
+.section cs_exf
+    ldi:8   #0x03, r0
+    and     r0, r4
+    ldi:32  #SYM_CS_EXF_ORIG, r12
+    jmp     @r12
+
+// only override slot[+0x150] for cmd[5] >= 9 so stock 1..8 keep m5 native enum (3=Std, 1=Sepia, 2=Mono)
+.section ipc_unpack
+    ld      @(r14, #8), r0
+    ldi:8   #5, r13
+    ldub    @(r13, r0), r1
+    cmp     #9, r1
+    blt     keep_cm
+    ldi:20  #0x00150, r13
+    st      r1, @(r13, r5)
+keep_cm:
+    ldi:8   #6, r13
+    ldub    @(r13, r0), r1
+    cmp     #0, r1
+    beq     keep_cs
+    ldi:20  #0x0014C, r13
+    st      r1, @(r13, r5)
+keep_cs:
+    ldi:32  #SYM_IPC_SLOT_COMMIT, r12
+    jmp     @r12
+
+.section exif_cs
+    ldi:8   #0x94, r13
+    ld      @(r13, r4), r0
+    ldi:8   #3, r1
+    and     r1, r0
+    cmp     #2, r0
+    beq     cs_ok
+    ldi:8   #1, r0
+cs_ok:
+    st      r0, @(r13, r4)
+    ld      @(r14, #20), r1
+    st      r0, @(r13, r1)
+    ldi:32  #SYM_EXIF_WRITE_CS, r12
+    jmp     @r12

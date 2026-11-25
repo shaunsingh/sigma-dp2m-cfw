@@ -1,0 +1,356 @@
+// spatial driver @ 0x4D738E (pre-hw-jpeg), stateless w/ scratch @ 0x80100000
+
+.include "m5_addrs.inc"
+
+.macro st_ctx off, src
+    st      \src, @(r14, #-144 + \off)
+.endm
+
+.macro ld_ctx off, dst
+    ld      @(r14, #-144 + \off), \dst
+.endm
+
+.macro blur_5tap grid_va, line_va, passes, pfx
+    ldi:8   #\passes, r11
+\pfx_pass:
+    ldi:32  #\grid_va, r8
+    ld      @(r14, #-44), r6
+\pfx_h_row:
+    ld      @(r14, #-40), r7
+    ldi:32  #\line_va, r9
+    ldi:8   #0, r13
+\pfx_h_cp:
+    ldub    @(r13, r8), r0 ; stb r0, @(r13, r9)
+    add     #1, r13 ; cmp r7, r13 ; blt \pfx_h_cp
+    ldi:8   #2, r5 ; mov r7, r10 ; add2 #-2, r10
+    cmp     r10, r5 ; bge \pfx_h_next
+\pfx_h_x:
+    mov     r5, r13 ; add2 #-2, r13
+    ldub    @(r13, r9), r0
+    .rept 4
+        add #1, r13 ; ldub @(r13, r9), r1 ; add r1, r0
+    .endr
+    ldi:8   #51, r1 ; mul r1, r0 ; mov MDL, r0 ; lsr #8, r0
+    mov     r5, r13 ; stb r0, @(r13, r8)
+    add     #1, r5 ; cmp r10, r5 ; blt \pfx_h_x
+    ldi:8   #2, r13 ; ldub @(r13, r8), r0
+    stb     r0, @r8 ; ldi:8 #1, r13 ; stb r0, @(r13, r8)
+    mov     r10, r13 ; add2 #-1, r13 ; ldub @(r13, r8), r0
+    add     #1, r13 ; stb r0, @(r13, r8)
+    add     #1, r13 ; stb r0, @(r13, r8)
+\pfx_h_next:
+    add     r7, r8 ; add2 #-1, r6 ; cmp #0, r6 ; bgt \pfx_h_row
+
+    ldi:32  #\grid_va, r8
+    ld      @(r14, #-40), r6
+    ld      @(r14, #-40), r10
+\pfx_v_col:
+    ld      @(r14, #-44), r7
+    ldi:32  #\line_va, r9
+    mov     r8, r5 ; ldi:8 #0, r13
+\pfx_v_cp:
+    ldub    @r5, r0 ; stb r0, @(r13, r9)
+    add     r10, r5 ; add #1, r13 ; cmp r7, r13 ; blt \pfx_v_cp
+    ldi:8   #2, r5 ; add2 #-2, r7
+    cmp     r7, r5 ; bge \pfx_v_next
+    mov     r8, r4 ; add r10, r4 ; add r10, r4
+\pfx_v_y:
+    mov     r5, r13 ; add2 #-2, r13
+    ldub    @(r13, r9), r0
+    .rept 4
+        add #1, r13 ; ldub @(r13, r9), r1 ; add r1, r0
+    .endr
+    ldi:8   #51, r1 ; mul r1, r0 ; mov MDL, r0 ; lsr #8, r0
+    stb     r0, @r4 ; add r10, r4
+    add     #1, r5 ; cmp r7, r5 ; blt \pfx_v_y
+    stb     r0, @r4 ; add r10, r4 ; stb r0, @r4
+    mov     r8, r4 ; add r10, r4 ; add r10, r4
+    ldub    @r4, r0
+    stb     r0, @r8 ; mov r8, r4 ; add r10, r4 ; stb r0, @r4
+\pfx_v_next:
+    add     #1, r8 ; add2 #-1, r6 ; cmp #0, r6 ; bgt \pfx_v_col
+
+    add2    #-1, r11 ; cmp #0, r11 ; bgt.far \pfx_pass
+.endm
+
+    st      r4, @-r15
+    st      r5, @-r15
+    st      r6, @-r15
+    st      r7, @-r15
+    st      RP, @-r15
+
+    ld      @(r14, #8), r4 ; extsh r4
+    ldi:32  #SYM_GET_JOB_1D, r12 ; call @r12 ; mov r4, r2
+    ld      @(r14, #8), r4 ; extsh r4
+    ldi:32  #SYM_GET_JOB_CM, r12 ; call @r12 ; mov r4, r3
+
+    // bypass when fx==0, fill==0, mode<151
+    mov     r2, r0 ; lsr #2, r0 ; ldi:8 #0x1F, r1 ; and r1, r0
+    cmp     #0, r0 ; bne do_work
+    ldi:8   #151, r1 ; cmp r1, r3 ; bge do_work
+
+fast_stock:
+    ld      @r15+, RP
+    ld      @r15+, r7
+    ld      @r15+, r6
+    ld      @r15+, r5
+    ld      @r15+, r4
+    ldi:32  #SYM_HW_JPEG_ENCODE, r12
+    jmp     @r12
+
+do_work:
+    ld      @(r15, #20), r0
+    ld      @(r15, #8), r4
+    st      r8, @-r15
+    st      r9, @-r15
+    st      r10, @-r15
+    st      r11, @-r15
+    enter   #160
+    st      r2, @(r14, #-4)
+    st      r3, @(r14, #-8)
+    st      r0, @(r14, #-12)
+    st      r4, @(r14, #-16)
+
+    // packed_1d: cs=[1:0], fx=[4:2], fill=[6:5]
+    mov     r2, r0 ; ldi:8 #3, r5 ; and r5, r0 ; st r0, @(r14, #-20)
+    mov     r2, r0 ; lsr #2, r0 ; ldi:8 #7, r5 ; and r5, r0 ; st r0, @(r14, #-24)
+    mov     r2, r0 ; lsr #5, r0 ; ldi:8 #3, r5 ; and r5, r0 ; st r0, @(r14, #-28)
+
+    ldi:8   #0, r0
+    st_ctx  28, r0 ; st_ctx 32, r0 ; st_ctx 36, r0 ; st_ctx 40, r0
+    st_ctx  44, r0 ; st_ctx 48, r0 ; st_ctx 52, r0 ; st_ctx 56, r0
+    st_ctx  60, r0 ; st_ctx 64, r0 ; st_ctx 68, r0 ; st_ctx 72, r0
+    st_ctx  76, r0 ; st_ctx 80, r0 ; st_ctx 84, r0
+
+    ld      @(r14, #-24), r0 ; st_ctx 28, r0
+    ld      @(r14, #-28), r0 ; st_ctx 32, r0
+    ldi:32  #VA_GRAIN_ENVS, r0 ; st_ctx 44, r0
+    ldi:8   #28, r0 ; st_ctx 48, r0
+    ldi:8   #1, r0  ; st_ctx 52, r0
+    ldi:8   #64, r0 ; st_ctx 56, r0
+    ldi:8   #0, r0  ; st_ctx 60, r0
+
+    ld      @(r14, #-8), r4
+    cmp     #9, r4 ; blt.far meta_done
+    ldi:8   #MAX_PACKED_MODE, r0 ; cmp r0, r4 ; bgt.far meta_done
+
+    mov     r4, r0 ; add2 #-9, r0 ; lsl #2, r0
+    ldi:32  #VA_MODE_META, r1 ; add r0, r1
+    ldub    @r1, r2 ; st_ctx 48, r2
+    ldi:8   #1, r13 ; ldub @(r13, r1), r2
+    ldi:8   #1, r3 ; cmp #2, r2 ; bne cd_ok ; ldi:8 #0, r3
+cd_ok:
+    st_ctx  52, r3
+    lsl     #8, r2 ; ldi:32 #VA_GRAIN_ENVS, r3 ; add r3, r2 ; st_ctx 44, r2
+    ldi:8   #2, r13 ; ldub @(r13, r1), r2 ; st_ctx 56, r2
+    ldi:8   #3, r13 ; ldub @(r13, r1), r2 ; st_ctx 60, r2
+
+    ldi:8   #19, r0  ; cmp r0, r4 ; blt.far meta_done
+    ldi:8   #150, r0 ; cmp r0, r4 ; bgt chk_bw
+
+    ld      @(r14, #-24), r0 ; cmp #0, r0 ; beq.far meta_done
+    mov     r4, r0 ; ldi:8 #19, r1 ; sub r1, r0
+    ldi:20  #LUT3D_STRIDE, r1 ; mul r1, r0 ; mov MDL, r0
+    ld      @(r14, #-20), r2 ; cmp #2, r2 ; beq l3_argb
+    ldi:32  #VA_LUT3D_SRGB, r1 ; bra l3_set
+l3_argb:
+    ldi:32  #VA_LUT3D_ARGB, r1
+l3_set:
+    add     r1, r0 ; st_ctx 36, r0
+    jmp.far meta_done
+
+chk_bw:
+    ldi:8   #190, r0 ; cmp r0, r4 ; bgt load_sd_lut
+    mov     r4, r0 ; ldi:8 #151, r1 ; sub r1, r0
+    lsl     #9, r0 ; ldi:32 #VA_BW_TONER_40, r1 ; add r1, r0
+    st_ctx  40, r0
+    jmp.far meta_done
+
+// 191..198 -> D:\LUT1.BIN..D:\LUT8.BIN
+load_sd_lut:
+    ldi:32  #VA_SD_PATH_TMPL, r8
+    ldi:32  #SCRATCH_SD_PATH, r9
+    ldi:8   #12, r13
+cp_sdpath:
+    add2    #-1, r13
+    ldub    @(r13, r8), r0 ; stb r0, @(r13, r9)
+    cmp     #0, r13 ; bgt cp_sdpath
+    ld      @(r14, #-8), r0 ; ldi:8 #191, r1 ; sub r1, r0
+    ldi:8   #'1', r1 ; add r1, r0
+    ldi:8   #6, r13 ; stb r0, @(r13, r9)
+    mov     r9, r4 ; ldi:8 #0, r5 ; ldi:8 #0, r6
+    ldi:32  #SYM_MDF_OPEN, r12 ; call @r12
+    cmp     #0, r4 ; blt meta_done
+    mov     r4, r8
+    ldi:32  #SCRATCH_SD_LUT, r5
+    ldi:20  #0x1040, r6
+    ldi:32  #SCRATCH_SD_NREAD, r7
+    ldi:32  #SYM_MDF_READ, r12 ; call @r12
+    mov     r4, r9
+    mov     r8, r4 ; ldi:32 #SYM_MDF_CLOSE, r12 ; call @r12
+    cmp     #0, r9 ; bne meta_done
+    ldi:32  #SCRATCH_SD_LUT, r8
+    ld      @r8, r0 ; ldi:32 #0x44324D4C, r1 ; cmp r1, r0 ; bne meta_done
+    ldi:8   #5, r13 ; ldub @(r13, r8), r0 ; st_ctx 48, r0
+    ldi:8   #6, r13 ; ldub @(r13, r8), r0
+    ldi:8   #1, r1 ; cmp #2, r0 ; bne sd_cd ; ldi:8 #0, r1
+sd_cd:
+    st_ctx  52, r1
+    lsl     #8, r0 ; ldi:32 #VA_GRAIN_ENVS, r1 ; add r1, r0 ; st_ctx 44, r0
+    ldi:8   #7, r13 ; ldub @(r13, r8), r0 ; st_ctx 56, r0
+    ldi:8   #8, r13 ; ldub @(r13, r8), r0 ; st_ctx 60, r0
+    ldi:8   #0x10, r0 ; add r8, r0 ; st_ctx 36, r0
+
+meta_done:
+    ld_ctx  36, r0 ; ld_ctx 40, r1 ; or r1, r0
+    ld_ctx  32, r1 ; or r1, r0
+    ld_ctx  28, r1 ; cmp #2, r1 ; bge has_work
+    cmp     #0, r0 ; bne has_work
+done_exit:
+    leave
+    ld      @r15+, r11
+    ld      @r15+, r10
+    ld      @r15+, r9
+    ld      @r15+, r8
+    ld      @r15+, RP
+    ld      @r15+, r7
+    ld      @r15+, r6
+    ld      @r15+, r5
+    ld      @r15+, r4
+    ldi:32  #SYM_HW_JPEG_ENCODE, r12
+    jmp     @r12
+
+has_work:
+    ldi:8   #0, r4 ; ld @(r14, #-16), r5 ; ldi:32 #SYM_GET_IMG_DIM, r12 ; call @r12 ; st_ctx 12, r4
+    ldi:8   #1, r4 ; ld @(r14, #-16), r5 ; ldi:32 #SYM_GET_IMG_DIM, r12 ; call @r12 ; st_ctx 16, r4
+
+    ld      @(r14, #-16), r0
+    cmp     #5, r0 ; beq str_5
+    cmp     #4, r0 ; beq str_4
+    cmp     #3, r0 ; beq str_3
+    ldi:32  #SYM_STRIDE_DEFAULT, r12 ; call @r12
+    ld      @(r14, #-12), r0 ; cmp #0, r0 ; beq str_done
+    ldi:8   #0x20, r0 ; add r0, r4 ; bra str_done
+str_5:
+    ldi:32  #SYM_STRIDE_5, r12 ; call @r12 ; bra str_done
+str_4:
+    ldi:32  #SYM_STRIDE_4, r12 ; call @r12 ; bra str_done
+str_3:
+    ldi:32  #SYM_STRIDE_3, r12 ; call @r12
+str_done:
+    st_ctx  20, r4 ; lsr #1, r4 ; st_ctx 24, r4
+
+    ld      @(r14, #36), r8
+    ld      @r8, r0
+    ldi:8   #4, r13 ; ld @(r13, r8), r1
+    ldi:8   #8, r13 ; ld @(r13, r8), r2
+    ld      @(r14, #-12), r3 ; cmp #0, r3 ; beq ptrs_ok
+    ld      @(r14, #-16), r3 ; cmp #1, r3 ; bne ptrs_ok
+    ldi:20  #0x0E700, r3 ; add r3, r0
+    lsr     #1, r3 ; add r3, r1 ; add r3, r2
+ptrs_ok:
+    st_ctx  0, r0 ; st_ctx 4, r1 ; st_ctx 8, r2
+
+    ld_ctx  12, r0 ; ldi:8 #32, r1 ; cmp r1, r0 ; blt.far done_exit
+    ld_ctx  16, r0 ; cmp r1, r0 ; blt.far done_exit
+
+    ld      @(r14, #-24), r0 ; cmp #3, r0 ; bge need_pyr
+    ld      @(r14, #-28), r0 ; cmp #0, r0 ; beq.far run_passes
+
+need_pyr:
+    ld_ctx  12, r0 ; ldi:20 #1024, r1 ; cmp r1, r0 ; blt pyr_small
+    ld_ctx  16, r0 ; ldi:20 #512, r1  ; cmp r1, r0 ; blt pyr_small
+    ldi:8   #80, r0 ; st r0, @(r14, #-40) ; st_ctx 64, r0
+    ldi:8   #53, r0 ; st r0, @(r14, #-44) ; st_ctx 68, r0
+    ldi:8   #6, r0  ; st_ctx 72, r0
+    ld_ctx  12, r0 ; ldi:8 #80, r1 ; ldi:8 #0, r3
+div_pdx:
+    cmp     r1, r0 ; blt div_pdx_d ; sub r1, r0 ; add #1, r3 ; bra div_pdx
+div_pdx_d:
+    ld_ctx  16, r0 ; ldi:8 #53, r1 ; ldi:8 #0, r2
+div_pdy:
+    cmp     r1, r0 ; blt div_pdy_d ; sub r1, r0 ; add #1, r2 ; bra div_pdy
+div_pdy_d:
+    ld_ctx  0, r9
+    ld_ctx  20, r0
+    mul     r2, r0 ; mov MDL, r10
+    lsr     #1, r2
+    mul     r2, r0 ; mov MDL, r11
+    bra     pyr_scan
+
+pyr_small:
+    ld_ctx  12, r0 ; lsr #4, r0 ; st r0, @(r14, #-40) ; st_ctx 64, r0
+    ld_ctx  16, r0 ; lsr #4, r0 ; st r0, @(r14, #-44) ; st_ctx 68, r0
+    ldi:8   #4, r0 ; st_ctx 72, r0
+    ld_ctx  0, r9
+    ld_ctx  20, r10 ; lsl #4, r10
+    ld_ctx  20, r11 ; lsl #3, r11
+    ldi:8   #16, r3
+
+pyr_scan:
+    ldi:32  #SCRATCH_HALO_GRID, r8
+    ldi:8   #0, r0 ; st_ctx 84, r0
+    ld      @(r14, #-44), r6
+    ldi:8   #0, r4
+pyr_y:
+    ld      @(r14, #-40), r7
+    mov     r9, r5
+pyr_x:
+    ldub    @r5, r0 ; mov r0, r2
+    mov     r3, r13 ; lsr #1, r13
+    ldub    @(r13, r5), r1 ; add r1, r2
+    cmp     r0, r1 ; ble pm1 ; mov r1, r0
+pm1:
+    mov     r11, r13 ; ldub @(r13, r5), r1 ; add r1, r2
+    cmp     r0, r1 ; ble pm2 ; mov r1, r0
+pm2:
+    mov     r3, r12 ; lsr #1, r12 ; add r12, r13
+    ldub    @(r13, r5), r1 ; add r1, r2
+    cmp     r0, r1 ; ble pm3 ; mov r1, r0
+pm3:
+    lsr     #2, r2
+    ldi:32  #SCRATCH_FILL_GRID, r12 ; mov r4, r13 ; stb r2, @(r13, r12)
+    ld_ctx  84, r1 ; add r2, r1 ; st_ctx 84, r1
+
+    ldi:32  #VA_HALO_OPT_LUT, r12 ; mov r0, r13 ; ldub @(r13, r12), r0
+    ld_ctx  56, r1 ; mul r1, r0 ; mov MDL, r0 ; lsr #8, r0
+    stb     r0, @r8 ; add #1, r8
+    ldi:32  #SCRATCH_HALO_CORE, r12 ; mov r4, r13 ; stb r0, @(r13, r12)
+
+    add     #1, r4
+    add     r3, r5
+    add2    #-1, r7 ; cmp #0, r7 ; bgt pyr_x
+    add     r10, r9 ; add2 #-1, r6 ; cmp #0, r6 ; bgt pyr_y
+
+    ld      @(r14, #-40), r0 ; ld @(r14, #-44), r1 ; mul r1, r0 ; mov MDL, r4
+    lsl     #7, r4
+    ld_ctx  84, r0
+    ldi:8   #0, r2
+    ldi:8   #128, r5
+div_ym:
+    cmp     r4, r0 ; blt div_skip ; sub r4, r0 ; or r5, r2
+div_skip:
+    lsr     #1, r4 ; lsr #1, r5 ; cmp #0, r5 ; bgt div_ym
+    ldi:8   #128, r0 ; add r0, r2 ; lsr #1, r2 ; st_ctx 84, r2
+
+    // two-scale halo psf: 1-pass core + 3-pass tail, 50/50 blend
+    ld      @(r14, #-24), r0 ; cmp #3, r0 ; blt.far chk_fill_blur
+    ld_ctx  56, r0 ; cmp #0, r0 ; beq.far chk_fill_blur
+    blur_5tap SCRATCH_HALO_CORE, SCRATCH_BLUR_LINE, 1, hcore
+    blur_5tap SCRATCH_HALO_GRID, SCRATCH_BLUR_LINE, 3, hwide
+    ld      @(r14, #-40), r0 ; ld @(r14, #-44), r1 ; mul r1, r0 ; mov MDL, r6
+    ldi:32  #SCRATCH_HALO_GRID, r8 ; ldi:32 #SCRATCH_HALO_CORE, r9
+hblend:
+    ldub    @r8, r0 ; ldub @r9, r1 ; add r1, r0 ; lsr #1, r0 ; stb r0, @r8
+    add     #1, r8 ; add #1, r9 ; add2 #-1, r6 ; cmp #0, r6 ; bgt hblend
+    ldi:32  #SCRATCH_HALO_GRID, r0 ; st_ctx 76, r0
+
+chk_fill_blur:
+    ld      @(r14, #-28), r0 ; cmp #0, r0 ; beq.far run_passes
+    blur_5tap SCRATCH_FILL_GRID, SCRATCH_BLUR_LINE, 3, x3f
+    ldi:32  #SCRATCH_FILL_GRID, r0 ; st_ctx 80, r0
+
+run_passes:
+    mov     r14, r4 ; ldi:8 #144, r0 ; sub r0, r4
+    ldi:32  #VA_YCC_SUB, r12 ; call @r12
+    jmp.far done_exit

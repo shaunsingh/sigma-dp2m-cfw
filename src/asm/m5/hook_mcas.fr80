@@ -1,0 +1,67 @@
+// 12-sector mcas hook @ 0x4E6424: copies live 18B primary mat from sdram shadow 0x80012E46 (avoids mmio 0x40100500 byte-read hazard)
+
+.include "m5_addrs.inc"
+
+    st      r8, @-r15
+    st      r9, @-r15
+    st      RP, @-r15
+
+    ldi:32  #SYM_STOCK_MCAS_PRE, r12
+    call    @r12
+
+    ld      @(r14, #16), r4
+    extsh   r4
+    ldi:32  #SYM_GET_JOB_CM, r12
+    call    @r12
+
+    cmp     #9, r4
+    blt     use_ident
+    ldi:8   #150, r0
+    cmp     r0, r4
+    bgt     use_ident
+
+    add2    #-9, r4
+    lsl     #9, r4
+
+    ldi:32  #SYM_COLORSPACE_RAM, r1
+    ld      @r1, r0
+    cmp     #2, r0
+    beq     use_argb
+    ldi:32  #VA_MCAS_SRGB, r8
+    add     r4, r8
+    bra     do_commit
+
+use_argb:
+    ldi:32  #VA_MCAS_ARGB, r8
+    add     r4, r8
+    bra     do_commit
+
+use_ident:
+    ldi:32  #VA_MCAS_IDENT, r8
+
+do_commit:
+    addsp   #-448
+    mov     r15, r9
+    mov     r9, r4
+    mov     r8, r5
+    ldi:20  #0x001AE, r6
+    ldi:32  #SYM_MEMCPY, r12
+    call    @r12
+
+    ldi:8   #0x14, r4
+    add     r9, r4
+    ldi:32  #SYM_MCAS_MAT_SHADOW, r5
+    ldi:8   #0x12, r6
+    ldi:32  #SYM_MEMCPY, r12
+    call    @r12
+
+    ldi:8   #1, r4
+    mov     r9, r5
+    ldi:32  #SYM_COMMIT_MCAS, r12
+    call    @r12
+
+    addsp   #448
+    ld      @r15+, RP
+    ld      @r15+, r9
+    ld      @r15+, r8
+    ret

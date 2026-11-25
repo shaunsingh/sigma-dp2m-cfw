@@ -1,0 +1,6 @@
+{
+  "files.associations": {
+    "*.fr80": "arm",
+    "src/asm/m5/*.inc": "arm"
+  }
+}

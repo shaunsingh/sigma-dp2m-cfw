@@ -768,6 +768,9 @@ mod tests {
             r
         });
         let prof = std::env::var_os("DP2M_PROF").is_some();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut labels = fr80::assemble_file_labels(&root.join("src/asm/m5/ycc_engine.fr80"), VA_YCC_SUB, &HashMap::new()).unwrap().1;
+        labels.insert(0, (VA_YCC_SUB, "<entry>".into()));
         let cm_c = 23 + 12 * 8 + 5;
         let groups = [("color", cm_c, 0), ("color fill=2", cm_c, 2), ("B&W toner", 151 + 13, 0)];
         let sizes = [(Ycc::synth(256, 128), Ycc::synth(256, 128)), (Ycc::synth(4704, 8), Ycc::synth(4704, 3136))];
@@ -804,11 +807,13 @@ mod tests {
                         line += &format!("  {:>9.1}  {:>3} ({})", per(rrun.steps), maxd, ndiff);
                     }
                     println!("{}", line);
-                    let mut hot: Vec<_> = (0u32..).zip(&hits).filter(|&(_, &n)| n > 0).collect();
-                    hot.sort_by_key(|&(_, &n)| std::cmp::Reverse(n));
-                    for (i, n) in hot.into_iter().take(24) {
-                        let va = VA_YCC_SUB + 2 * i;
-                        println!("      {:>7.2}  0x{:06x}  {}", per(*n), va, fr80::dis_one(&s2, va_off(va), va).1);
+                    // insns/pair per labelled block (a block runs to the next label)
+                    for (k, (va, name)) in labels.iter().enumerate() {
+                        let end = labels.get(k + 1).map_or(VA_SPATIAL_DRV, |l| l.0);
+                        let n: u64 = hits.get(((va - VA_YCC_SUB) / 2) as usize..((end - VA_YCC_SUB) / 2) as usize).map_or(0, |h| h.iter().sum());
+                        if per(n) >= 0.5 {
+                            println!("      {:>7.2}  0x{:06x}  {}", per(n), va, name);
+                        }
                     }
                 }
             }

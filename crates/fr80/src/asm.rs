@@ -397,7 +397,7 @@ fn parse_mem(op: &str, syms: &HashMap<String, i64>) -> Result<MemAddr, String> {
 }
 
 enum Item {
-    Label(String),
+    Label { loc: String, name: String },
     Bytes(Vec<u8>),
     Branch { loc: String, cc: u8, target: String },
     BranchFar { loc: String, cc: u8, target: String },
@@ -409,9 +409,23 @@ pub fn assemble_file(
     base_va: u32,
     extra_consts: &HashMap<String, i64>,
 ) -> Result<Vec<u8>, AsmError> {
+    assemble_file_labels(path, base_va, extra_consts).map(|(b, _)| b)
+}
+
+/// [`assemble_file`] plus every label's VA, in address order
+pub fn assemble_file_labels(
+    path: &Path,
+    base_va: u32,
+    extra_consts: &HashMap<String, i64>,
+) -> Result<(Vec<u8>, Vec<(u32, String)>), AsmError> {
     let src = fs::read_to_string(path)
         .map_err(|e| err(&path.display().to_string(), format!("read error: {}", e)))?;
-    assemble_with_base(&src, &path.display().to_string(), path.parent(), base_va, extra_consts)
+    let mut pp = Preproc::new(extra_consts);
+    pp.feed(&src, &path.display().to_string(), path.parent())?;
+    let (bytes, labels) = assemble_lines(&pp.lines, base_va, &pp.consts)?;
+    let mut labels: Vec<_> = labels.into_iter().map(|(l, va)| (va, l)).collect();
+    labels.sort();
+    Ok((bytes, labels))
 }
 
 pub fn assemble_sections(
@@ -444,7 +458,7 @@ pub fn assemble_sections(
     let mut out = HashMap::new();
     for (name, &va) in section_vas {
         let lines = buckets.remove(name).unwrap_or_default();
-        let bytes = assemble_lines(&lines, va, &pp.consts)?;
+        let bytes = assemble_lines(&lines, va, &pp.consts)?.0;
         out.insert(name.clone(), bytes);
     }
     Ok(out)
@@ -455,33 +469,23 @@ pub fn assemble_str(
     base_va: u32,
     extra_consts: &HashMap<String, i64>,
 ) -> Result<Vec<u8>, AsmError> {
-    assemble_with_base(src, "<inline>", None, base_va, extra_consts)
-}
-
-fn assemble_with_base(
-    src: &str,
-    name: &str,
-    base_dir: Option<&Path>,
-    base_va: u32,
-    extra_consts: &HashMap<String, i64>,
-) -> Result<Vec<u8>, AsmError> {
     let mut pp = Preproc::new(extra_consts);
-    pp.feed(src, name, base_dir)?;
-    assemble_lines(&pp.lines, base_va, &pp.consts)
+    pp.feed(src, "<inline>", None)?;
+    Ok(assemble_lines(&pp.lines, base_va, &pp.consts)?.0)
 }
 
 fn assemble_lines(
     lines: &[(String, String)],
     base_va: u32,
     consts: &HashMap<String, i64>,
-) -> Result<Vec<u8>, AsmError> {
+) -> Result<(Vec<u8>, HashMap<String, u32>), AsmError> {
     let mut items: Vec<Item> = Vec::new();
     for (loc, raw_line) in lines {
         let mut line = raw_line.as_str();
         while let Some(colon) = line.find(':') {
             let candidate = line[..colon].trim();
             if !candidate.is_empty() && !candidate.contains(char::is_whitespace) && candidate != "ldi" {
-                items.push(Item::Label(candidate.to_string()));
+                items.push(Item::Label { loc: loc.clone(), name: candidate.to_string() });
                 line = line[colon + 1..].trim();
             } else {
                 break;
@@ -497,8 +501,10 @@ fn assemble_lines(
     let mut pos = base_va;
     for it in &items {
         match it {
-            Item::Label(l) => {
-                labels.insert(l.clone(), pos);
+            Item::Label { loc, name } => {
+                if labels.insert(name.clone(), pos).is_some() {
+                    return Err(err(loc, format!("duplicate label '{}'", name)));
+                }
             }
             Item::Bytes(b) => pos += b.len() as u32,
             Item::Branch { .. } => pos += 2,
@@ -511,7 +517,7 @@ fn assemble_lines(
     let mut cur = base_va;
     for it in &items {
         match it {
-            Item::Label(_) => {}
+            Item::Label { .. } => {}
             Item::Bytes(b) => {
                 out.extend_from_slice(b);
                 cur += b.len() as u32;
@@ -554,7 +560,7 @@ fn assemble_lines(
             }
         }
     }
-    Ok(out)
+    Ok((out, labels))
 }
 
 fn encode_stmt(loc: &str, line: &str, syms: &HashMap<String, i64>) -> Result<Item, AsmError> {

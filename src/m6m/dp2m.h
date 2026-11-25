@@ -38,6 +38,7 @@ uint32_t stock_slot_same(uint32_t slot);                             /* 1 = cust
 void stock_still_apply(void);
 void stock_movie_apply(void);
 void stock_lv_status_cm(uint32_t cm);
+void stock_pb_info_cm(uint32_t cm);
 /* weight 0..9 (8+ bold), outline px (draws over thin strokes), narrow = 0.75 width; rect y >= 480 = line buffer only */
 uint32_t stock_text(uint32_t lang, const char *s, int32_t n, uint32_t px, uint32_t weight, uint32_t outline,
                     uint32_t narrow, const uint16_t *rect, uint32_t style, uint32_t z);

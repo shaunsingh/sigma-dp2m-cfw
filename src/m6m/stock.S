@@ -35,6 +35,7 @@ stock stock_still_apply,   0xA003D9FB
 stock stock_movie_apply,   0xA003E85B
 stock stock_get_iso,       0xA016F5AF
 stock stock_lv_status_cm,  0xA004C7BD
+stock stock_pb_info_cm,    0xA0047735
 stock stock_text,          0xA0042685
 stock stock_font_scale,    0xA004226D
 stock stock_disp_init,     0xA0168D0D

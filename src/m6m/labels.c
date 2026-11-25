@@ -262,8 +262,17 @@ const struct icon *osd_icon(uint32_t id) {
 HOOK_CALL(0xA016BC86, osd_icon, 0xA0042AAC);
 HOOK_CALL(0xA004C80A, osd_icon, 0xA0042AAC);
 
-// LV status color mode icon 0xA004C7BC has no case for films
+// color mode icon drawers without a film case; the label is dropped if the drawer bails before its lookup
 void lv_status_cm(uint32_t cm) {
     stock_lv_status_cm(osd_map(cm));
+    osd_label = 0;
 }
 HOOK_CALL(0xA0048A62, lv_status_cm, 0xA004C7BC);
+
+// playback detailed info (DISP mode 5); cm is the file's, from its info +0x17
+void pb_info_cm(uint32_t cm) {
+    stock_pb_info_cm(osd_map(cm));
+    osd_label = 0;
+}
+HOOK_CALL(0xA0048016, pb_info_cm, 0xA0047734);
+HOOK_CALL(0xA0047774, osd_icon, 0xA0042AAC);

@@ -78,16 +78,21 @@ HOOK_CALL(0xA00582C6, page_group, 0xA0058994);
 HOOK_CALL(0xA0058308, page_group, 0xA0058994);
 HOOK_CALL(0xA00584E8, page_group, 0xA0058994);
 
-// page list (menu state 0xA07F22D2 + 0x3C, initialized from the image): 0x0E 0x0F FILM 0x10..0x17
-HOOK_HALF(0xA07F2312, MENU_FILM_PAGE, 0x0010);
-HOOK_HALF(0xA07F2314, 0x0010, 0x0011);
-HOOK_HALF(0xA07F2316, 0x0011, 0x0012);
-HOOK_HALF(0xA07F2318, 0x0012, 0x0013);
-HOOK_HALF(0xA07F231A, 0x0013, 0x0014);
-HOOK_HALF(0xA07F231C, 0x0014, 0x0015);
-HOOK_HALF(0xA07F231E, 0x0015, 0x0016);
-HOOK_HALF(0xA07F2320, 0x0016, 0x0017);
-HOOK_HALF(0xA07F2322, 0x0017, 0x0000);
+// page lists 0x0E 0x0F FILM 0x10..0x17: menu entry (0xA0058A0A) copies the template at state + 0x14 over
+// the live list at + 0x3C, so both change and the copy grows to 11 pages (template slot 10 held factory page 0x18)
+#define PAGE(i, id)                                \
+    HOOK_HALF(0xA07F22E6 + 2 * (i), id, 0x0E + (i)); \
+    HOOK_HALF(0xA07F230E + 2 * (i), id, (i) < 10 ? 0x0E + (i) : 0)
+PAGE(2, MENU_FILM_PAGE);
+PAGE(3, 0x10);
+PAGE(4, 0x11);
+PAGE(5, 0x12);
+PAGE(6, 0x13);
+PAGE(7, 0x14);
+PAGE(8, 0x15);
+PAGE(9, 0x16);
+PAGE(10, 0x17);
+HOOK_HALF(0xA0058A12, 0x2216, 0x2214);
 
 // page stepping wraps at index 10, tab strip draws 11 tabs 52 px apart
 HOOK_HALF(0xA005868A, 0x210A, 0x2109);

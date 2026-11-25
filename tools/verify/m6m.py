@@ -18,6 +18,7 @@ NV_RESERVED = (stock.NV_BLOCK + 0x04, stock.NV_BLOCK + 0x14)  # zero-default byt
 LV_DIRTY = (0xA07B1398, 0xA07B139C)  # LV refresh flags, set by the paper setters
 LV_CMCM, LV_MONO_Q7, LV_KNOTS = 1, 2, 4
 PAPER_NV = {1: "color_paper", 2: "bw_paper", 3: "lut_slot"}
+PAGE_RESET, PAGE_LIST = 0xA0058A0A, 0xA07F230E  # menu entry copies the page template (state + 0x14) to the live list
 
 
 @dataclass(frozen=True)
@@ -98,6 +99,9 @@ def check_menus(b: Build, r: Report) -> None:
         r.check(bad is None, f"{name}: {len(exp)} rows = catalog.c" + (f" (row {bad} differs)" if bad is not None else ""))
     subs = {row.id: ui.menu_table(m, row.id) for row in ui.rows(m, gen[film_page])}
     r.check(all(subs.values()), f"Film page submenus resolve {[hex(k) for k in subs]}")
+    m.wr(PAGE_LIST, bytes(22))
+    m.call(PAGE_RESET)
+    r.eq(list(struct.unpack(">11H", m.rd(PAGE_LIST, 22))), [0x0E, 0x0F, film_page, *range(0x10, 0x18)], "menu page list after the entry reset 0xA0058A0A")
 
     fl = films(b)
     for cls in range(4):

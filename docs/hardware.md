@@ -218,7 +218,7 @@ The 2 KB NOR record uses `0x00..0x3E3`; `0x3E4..0x7FF` has no accessor. C4/C5 li
 - QS commits the setter on every step and draws only icons (w1 low for the value, w2 low in the strip). The main menu commits on OK or right and shows the w2-low icon, or the sid text when it is 0.
 - Icons: `0xA0042AAC(id)` for ids 1..0x1A1 (table `0xA07DD784`); 8 bpp indices 0..16 (0 transparent, 1 white fill, 16 black outline), blitted by `0xA0040DD8` into the index plane `0xA2130000` (CLUT `0xA07DEC54`).
 - Text: `0xA0042684`, engine 0 ("BP4" outline fonts) only, line buffer `0xA093A514`, about 1 M instructions per label.
-- Film page: inserted as menu page 2 in the page list (menu state `0xA07F22D2 + 0x3C`); page-to-tab-group `0xA0058994` is hooked; tab geometry `0xA04F3100` (stock 56 px per tab, 52 px with 11 pages).
+- Film page: inserted as menu page 2 in the page template and live list (menu state `0xA07F22D2 + 0x14` / `+ 0x3C`; menu entry copies the template, now 11 pages); page-to-tab-group `0xA0058994` is hooked; tab geometry `0xA04F3100` (stock 56 px per tab, 52 px with 11 pages).
 
 See [research/m6m-ui.md](research/m6m-ui.md).
 

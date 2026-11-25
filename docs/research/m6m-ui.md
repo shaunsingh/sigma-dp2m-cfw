@@ -68,8 +68,9 @@ A table ends with an all-zero row. Shooting and Setup pages clip rows beyond 6.
 
 ### Menu state and pages
 
-- State struct `0xA07F22D2`: `+4` page index, `+8` row cursor (`0xA07F22DA`), `+0x3C` page list (halfword menu ids, zero terminated). A second list at `+0x14` was noted for service mode; not re-verified.
-- Stock page list: `0x0E 0x0F 0x10 0x11 | 0x12 0x13 | 0x14 0x15 0x16 0x17` (shooting 0..3, playback 4..5, setup 6..9). The list is part of the image, so dp2m rewrites it in place.
+- State struct `0xA07F22D2`: `+4` page index, `+8` row cursor (`0xA07F22DA`), `+0x3C` live page list (halfword menu ids), `+0x14` page template (`0x0E..0x21`, 20 ids including factory pages 0x18..0x21).
+- `0xA0058A0A` copies `0x14` bytes (10 pages) from the template to the live list. It runs on menu entry (`0xA005883A`) and in the menu handler (`0xA005863C`), so a change to the live list alone is lost on the first menu open.
+- Stock page list: `0x0E 0x0F 0x10 0x11 | 0x12 0x13 | 0x14 0x15 0x16 0x17` (shooting 0..3, playback 4..5, setup 6..9). dp2m rewrites the template and the live list in place and makes the copy 11 pages (`movs r2,#0x16` at `0xA0058A12`).
 - `0xA0058994(page)` maps a page to its tab group. Called from `0xA005811C`, `0xA0058144`, `0xA0058204`, `0xA00582C6`, `0xA0058308`, `0xA00584E8`.
 - Page stepping wraps at index 9 (`movs r1,#9` at `0xA005868A`, `0xA00586A0`, `0xA005871C`, `0xA0058734`). The tab strip loops over 10 tabs (`0xA0058454`) at a 56 px pitch (`adds r0,#0x38` at `0xA005844A`).
 - Exposure mode 8 pins the menu to the playback pages (`cmp`/`movs` with 4 and 5 at `0xA0058806..0xA0058822`).

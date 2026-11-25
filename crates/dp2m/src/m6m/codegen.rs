@@ -36,6 +36,7 @@ const ICON_LABEL_MODE: u32 = 0x1000;
 const ICON_LABEL_WIDGET: u32 = 0x1400;
 
 const STOCK_COLOR_MENU: u32 = 0xA07E_BFEC;
+const STOCK_EXPO_MENU: u32 = 0xA07E_C8AC;
 const STOCK_GRID_MENU: u32 = 0xA07E_EFCC;
 const STOCK_ISO_MENU_1EV: u32 = 0xA07E_AC8C;
 const STOCK_ISO_MENU_3EV: u32 = 0xA07E_ADAC;
@@ -226,6 +227,28 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
     }
     menus.push((0x28, ".data.menu", bkt_rows));
 
+    // exposure modes C4/C5 (9, 10) as copies of C3; the "C4"/"C5" strings label their icons like the stock "C1" glyphs
+    let expo = stock_rows(s3, STOCK_EXPO_MENU);
+    let c3 = *expo.iter().find(|w| w[4] == 7).ok_or("stock exposure menu 0x05 has no C3 row")?;
+    let mut expo_rows: Vec<Row> = expo.iter().copied().map(Row::stock).collect();
+    let mut c_label = [0; 2];
+    for (k, (text, label)) in [("Custom 4", "C4"), ("Custom 5", "C5")].into_iter().enumerate() {
+        let sid = st.add(text);
+        c_label[k] = st.add(label);
+        let si = c_label[k] - SID0;
+        expo_rows.push(Row::stock([
+            c3[0],
+            0x0100_0000 | (ICON_LABEL_L + si),
+            (ICON_LABEL_MODE + si) << 16 | (ICON_LABEL_S + si),
+            sid << 16,
+            9 + k as u32,
+            c3[5],
+            c3[6],
+            c3[7],
+        ]));
+    }
+    menus.push((0x05, ".data.menu", expo_rows));
+
     let looks = lv_looks(s3, pack)?;
     let films = film_infos(pack, cfg);
 
@@ -236,6 +259,8 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
         ("MENU_PAPER_CLS0", MENU_PAPER_CLS0),
         ("MENU_FILM_PAGE", MENU_FILM_PAGE),
         ("SID_PAPER_TITLE", paper_title),
+        ("SID_C4", c_label[0]),
+        ("SID_C5", c_label[1]),
         ("ICON_LABEL_L", ICON_LABEL_L),
         ("ICON_LABEL_S", ICON_LABEL_S),
         ("ICON_LABEL_OSD", ICON_LABEL_OSD),

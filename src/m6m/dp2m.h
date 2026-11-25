@@ -1,7 +1,12 @@
 #ifndef DP2M_H
 #define DP2M_H
 
+#include <stddef.h>
 #include <stdint.h>
+
+/* rt.c */
+void *memcpy(void *d, const void *s, size_t n);
+void *memset(void *d, int c, size_t n);
 
 /* stock M6M ABI (S3, Thumb unless noted); symbols are absolute, defined in stock.S */
 uint32_t stock_get_cm(void);
@@ -21,6 +26,14 @@ uint32_t stock_accel_x(void);
 uint32_t stock_accel_y(void);
 void stock_b2y_set_mat(void *mat);                                   /* ARM */
 void stock_b2y_set_gamma(uint32_t ch, const void *lut, uint32_t sz); /* ARM */
+const void *stock_icon(uint32_t id);                                 /* {bits, u16 w, u16 h} or 0 */
+void stock_nor_write(uint32_t off, uint32_t n, const void *buf);     /* NOR bank 0 read-modify-write */
+void stock_cur_backup(void);                                         /* shooting settings -> pre-custom backup */
+void stock_cur_restore(void);                                        /* pre-custom backup -> shooting settings */
+void stock_cur_apply(void);                                          /* re-apply the shooting settings */
+uint32_t stock_slot_same(uint32_t slot);                             /* 1 = custom slot matches the shooting settings */
+void stock_still_apply(void);
+void stock_movie_apply(void);
 
 #define REG8(a)  (*(volatile uint8_t *)(a))
 #define REG16(a) (*(volatile uint16_t *)(a))

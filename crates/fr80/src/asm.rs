@@ -412,12 +412,15 @@ pub fn assemble_file(
     assemble_file_labels(path, base_va, extra_consts).map(|(b, _)| b)
 }
 
+/// Assembled bytes plus every label's VA, in address order.
+pub type Labelled = (Vec<u8>, Vec<(u32, String)>);
+
 /// [`assemble_file`] plus every label's VA, in address order
 pub fn assemble_file_labels(
     path: &Path,
     base_va: u32,
     extra_consts: &HashMap<String, i64>,
-) -> Result<(Vec<u8>, Vec<(u32, String)>), AsmError> {
+) -> Result<Labelled, AsmError> {
     let src = fs::read_to_string(path)
         .map_err(|e| err(&path.display().to_string(), format!("read error: {}", e)))?;
     let mut pp = Preproc::new(extra_consts);
@@ -576,13 +579,13 @@ fn encode_stmt(loc: &str, line: &str, syms: &HashMap<String, i64>) -> Result<Ite
         }
         return Ok(Item::JmpFar { loc: loc.to_string(), target: ops[0].clone() });
     }
-    if let Some(base) = mnem.strip_suffix(".far") {
-        if let Some(cc) = cc_from_name(base) {
-            if ops.len() != 1 {
-                return Err(e("expected 1 target label".into()));
-            }
-            return Ok(Item::BranchFar { loc: loc.to_string(), cc, target: ops[0].clone() });
+    if let Some(base) = mnem.strip_suffix(".far")
+        && let Some(cc) = cc_from_name(base)
+    {
+        if ops.len() != 1 {
+            return Err(e("expected 1 target label".into()));
         }
+        return Ok(Item::BranchFar { loc: loc.to_string(), cc, target: ops[0].clone() });
     }
     if let Some(cc) = cc_from_name(&mnem) {
         if ops.len() != 1 {

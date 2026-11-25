@@ -210,62 +210,60 @@ pub fn build_m5(fw_raw: &[u8], pack: &FilmPack, asm_dir: &Path, cfg: &Config) ->
     let ident_rec = build_mcas_struct(&ident_mck, stock_mcb, stock_mcid);
     s2[va_off(VA_MCAS_IDENT)..va_off(VA_MCAS_IDENT) + 0x1AE].copy_from_slice(&ident_rec);
 
-    fn write_mode(
-        s2: &mut [u8],
-        stock_mcb: &[u8],
-        stock_mcid: &[u8],
-        idx: usize,
-        cmcm: &[i16; 9],
-        lut_s: &[u8],
-        lut_a: &[u8],
+    struct Mode<'a> {
+        cmcm: [i16; 9],
+        lut_s: &'a [u8],
+        lut_a: &'a [u8],
         meta: [u8; 4],
-        mck_s: Option<&[i16; 108]>,
-        mck_a: Option<&[i16; 108]>,
-    ) {
+        /// 12-sector MCAS (sRGB, AdobeRGB); color modes only
+        mcas: Option<(&'a [i16; 108], &'a [i16; 108])>,
+    }
+    let write_mode = |s2: &mut [u8], idx: usize, m: &Mode| {
         let co = va_off(VA_CMCM_TABLE + (idx as u32) * 32);
-        for k in 0..9 {
-            s2[co + k * 2..co + k * 2 + 2].copy_from_slice(&cmcm[k].to_be_bytes());
+        for (k, v) in m.cmcm.iter().enumerate() {
+            s2[co + k * 2..co + k * 2 + 2].copy_from_slice(&v.to_be_bytes());
         }
         let ls = va_off(VA_LUTS_SRGB + (idx as u32) * 4096);
         let la = va_off(VA_LUTS_ARGB + (idx as u32) * 4096);
-        s2[ls..ls + 4096].copy_from_slice(&lut_s[0..4096]);
-        s2[la..la + 4096].copy_from_slice(&lut_a[0..4096]);
+        s2[ls..ls + 4096].copy_from_slice(&m.lut_s[..4096]);
+        s2[la..la + 4096].copy_from_slice(&m.lut_a[..4096]);
         let mo = va_off(VA_MODE_META + (idx as u32) * 4);
-        s2[mo..mo + 4].copy_from_slice(&meta);
-        if idx < 142 {
-            if let (Some(ms), Some(ma)) = (mck_s, mck_a) {
-                let bs = build_mcas_struct(ms, stock_mcb, stock_mcid);
-                let ba = build_mcas_struct(ma, stock_mcb, stock_mcid);
-                let mso = va_off(VA_MCAS_SRGB + (idx as u32) * 0x200);
-                let mao = va_off(VA_MCAS_ARGB + (idx as u32) * 0x200);
-                s2[mso..mso + 0x1AE].copy_from_slice(&bs);
-                s2[mao..mao + 0x1AE].copy_from_slice(&ba);
-            }
+        s2[mo..mo + 4].copy_from_slice(&scale_meta(m.meta, cfg));
+        if idx < 142
+            && let Some((ms, ma)) = m.mcas
+        {
+            let mso = va_off(VA_MCAS_SRGB + (idx as u32) * 0x200);
+            let mao = va_off(VA_MCAS_ARGB + (idx as u32) * 0x200);
+            s2[mso..mso + 0x1AE].copy_from_slice(&build_mcas_struct(ms, stock_mcb, stock_mcid));
+            s2[mao..mao + 0x1AE].copy_from_slice(&build_mcas_struct(ma, stock_mcb, stock_mcid));
         }
-    }
+    };
 
     // modes 9..13 (dp2q/sdqh) + 14..18 (optical mono)
-    let q_meta: [([i16; 9], &[i16; 108], &[u8], &[u8], [u8; 4]); 10] = [
-        (pack.dp2q_cmcm_4[0], &ident_mck, stock_std_lut, &argb_std_lut, [24, 0, 48, 0]),
-        (pack.dp2q_cmcm_4[1], &ident_mck, stock_std_lut, &argb_std_lut, [30, 0, 72, 0]),
-        (pack.dp2q_cmcm_4[2], &ident_mck, stock_std_lut, &argb_std_lut, [26, 0, 88, 2]),
-        (pack.dp2q_cmcm_4[3], &ident_mck, stock_std_lut, &argb_std_lut, [26, 0, 48, 0]),
-        (eye_q10, &pack.dp2q_to_mcas, stock_std_lut, &argb_std_lut, [32, 0, 80, 0]),
-        (eye_q10, &ident_mck, stock_bw_lut, stock_bw_lut, [38, 2, 56, 1]),
-        (eye_q10, &ident_mck, stock_bw_lut, stock_bw_lut, [38, 2, 56, 1]),
-        (eye_q10, &ident_mck, stock_bw_lut, stock_bw_lut, [40, 2, 60, 1]),
-        (eye_q10, &ident_mck, stock_bw_lut, stock_bw_lut, [42, 2, 64, 1]),
-        (eye_q10, &ident_mck, stock_bw_lut, stock_bw_lut, [36, 2, 52, 1]),
+    let color = |cmcm, mck, meta| Mode { cmcm, lut_s: stock_std_lut, lut_a: &argb_std_lut, meta, mcas: Some((mck, mck)) };
+    let mono = |meta| Mode { cmcm: eye_q10, lut_s: stock_bw_lut, lut_a: stock_bw_lut, meta, mcas: Some((&ident_mck, &ident_mck)) };
+    let quattro = [
+        color(pack.dp2q_cmcm_4[0], &ident_mck, [24, 0, 48, 0]),
+        color(pack.dp2q_cmcm_4[1], &ident_mck, [30, 0, 72, 0]),
+        color(pack.dp2q_cmcm_4[2], &ident_mck, [26, 0, 88, 2]),
+        color(pack.dp2q_cmcm_4[3], &ident_mck, [26, 0, 48, 0]),
+        color(eye_q10, &pack.dp2q_to_mcas, [32, 0, 80, 0]),
+        mono([38, 2, 56, 1]),
+        mono([38, 2, 56, 1]),
+        mono([40, 2, 60, 1]),
+        mono([42, 2, 64, 1]),
+        mono([36, 2, 52, 1]),
     ];
-    for (idx, (cm, mk, ls, la, meta)) in q_meta.iter().enumerate() {
-        write_mode(&mut s2, stock_mcb, stock_mcid, idx, cm, ls, la, scale_meta(*meta, cfg), Some(*mk), Some(*mk));
+    for (idx, m) in quattro.iter().enumerate() {
+        write_mode(&mut s2, idx, m);
     }
 
     // modes 19..150 (132 color recipes)
     for (c_i, r) in pack.color_recipes.iter().enumerate() {
         let ls = calibrate_lut_dp2m(&r.lut_srgb_raw, stock_std_lut);
         let la = calibrate_lut_dp2m(&r.lut_argb_raw, stock_std_lut);
-        write_mode(&mut s2, stock_mcb, stock_mcid, 10 + c_i, &r.cmcm_q10, &ls, &la, scale_meta(r.meta, cfg), Some(&r.mck_srgb_q10), Some(&r.mck_argb_q10));
+        let m = Mode { cmcm: r.cmcm_q10, lut_s: &ls, lut_a: &la, meta: r.meta, mcas: Some((&r.mck_srgb_q10, &r.mck_argb_q10)) };
+        write_mode(&mut s2, 10 + c_i, &m);
         let so = va_off(VA_LUT3D_SRGB + (c_i * LUT3D_STRIDE) as u32);
         let ao = va_off(VA_LUT3D_ARGB + (c_i * LUT3D_STRIDE) as u32);
         s2[so..so + 4131].copy_from_slice(&r.lut3d_srgb_q1);
@@ -276,15 +274,15 @@ pub fn build_m5(fw_raw: &[u8], pack: &FilmPack, asm_dir: &Path, cfg: &Config) ->
     for (bw_i, r) in pack.bw_recipes.iter().enumerate() {
         let ls = calibrate_lut_dp2m(&r.lut_srgb_raw, stock_std_lut);
         let la = calibrate_lut_dp2m(&r.lut_argb_raw, stock_std_lut);
-        write_mode(&mut s2, stock_mcb, stock_mcid, 142 + bw_i, &r.cmcm_q10, &ls, &la, scale_meta(r.meta, cfg), None, None);
+        write_mode(&mut s2, 142 + bw_i, &Mode { cmcm: r.cmcm_q10, lut_s: &ls, lut_a: &la, meta: r.meta, mcas: None });
         let to = va_off(VA_BW_TONER_40 + (bw_i * 512) as u32);
         s2[to..to + 512].copy_from_slice(&r.toner_cb_cr);
     }
 
     // modes 191..198 (sd lut slots)
-    let sd_meta = scale_meta(cfg.m5.sd_lut_defaults.meta(), cfg);
+    let sd = Mode { cmcm: eye_q10, lut_s: stock_std_lut, lut_a: &argb_std_lut, meta: cfg.m5.sd_lut_defaults.meta(), mcas: None };
     for s_i in 0..8 {
-        write_mode(&mut s2, stock_mcb, stock_mcid, 182 + s_i, &eye_q10, stock_std_lut, &argb_std_lut, sd_meta, None, None);
+        write_mode(&mut s2, 182 + s_i, &sd);
     }
 
     if s2[va_off(0x0080_0000)..] != s2_stock[va_off(0x0080_0000)..] {
@@ -604,10 +602,7 @@ pub fn verify_m5(s2: &[u8]) -> Result<(), String> {
                 em.rp
             });
             e.set_handler(0x004B_2088, move |em| {
-                let mut got = [0u8; 18];
-                for i in 0..18 {
-                    got[i] = em.r8(em.r[5] + 0x14 + i as u32);
-                }
+                let got: [u8; 18] = core::array::from_fn(|i| em.r8(em.r[5] + 0x14 + i as u32));
                 so.set(em.r[4] == 1 && got == sentinel);
                 em.rp
             });

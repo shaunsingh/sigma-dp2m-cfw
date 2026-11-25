@@ -155,10 +155,10 @@ impl<'a> Emulator<'a> {
                 pc = next_pc;
                 continue;
             }
-            if let Some((base, counts)) = &mut self.prof {
-                if let Some(c) = counts.get_mut((pc.wrapping_sub(*base) / 2) as usize) {
-                    *c += 1;
-                }
+            if let Some((base, counts)) = &mut self.prof
+                && let Some(c) = counts.get_mut((pc.wrapping_sub(*base) / 2) as usize)
+            {
+                *c += 1;
             }
             let op = self.fetch16(pc);
             pc = pc.wrapping_add(2);

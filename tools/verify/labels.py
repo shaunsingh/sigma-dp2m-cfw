@@ -10,13 +10,14 @@ import numpy as np
 from tools.re import stock, ui
 from tools.re.emu import STACK, SCRATCH, Machine
 
-from .harness import Build, Report, bl_target
+from .harness import Build, Report
 
 DIM = {"L": (110, 70), "S": (54, 42), "OSD": (76, 26), "MODE": (51, 31), "WIDGET": (35, 20)}  # stock tile size per class
 STOCK_IDS = {"L": [0x10E, 0x10F, 0x115, 0x113], "S": [0x159, 0x15A, 0x160], "OSD": [0x27, 0x28, 0x2E], "MODE": [0xB4, 0xB6], "WIDGET": [0xB7, 0xB9]}
 NAMES = ["Velvia 100", "FOV Classic Yellow", "Kodak Tri-X 400", "Teal & Orange", "Cinema", "Portra 800 +2", "Mono Orange #21",
          "SD Custom LUT", "Rollei Retro 80S", "Fujicolor C200", "Zebras (95% IRE)", "Fill -0.5 (Contrast)"]
 TOKENS = {"Red": "C4", "Yellow": "C5", "White": "M2", "Black": "P"}  # short test strings for the MODE / WIDGET classes
+TOKEN_VA = SCRATCH + 0x10000
 GET_CM, GET_ISO = stock.GET_CM | 1, 0xA016F5AF
 STATE = stock.QS_STATE
 LABELS_BOOT_SITE = 0xA01689BE  # boot call the label cache reset hooks
@@ -27,7 +28,7 @@ def run(b: Build, r: Report) -> None:
     b.require("label_icon", "cache", "arena", "lv_status_cm")
     for site, sym in ((stock.ICON_GET + 2, "icon_hook"), (stock.QS_STRIP_CHECK, "qs_strip_hook")):
         if sym in b.syms:
-            r.eq(bl_target(b.img, site), b.sym(sym), f"BL @ {site:#x} -> {sym}")
+            r.eq(b.img.bl_target(site), b.sym(sym), f"BL @ {site:#x} -> {sym}")
     m = Machine(b.img)
     cls = {k: b.cat[f"ICON_LABEL_{k}"] for k in DIM}
     arena = b.syms["arena"]
@@ -40,8 +41,8 @@ def run(b: Build, r: Report) -> None:
     strings = list(b.gen.strings)
     for k, (orig, tok) in enumerate(TOKENS.items()):
         i = strings.index(orig)
-        m.wr(SCRATCH + 0x40 * k, tok.encode() + b"\0")
-        m.w32(table + 4 * i, SCRATCH + 0x40 * k)
+        m.wr(TOKEN_VA + 0x40 * k, tok.encode() + b"\0")
+        m.w32(table + 4 * i, TOKEN_VA + 0x40 * k)
         strings[i] = tok
 
     def icon(i: int) -> tuple[int, int, np.ndarray] | None:
@@ -52,14 +53,13 @@ def run(b: Build, r: Report) -> None:
         return res, p, np.frombuffer(m.rd(p, w * h), np.uint8).reshape(h, w).copy()
 
     allowed = (STACK, bss, (stock.LINE_BUF, stock.LINE_BUF + 0x28000), (stock.ICON_RESULT, stock.ICON_RESULT + 8),
-               (stock.FONT_SCALE, stock.FONT_SCALE + 8), (0xA07DD760, 0xA07DD768),  # restored OSD dirty rect
-               (0xA2304C00, 0xA2308C00), (0xA2346400, 0xA2366400))  # glyph raster, font engine workspace
+               (stock.FONT_SCALE, stock.FONT_SCALE + 8), (stock.OSD_DIRTY, stock.OSD_DIRTY + 8), stock.GLYPH_RASTER, stock.FONT_WORK)
     sheets: list[tuple[str, np.ndarray]] = []
     with m.writes(*allowed) as log:
         bad = [i for ids in STOCK_IDS.values() for i in ids if (x := icon(i)) is None or x[0] != stock.ICON_RESULT]
         r.eq(bad, [], "stock icon ids pass through the hooked getter")
         m.wr(stock.FONT_SCALE, struct.pack(">II", 5, 7))  # a screen's width scale must not leak into tiles
-        dirty0 = m.rd(0xA07DD760, 16)
+        dirty0 = m.rd(stock.OSD_DIRTY, 16)
         for c, base in cls.items():
             sheets += [(f"stock {i:#x}", icon(i)[2]) for i in STOCK_IDS[c]]
             for name in (list(TOKENS.values()) + ["Cinema"]) if c in ("MODE", "WIDGET") else NAMES:
@@ -78,7 +78,7 @@ def run(b: Build, r: Report) -> None:
                 r.check(ok, f"{c} {name!r}: {w}x{h} tile in arena, cached, levels 0..16 with fill & outline, outline gaps {gap}")
                 sheets.append((name, t))
         r.eq(struct.unpack(">II", m.rd(stock.FONT_SCALE, 8)), (5, 7), "font scale restored")
-        r.check(m.rd(0xA07DD760, 16) == dirty0, "OSD dirty rects unchanged")
+        r.check(m.rd(stock.OSD_DIRTY, 16) == dirty0, "OSD dirty rects unchanged")
     r.eq(sorted({hex(a) for a, _ in log})[:8], [], "label rendering writes only allowed ranges")
 
     def onscreen(mm: Machine) -> bytes:
@@ -90,9 +90,9 @@ def run(b: Build, r: Report) -> None:
     after, fresh = onscreen(m), onscreen(Machine(b.img))
     r.check(after == fresh and any(after), "stock text drawn after label renders matches a fresh camera")
     if "labels_boot" in b.syms:
-        r.eq(bl_target(b.img, LABELS_BOOT_SITE), b.sym("labels_boot"), f"BL @ {LABELS_BOOT_SITE:#x} -> labels_boot")
+        r.eq(b.img.bl_target(LABELS_BOOT_SITE), b.sym("labels_boot"), f"BL @ {LABELS_BOOT_SITE:#x} -> labels_boot")
         cache = b.sym("cache")
-        m.stub(bl_target(b.stock, LABELS_BOOT_SITE))
+        m.stub(b.stock.bl_target(LABELS_BOOT_SITE))
         m.wr(cache, struct.pack(">II", LABEL_MAGIC, 0x1234) + struct.pack(">I", 0xDEADBEEF) * 16)
         m.call(b.sym("labels_boot"))
         c = struct.unpack(">18I", m.rd(cache, 72))
@@ -104,9 +104,8 @@ def run(b: Build, r: Report) -> None:
         bad = [i for i in (0x1800 + 1, cls["L"] + len(strings), 0x1FFF) if m.call(stock.ICON_GET, i)]
         r.eq(bad, [], "invalid label ids return NULL")
     r.eq(sorted({hex(a) for a, _ in log})[:8], [], "arena reset writes only allowed ranges")
-    pal = ui.palette(b.img)
     if r.artifacts:
-        ui.contact_sheet(sheets, r.artifacts / "labels.png", pal, cols=12, scale=2)
+        ui.contact_sheet(sheets, r.artifacts / "labels.png", ui.palette(b.img), cols=12, scale=2)
     check_ui(b, r, m, strings)
 
 

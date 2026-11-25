@@ -13,6 +13,7 @@ ICON_TBL, ICON_MAX = 0xA07DD784, 0x1A1  # 12 B per id: ARM getters of bits, w, h
 CLUT, CLUT_N = 0xA07DEC54, 0xDB  # [A, Y, Cb, Cr], loaded by 0xA00434EC
 ICON_HI = 0xC8  # enabled rows blit mode 1: index = hi + 1 - v (v 1 = white fill, 16 = black outline)
 OSD = 0xA2130000  # 640x480 8bpp index plane
+OSD_DIRTY = 0xA07DD760  # dirty rects merged by the OSD flush
 BLIT = 0xA0040DD8  # (src, x, y, w, [sp] h, hi, lo, transparent, mode)
 FILL_BOX = 0xA0041198
 QS_STATE = 0xA07DF008  # +4 page, +6 strip scroll, +8 + 2 * page focused slot
@@ -29,6 +30,8 @@ STRIP_BG_CLEAR = 0xA0044E48  # waits on the 2D engine
 TEXT_DRAW = 0xA0042684  # (lang, str, maxlen, px, [sp] 5, 0, 1, rect *, style, 0); rect y >= 480 is offscreen
 LINE_BUF, LINE_W, LINE_ROWS = 0xA093A514, 640, 256  # coverage 1..15, 1 = solid
 FONT_SCALE = 0xA07DD774  # (num, den), set per screen
+GLYPH_RASTER = (0xA2304C00, 0xA2308C00)
+FONT_WORK = (0xA2346400, 0xA2366400)  # engine workspace (literal at 0xA00421C4)
 GET_LANG = 0xA0167DD4
 UITRON = (0xA0070000, 0xA0076000)  # kernel service calls
 

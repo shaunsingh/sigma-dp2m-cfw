@@ -16,7 +16,7 @@ import numpy as np
 from . import liveness, nvram, stock, ui
 from .disasm import Annotator
 from .emu import EmuError, Machine
-from .image import BASE, END, FLAGS, FPGA, Image, Package, load_syms
+from .image import BASE, END, FLAGS, FPGA, PKG_MAGIC, Image, Package, Sym, load_syms
 from .xref import CALLS, KINDS, Index, fn_start
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -51,7 +51,7 @@ class Ctx:
         return Image.load(self.a.image) if self.a.image else self.stock
 
     @cached_property
-    def syms(self) -> dict:
+    def syms(self) -> dict[str, Sym]:
         p = self.a.syms or (Path(self.a.image).parent / "m6m" / "m6m.syms" if self.a.image else None)
         return load_syms(p) if p and Path(p).exists() else {}
 
@@ -85,7 +85,10 @@ class Ctx:
 
 def cmd_package(c: Ctx) -> None:
     path = Path(c.a.path or c.a.fw)
-    pkg = Package(path.read_bytes())
+    raw = path.read_bytes()
+    if not raw.startswith(PKG_MAGIC):
+        raise SystemExit(f"{path}: not a DP2M updater package")
+    pkg = Package(raw)
     ref = Package(Path(c.a.fw).read_bytes()) if path.resolve() != Path(c.a.fw).resolve() else None
     print(f"{path.name}: {len(pkg.raw)} B  version {pkg.version} {pkg.versions}  date {pkg.date}  m6m @ {pkg.c78_off:#x}")
     print(f"flags {pkg.flags:#04x}: " + "; ".join(f"b{b} {d}" for b, d in FLAGS.items() if pkg.flags >> b & 1))
@@ -192,7 +195,7 @@ def cmd_text(c: Ctx) -> None:
     print(f"ink x {x0}..{x1} y {y0}..{y1} ({x1 - x0 + 1}x{y1 - y0 + 1}) levels {np.unique(cov).tolist()}")
     if c.a.out:
         crop = cov[max(0, y0 - 2) : y1 + 3, max(0, x0 - 2) : x1 + 3]
-        ui.contact_sheet([(repr(c.a.text), crop)], c.a.out, ui.palette(c.img), cols=1, scale=c.a.scale)
+        ui.contact_sheet([(repr(c.a.text), crop)], c.a.out, ui.palette(c.img), cols=1, scale=c.a.scale, cap=(4096, 1024))
         print(f"wrote {c.a.out}")
 
 
@@ -203,11 +206,11 @@ def cmd_liveness(c: Ctx) -> None:
     dr = lv.dead_ranges()
     log(f"functions {len(lv.ents)}, live {len(lv.live)}, dead extents {len(dr)} / {sum(b - a for a, b, _ in dr)} B")
     rows = liveness.candidates(c.img, lv, base, c.a.min, dead, tuple(c.a.used))
-    out = open(c.a.out, "w") if c.a.out else sys.stdout
-    with out:
-        print(liveness.TSV_HEADER, file=out)
-        for r in rows:
-            print(r.tsv(), file=out)
+    tsv = "".join(f"{line}\n" for line in (liveness.TSV_HEADER, *(r.tsv() for r in rows)))
+    if c.a.out:
+        c.a.out.write_text(tsv)
+    else:
+        sys.stdout.write(tsv)
     log(f"{len(rows)} candidates, {sum(r.end - r.start for r in rows)} B" + (f" -> {c.a.out}" if c.a.out else ""))
 
 
@@ -226,54 +229,59 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--syms", type=Path, help="m6m.syms (default: <image dir>/m6m/m6m.syms)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p = sub.add_parser("package", help="package header, flags & segments (vs --fw)")
+    def add(fn, help: str) -> argparse.ArgumentParser:
+        p = sub.add_parser(fn.__name__.removeprefix("cmd_"), help=help)
+        p.set_defaults(fn=fn)
+        return p
+
+    p = add(cmd_package, "package header, flags & segments (vs --fw)")
     p.add_argument("path", nargs="?", type=Path)
-    p = sub.add_parser("dis", help="disassemble with literal/call annotation")
+    p = add(cmd_dis, "disassemble with literal/call annotation")
     p.add_argument("va", type=num)
     p.add_argument("end", type=num, nargs="?")
     p.add_argument("-n", type=int, default=40, help="instructions when END is omitted")
     p.add_argument("--arm", action="store_true")
-    p = sub.add_parser("xrefs", help="references to a value: calls, literal loads, adr, data pointers")
+    p = add(cmd_xrefs, "references to a value: calls, literal loads, adr, data pointers")
     p.add_argument("value", type=num)
     p.add_argument("--kinds", help=f"comma list of {','.join(KINDS)}")
-    p = sub.add_parser("callers", help="BL/BLX callers")
+    p = add(cmd_callers, "BL/BLX callers")
     p.add_argument("va", type=num)
-    p = sub.add_parser("sid", help="UI strings by id (through the firmware lookup)")
+    p = add(cmd_sid, "UI strings by id (through the firmware lookup)")
     p.add_argument("sid", type=num, nargs="*")
     p.add_argument("--find", help="case-insensitive substring")
     p.add_argument("--lang", type=int, default=0)
-    p = sub.add_parser("strings", help="C strings in S3 (outside the FPGA bitstream)")
+    p = add(cmd_strings, "C strings in S3 (outside the FPGA bitstream)")
     p.add_argument("pattern", nargs="?", help="regex filter")
     p.add_argument("--min", type=int, default=4)
     p.add_argument("--refs", action="store_true", help="count literal/adr/data references")
-    p = sub.add_parser("menus", help="Get_Menu_Table emulation & row dump")
+    p = add(cmd_menus, "Get_Menu_Table emulation & row dump")
     p.add_argument("ids", type=num, nargs="*")
-    sub.add_parser("screens", help="screen vtable (posted id -> handler)")
-    p = sub.add_parser("icons", help="icon table decode & PNG contact sheet")
+    add(cmd_screens, "screen vtable (posted id -> handler)")
+    p = add(cmd_icons, "icon table decode & PNG contact sheet")
     p.add_argument("ids", type=num, nargs="*")
     p.add_argument("--sheet", type=Path)
     p.add_argument("--cols", type=int, default=10)
     p.add_argument("--scale", type=int, default=2)
-    p = sub.add_parser("text", help="render text offscreen with the stock font engine")
+    p = add(cmd_text, "render text offscreen with the stock font engine")
     p.add_argument("text")
     p.add_argument("--px", type=int, default=40)
     p.add_argument("--style", type=num, default=0x22, help="0x21 left, 0x22 centre, 0x24 right")
     p.add_argument("--lang", type=int, default=0)
     p.add_argument("--out", type=Path)
     p.add_argument("--scale", type=int, default=3)
-    p = sub.add_parser("liveness", help="code map + reachability -> dead-region candidates TSV")
+    p = add(cmd_liveness, "code map + reachability -> dead-region candidates TSV")
     p.add_argument("--out", type=Path)
     p.add_argument("--min", type=int, default=512, help="minimum candidate size")
     p.add_argument("--dead", type=span, action="append", default=[], metavar="LO:HI", help="data known dead (not a root)")
     p.add_argument("--used", type=span, action="append", default=[], metavar="LO:HI", help="code already reclaimed")
-    p = sub.add_parser("nvram", help="static NVRAM block coverage")
+    p = add(cmd_nvram, "static NVRAM block coverage")
     p.add_argument("--window", type=span, default=(0xA0939600, 0xA0939B00), metavar="LO:HI")
     p.add_argument("--block", type=num, default=stock.NV_BLOCK)
     p.add_argument("--len", type=num, default=stock.NV_LEN)
     p.add_argument("--offset", type=num, action="append", default=[], help="list users of a block offset")
 
     a = ap.parse_args(argv)
-    globals()[f"cmd_{a.cmd}"](Ctx(a))
+    a.fn(Ctx(a))
 
 
 if __name__ == "__main__":

@@ -1,4 +1,4 @@
-"""Verifier plumbing: build output loader, PASS/FAIL report, NOR & thumb-call helpers shared by the suites."""
+"""Verifier plumbing: build output loader, PASS/FAIL report, NOR stubs shared by the suites."""
 
 from __future__ import annotations
 
@@ -99,16 +99,6 @@ class Report:
 
     def eq(self, got: object, exp: object, what: str) -> bool:
         return self.check(got == exp, what if got == exp else f"{what}: got {got!r}, expected {exp!r}")
-
-
-def bl_target(img: Image, site: int) -> int | None:
-    """Callee of the Thumb BL/BLX pair at site."""
-    hi, lo = img.u16(site), img.u16(site + 2)
-    if hi & 0xF800 != 0xF000 or lo & 0xE800 != 0xE800:
-        return None
-    off = ((hi & 0x7FF) << 12) | ((lo & 0x7FF) << 1)
-    t = site + 4 + off - ((off & 0x400000) << 1)
-    return t & ~3 if lo & 0xF800 == 0xE800 else t
 
 
 class Nor:

@@ -11,7 +11,7 @@ from tools.re import stock, ui
 from tools.re.emu import SCRATCH, STACK, EmuError, Machine, outside
 from tools.re.image import BSS, END, FPGA, IPL_LEN
 
-from .harness import Build, Nor, Report, bl_target
+from .harness import Build, Nor, Report
 
 FILM_MODE0 = 9
 NV_RESERVED = (stock.NV_BLOCK + 0x04, stock.NV_BLOCK + 0x14)  # zero-default bytes free for payload settings
@@ -91,11 +91,11 @@ def check_menus(b: Build, r: Report) -> None:
     names = {s.va: n for n, s in b.syms.items()}
     for mid, rows in sorted(gen.items()):
         r.eq(ui.menu_table(m, mid), rows, f"Get_Menu_Table({mid:#x}) -> {names.get(rows, hex(rows))}")
-    for name, exp in b.gen.menus.items():
+    for name, rows in b.gen.menus.items():
         got = [row.w for row in ui.rows(b.img, b.sym(name))]
-        exp_w = [tuple(b.value(f) for f in row) for row in exp]
-        bad = next((k for k, (g, e) in enumerate(zip(got + [None] * len(exp_w), exp_w)) if g != e), None)
-        r.check(len(got) == len(exp_w) and bad is None, f"{name}: {len(got)} rows = catalog.c" + (f" (row {bad} differs)" if bad is not None else ""))
+        exp = [tuple(b.value(f) for f in row) for row in rows]
+        bad = next((k for k in range(max(len(got), len(exp))) if got[k : k + 1] != exp[k : k + 1]), None)
+        r.check(bad is None, f"{name}: {len(exp)} rows = catalog.c" + (f" (row {bad} differs)" if bad is not None else ""))
     subs = {row.id: ui.menu_table(m, row.id) for row in ui.rows(m, gen[film_page])}
     r.check(all(subs.values()), f"Film page submenus resolve {[hex(k) for k in subs]}")
 
@@ -106,10 +106,11 @@ def check_menus(b: Build, r: Report) -> None:
         r.eq(ui.menu_table(m, paper), gen[paper0 + cls], f"Get_Menu_Table({paper:#x}) for cm {cm} -> paper class {cls}")
     m.load_nv_defaults()
 
-    iso = {n: b.sym(n) for n in ("m_iso_1ev", "m_iso_3ev") if n in b.syms}
-    for step, name in enumerate(iso):
-        m.w8(stock.NV_ISO_STEP, step)
-        r.eq(ui.menu_table(m, stock.MENU_ISO), iso[name], f"Get_Menu_Table({stock.MENU_ISO:#x}) with ISO step {step} -> {name}")
+    iso = {name: b.sym(name) for name in ("m_iso_1ev", "m_iso_3ev") if name in b.syms}
+    for step, name in enumerate(("m_iso_1ev", "m_iso_3ev")):
+        if name in iso:
+            m.w8(stock.NV_ISO_STEP, step)
+            r.eq(ui.menu_table(m, stock.MENU_ISO), iso[name], f"Get_Menu_Table({stock.MENU_ISO:#x}) with ISO step {step} -> {name}")
     m.load_nv_defaults()
     st, bt = ui.menu_tables(ms), ui.menu_tables(m)
     changed = [i for i in sorted(set(st) | set(bt)) if i not in gen and i != paper and bt.get(i) not in iso.values() and st.get(i) != bt.get(i)]
@@ -265,7 +266,7 @@ def check_ipc(b: Build, r: Report, addrs: dict[str, int]) -> None:
 
 def check_lv(b: Build, r: Report) -> None:
     for site, name in ((stock.LV_GAMMA_SITE, "lv_gamma_hook"), (stock.LV_MONO_SITE, "lv_mono_hook"), (stock.LV_CMCM_SITE, "lv_cmcm_hook")):
-        r.eq(bl_target(b.img, site), b.sym(name), f"BL @ {site:#x} -> {name}")
+        r.eq(b.img.bl_target(site), b.sym(name), f"BL @ {site:#x} -> {name}")
     m = Machine(b.img)
     m.load_nv_defaults()
     calls: list[tuple] = []
@@ -338,7 +339,7 @@ def check_updater(b: Build, r: Report) -> tuple[int, int]:
     for va in stock.UPDATER_BANNERS:
         old, new = b.stock.cstr(va), b.img.cstr(va)
         slot = (len(old) + 4) & ~3
-        ok = "Debug Write" in old and new and new != old and b.img.rd(va, slot) == new.encode().ljust(slot, b"\0")
+        ok = "Debug Write" in old and bool(new) and new != old and b.img.rd(va, slot) == new.encode().ljust(slot, b"\0")
         r.check(ok and b.img.rd(va + slot, 4) == b.stock.rd(va + slot, 4), f"updater banner {va:#x}: {old!r} -> {new!r}")
     return maj, mi
 
@@ -346,7 +347,7 @@ def check_updater(b: Build, r: Report) -> tuple[int, int]:
 def check_package(b: Build, r: Report, maj: int, mi: int) -> None:
     p, s = b.pkg, b.stock.pkg
     r.eq(b.pkg_name, f"DP2MV{maj}{mi:02}.bin", "package file name matches the version")
-    r.check(len(set(p.versions)) == 1 and bool(re.fullmatch(r"\d\.\d\d", p.version)), f"header versions {p.versions}")
+    r.check(len(set(p.versions)) == 1 and bool(re.fullmatch(r"\d+\.\d\d", p.version)), f"header versions {p.versions}")
     r.check(bool(re.fullmatch(r"20\d{6}", p.date)), f"header date {p.date}")
     r.eq((len(p.raw), p.flags, p.c78_off), (len(s.raw), s.flags, s.c78_off), "size, stage flags, M6M segment offset = stock")
     fields = {*range(0x10, 0x20), *range(0x30, 0x58)}

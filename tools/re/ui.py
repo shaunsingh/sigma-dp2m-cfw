@@ -135,16 +135,17 @@ def to_rgb(px: np.ndarray, pal: np.ndarray, bg: tuple[int, int, int] = (52, 58, 
 
 
 def contact_sheet(tiles: list[tuple[str, np.ndarray]], path: Path, pal: np.ndarray, cols: int = 8, scale: int = 2,
-                  bg: tuple[int, int, int] = (52, 58, 70)) -> None:
-    """PNG grid of labelled coverage tiles."""
-    cw = max(64, max(t.shape[1] for _, t in tiles)) * scale + 8
-    ch = max(t.shape[0] for _, t in tiles) * scale + 20
+                  bg: tuple[int, int, int] = (52, 58, 70), cap: tuple[int, int] = (240, 160)) -> None:
+    """PNG grid of labelled coverage tiles; tiles larger than `cap` (after scaling) are shrunk."""
+    cw = min(cap[0], max(64, max(t.shape[1] for _, t in tiles) * scale)) + 8
+    ch = min(cap[1], max(t.shape[0] for _, t in tiles) * scale) + 20
     n_rows = (len(tiles) + cols - 1) // cols
     sheet = PImage.new("RGB", (cols * cw, n_rows * ch), (24, 24, 24))
     d = ImageDraw.Draw(sheet)
     for k, (label, t) in enumerate(tiles):
         x, y = (k % cols) * cw, (k // cols) * ch
         im = PImage.fromarray(to_rgb(t, pal, bg)).resize((t.shape[1] * scale, t.shape[0] * scale), PImage.NEAREST)
+        im.thumbnail((cw - 8, ch - 20))
         sheet.paste(im, (x + 4, y + 16))
         d.text((x + 4, y + 2), label[: cw // 6], fill=(255, 220, 0))
     sheet.save(path)

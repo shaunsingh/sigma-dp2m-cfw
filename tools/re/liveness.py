@@ -23,10 +23,6 @@ SWITCH8 = (0xE55EC001, 0xE12FFF1C)  # __ARM_common_switch8 words 0 and 5: inline
 Range = tuple[int, int]
 
 
-def _in(va: int, ranges: Iterable[Range]) -> bool:
-    return any(lo <= va < hi for lo, hi in ranges)
-
-
 def _looks_arm(s3: bytes, va: int) -> bool:
     if va % 4 or not BASE <= va < CODE_END - 12:
         return False
@@ -608,7 +604,7 @@ def candidates(img: Image, lv: Liveness, stock: Liveness | None = None, min_size
     for a, b in code_runs(img, lv, used):
         if b - a < min_size:
             continue
-        fs = [e for e in lv.ents[bisect.bisect_left(lv.ents, a) :] if e < b]
+        fs = lv.ents[bisect.bisect_left(lv.ents, a) : bisect.bisect_left(lv.ents, b)]
         newly = stock is not None and any(f in stock.live for f in fs)
         hint = re.search(rb"[A-Za-z_][\x20-\x7e]{9,}", img.s3[a - BASE : b - BASE])
         out.append(Candidate(a, b, "code:newly-dead" if newly else "code:orphan", len(fs), hint.group().decode()[:60] if hint else ""))

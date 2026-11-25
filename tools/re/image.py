@@ -101,7 +101,16 @@ class Image:
         return struct.unpack(f">{n}I", self.rd(va, 4 * n))
 
     def cstr(self, va: int, n: int = 256) -> str:
-        return self.rd(va, min(n, END - va)).split(b"\0")[0].decode("latin1")
+        return self.rd(va, min(n, END - va)).split(b"\0")[0].decode("utf-8", "backslashreplace")
+
+    def bl_target(self, va: int) -> int | None:
+        """Callee of the Thumb BL/BLX pair at va (BLX targets are word-aligned ARM)."""
+        hi, lo = self.u16(va), self.u16(va + 2)
+        if hi & 0xF800 != 0xF000 or lo & 0xE800 != 0xE800:
+            return None
+        off = ((hi & 0x7FF) << 12) | ((lo & 0x7FF) << 1)
+        t = va + 4 + off - ((off & 0x400000) << 1)
+        return t & ~3 if lo & 0xF800 == 0xE800 else t
 
     def text_at(self, va: int, min_len: int = 3) -> str | None:
         """Printable C string at va, if any."""

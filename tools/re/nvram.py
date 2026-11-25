@@ -36,15 +36,6 @@ class Call:
     seed: int
 
 
-def _bl_target(img: Image, va: int) -> int | None:
-    hi, lo = img.u16(va), img.u16(va + 2)
-    if hi & 0xF800 != 0xF000 or lo & 0xE800 != 0xE800:
-        return None
-    off = ((hi & 0x7FF) << 12) | ((lo & 0x7FF) << 1)
-    t = va + 4 + off - ((off & 0x400000) << 1)
-    return t & ~3 if lo & 0xF800 == 0xE800 else t
-
-
 def _track(img: Image, seed: int, reg: int, val: int, lo: int, hi: int, maxn: int, acc: list, calls: list) -> None:
     """Follow one literal-seeded register linearly (no branches), constant-folding adds/shifts/moves."""
     regs: dict[int, int | None] = {reg: val}
@@ -61,7 +52,7 @@ def _track(img: Image, seed: int, reg: int, val: int, lo: int, hi: int, maxn: in
             return
         m, ops, nxt = ins.mnemonic, ins.operands, va + ins.size
         if m in ("bl", "blx"):
-            calls.append(Call(va, _bl_target(img, va), tuple(regs.get(_R[f"r{i}"]) for i in range(3)), seed))
+            calls.append(Call(va, img.bl_target(va), tuple(regs.get(_R[f"r{i}"]) for i in range(3)), seed))
             for r in ("r0", "r1", "r2", "r3", "ip", "lr"):
                 regs.pop(_R[r], None)
         elif m in ("b", "bx") or (m == "pop" and any(o.type == ARM_OP_REG and o.reg == ARM_REG_PC for o in ops)):

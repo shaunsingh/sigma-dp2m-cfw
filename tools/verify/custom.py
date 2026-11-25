@@ -7,7 +7,7 @@ import struct
 from tools.re import stock
 from tools.re.emu import STACK, Machine, outside
 
-from .harness import Build, Nor, Report, bl_target
+from .harness import Build, Nor, Report
 
 SLOTS, BACKUP, SZ = 0xA0939818, 0xA09399BC, 0x8C  # C1..C3 slots, pre-custom backup, slot size
 SHADOW, PREV = 0xA07FBC0D, 0xA07FBC0C  # setter's current / previous mode
@@ -100,7 +100,7 @@ def run(b: Build, r: Report) -> None:
 
     # static: hook call sites point at the payload
     for site, sym in HOOK_SITES:
-        r.eq(bl_target(img, site), b.sym(sym), f"BL @ {site:#x} -> {sym}")
+        r.eq(img.bl_target(site), b.sym(sym), f"BL @ {site:#x} -> {sym}")
     r.eq(img.u32(0xA005247C), b.sym("mode_strip") + 4, "MODE pool word -> mode_strip.cell")
     r.eq(img.u32(0xA0059AE0), b.sym("custom_icons"), "Custom Mode Setting pool word -> custom_icons")
     r.eq({a: img.u16(a) for a in IMMEDIATES}, IMMEDIATES, f"{len(IMMEDIATES)} immediates")

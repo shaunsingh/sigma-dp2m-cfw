@@ -64,7 +64,7 @@ class Machine:
         return struct.unpack(">I", self.rd(va, 4))[0]
 
     def cstr(self, va: int, n: int = 256) -> str:
-        return self.rd(va, n).split(b"\0")[0].decode("latin1")
+        return self.rd(va, n).split(b"\0")[0].decode("utf-8", "backslashreplace")
 
     def wr(self, va: int, data: bytes) -> None:
         self.uc.mem_write(va, data)
@@ -171,10 +171,7 @@ class Machine:
 
     # stock services
     def text(self, s: str, px: int, style: int = 0x22, rect: tuple[int, int, int, int] = (0, 600, 600, 100), lang: int = 0) -> np.ndarray:
-        """Draw `s` with the stock font engine; returns the coverage line buffer (0 none, 1 solid .. 15).
-
-        rect y >= 480 keeps the OSD untouched; the engine does not clear stale line-buffer rows.
-        """
+        """Draw `s` with the stock font engine (rect y >= 480 is offscreen); returns the line buffer coverage (1 solid .. 15)."""
         n = stock.LINE_W * stock.LINE_ROWS
         self.wr(SCRATCH, struct.pack(">4H", *rect))
         self.wr(SCRATCH + 8, s.encode("latin1") + b"\0")

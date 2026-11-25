@@ -266,8 +266,10 @@ pub fn build_m5(fw_raw: &[u8], pack: &FilmPack, asm_dir: &Path, cfg: &Config) ->
         write_mode(&mut s2, 10 + c_i, &m);
         let so = va_off(VA_LUT3D_SRGB + (c_i * LUT3D_STRIDE) as u32);
         let ao = va_off(VA_LUT3D_ARGB + (c_i * LUT3D_STRIDE) as u32);
-        s2[so..so + 4131].copy_from_slice(&r.lut3d_srgb_q1);
-        s2[ao..ao + 4131].copy_from_slice(&r.lut3d_argb_q1);
+        // the engine reads 3d lut bytes biased (s8 ^ 0x80) to skip sign extension
+        for (o, lut) in [(so, &r.lut3d_srgb_q1), (ao, &r.lut3d_argb_q1)] {
+            s2[o..o + 4131].iter_mut().zip(lut).for_each(|(d, &s)| *d = s ^ 0x80);
+        }
     }
 
     // modes 151..190 (40 bw recipes)
@@ -684,7 +686,7 @@ pub fn verify_m5(s2: &[u8]) -> Result<(), String> {
     let mut sd = vec![0u8; 0x1040];
     sd[..16].copy_from_slice(b"D2ML\x01\x1E\x00\x50\x02verify\0");
     let lo = va_off(VA_LUT3D_SRGB + 5 * LUT3D_STRIDE as u32);
-    sd[0x10..0x10 + 4131].copy_from_slice(&s2[lo..lo + 4131]);
+    sd[0x10..0x10 + 4131].iter_mut().zip(&s2[lo..lo + 4131]).for_each(|(d, &s)| *d = s ^ 0x80);
     let mut runs = 0;
     for cm in [3u32, cm_c, 151 + 13, 191] {
         let meta = match cm {

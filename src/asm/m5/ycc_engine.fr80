@@ -94,12 +94,13 @@
     ldi:8   #0, r13
 .endm
 
+// lut bytes are stored biased (s8 ^ 0x80) & the weights sum to 32 -> fold -128 * 32 into the rounding term
 .macro sakamoto_dot
-    ldi:8   #32, r0
-    ldub    @(r13, r3), r1 ; extsb r1 ; mul r7, r1  ; mov MDL, r1 ; add r1, r0
-    ldub    @(r13, r4), r1 ; extsb r1 ; mul r11, r1 ; mov MDL, r1 ; add r1, r0
-    ldub    @(r13, r5), r1 ; extsb r1 ; mul r2, r1  ; mov MDL, r1 ; add r1, r0
-    ldub    @(r13, r6), r1 ; extsb r1 ; mul r12, r1 ; mov MDL, r1 ; add r1, r0
+    ldi:32  #32 - 4096, r0
+    ldub    @(r13, r3), r1 ; mul r7, r1  ; mov MDL, r1 ; add r1, r0
+    ldub    @(r13, r4), r1 ; mul r11, r1 ; mov MDL, r1 ; add r1, r0
+    ldub    @(r13, r5), r1 ; mul r2, r1  ; mov MDL, r1 ; add r1, r0
+    ldub    @(r13, r6), r1 ; mul r12, r1 ; mov MDL, r1 ; add r1, r0
     asr     #6, r0
 .endm
 
@@ -115,21 +116,19 @@
 .macro sakamoto_direct lut_fp, pfx
     sakamoto_setup \lut_fp, \pfx
     sakamoto_dot
-    ldi:32  #VA_CLAMP_CENTER, r1
-    ldub    @r8, r13 ; add r0, r13 ; ldub @(r13, r1), r1 ; stb r1, @r8
-    ldi:32  #VA_CLAMP_CENTER, r1
+    ldi:32  #VA_CLAMP_CENTER, r13
+    ldub    @r8, r1 ; add r0, r1 ; ldub @(r13, r1), r1 ; stb r1, @r8
     add     #1, r8
-    ldub    @r8, r13 ; add r0, r13 ; ldub @(r13, r1), r0 ; stb r0, @r8
+    ldub    @r8, r1 ; add r0, r1 ; ldub @(r13, r1), r1 ; stb r1, @r8
     add2    #-1, r8
     ldi:8   #1, r13
     sakamoto_dot
-    ldi:32  #VA_CLAMP_CENTER, r1
-    ldub    @r9, r13 ; add r0, r13 ; ldub @(r13, r1), r0 ; stb r0, @r9
-    ldi:8   #1, r13
-    add     #1, r13
+    ldi:32  #VA_CLAMP_CENTER, r13
+    ldub    @r9, r1 ; add r0, r1 ; ldub @(r13, r1), r1 ; stb r1, @r9
+    ldi:8   #2, r13
     sakamoto_dot
-    ldi:32  #VA_CLAMP_CENTER, r1
-    ldub    @r10, r13 ; add r0, r13 ; ldub @(r13, r1), r0 ; stb r0, @r10
+    ldi:32  #VA_CLAMP_CENTER, r13
+    ldub    @r10, r1 ; add r0, r1 ; ldub @(r13, r1), r1 ; stb r1, @r10
 .endm
 
 // bilerp grid -> r0 (preserves r4..r11)
@@ -159,14 +158,27 @@
     sub     r0, r1 ; mul r2, r1 ; mov MDL, r1 ; asr #3, r1 ; add r1, r0
 .endm
 
+// 4 luma bytes += broadcast delta, saturating, in one word (r3 = 0x80808080, r4 = |d| x 0x01010101,
+// r6 = sign mask: x - e = ~(~x + e)); carries never cross bytes as both addends are < 0x80 per byte
+.macro swar_luma ptr
+    ld      @\ptr, r0 ; eor r6, r0
+    mov     r0, r1 ; and r3, r1 ; eor r1, r0 ; add r4, r0
+    mov     r0, r2 ; and r1, r2 ; eor r1, r0 ; or r2, r0
+    mov     r2, r1 ; lsr #7, r1 ; sub r1, r2 ; or r2, r0
+    eor     r6, r0 ; st r0, @\ptr
+.endm
+
+// tile deltas (fp -44/-48/-52) onto the 4x2 tile at r8/r9/r10, advancing them; luma word-aligned (flag b6)
 .macro apply_4x2_deltas
-    ldi:32  #VA_CLAMP_CENTER, r3
     ld      @(r14, #-44), r4
+    mov     r4, r6 ; asr2 #31, r6 ; eor r6, r4 ; sub r6, r4
+    ldi:32  #0x01010101, r0 ; mul r0, r4 ; mov MDL, r4
+    ldi:32  #0x80808080, r3
+    swar_luma r8
     ld      @(r14, #-64), r5 ; add r8, r5
-    .rept 4
-        ldub @r8, r13 ; add r4, r13 ; ldub @(r13, r3), r0 ; stb r0, @r8 ; add #1, r8
-        ldub @r5, r13 ; add r4, r13 ; ldub @(r13, r3), r0 ; stb r0, @r5 ; add #1, r5
-    .endr
+    swar_luma r5
+    add     #4, r8
+    ldi:32  #VA_CLAMP_CENTER, r3
     ld      @(r14, #-48), r4
     ld      @(r14, #-68), r6 ; add r9, r6
     .rept 2
@@ -234,7 +246,7 @@ steps_done:
 fg_set:
     st      r0, @(r14, #-104)
 
-    // flags: b0=lut3d b1=toner b2=fill b3=halo b4=grain b5=color_dye
+    // flags: b0=lut3d b1=toner b2=fill b3=halo b4=grain b5=color_dye b6=lut3d fast tiles (word-aligned luma)
     ldi:8   #0, r0
     ld      @(r14, #-76), r1 ; cmp #0, r1 ; beq fl0 ; ldi:8 #1, r2 ; or r2, r0
 fl0:
@@ -249,10 +261,15 @@ fl3:
 fl4_no:
     ld_ctx  52, r1 ; cmp #0, r1 ; beq fl5 ; ldi:8 #32, r2 ; or r2, r0
 fl5:
+    ldi:8   #1, r1 ; and r0, r1 ; beq fl6
+    ld_ctx  0, r1 ; ld @(r14, #-64), r2 ; or r2, r1
+    ldi:8   #3, r2 ; and r2, r1 ; bne fl6
+    ldi:8   #64, r2 ; or r2, r0
+fl6:
     st      r0, @(r14, #-72)
 
     // path A: pure 3d lut
-    ldi:8   #0x1F, r1 ; and r1, r0 ; cmp #1, r0 ; bne.far gen_entry
+    ldi:8   #0x5E, r1 ; and r1, r0 ; ldi:8 #0x40, r1 ; cmp r1, r0 ; bne.far gen_entry
 
     ldi:8   #0, r0 ; st r0, @(r14, #-8)
 frow_loop:
@@ -380,7 +397,7 @@ t_no_fill:
 t_no_halo:
 
     ldi:8   #0, r0 ; st r0, @(r14, #-140)
-    ld      @(r14, #-72), r0 ; ldi:8 #1, r1 ; and r1, r0
+    ld      @(r14, #-72), r0 ; ldi:8 #64, r1 ; and r1, r0
     cmp     #0, r0 ; beq.far t_3d_done
     check_4x2_coherence t_3d_done
     st      r11, @(r14, #-12)

@@ -202,6 +202,13 @@ sd_cd:
     ldi:8   #8, r13 ; ldub @(r13, r8), r0 ; st_ctx 60, r0
     ld      @(r14, #-24), r0 ; ldi:8 #1, r1 ; and r1, r0 ; beq meta_done
     ldi:8   #0x10, r0 ; add r8, r0 ; st_ctx 36, r0
+    // bias to the engine's u8 = s8 ^ 0x80 lut form (0x1030 B = whole words up to the buffer end)
+    ldi:32  #0x80808080, r1
+    ldi:20  #0x1030, r13
+sd_bias:
+    add2    #-4, r13
+    ld      @(r13, r0), r2 ; eor r1, r2 ; st r2, @(r13, r0)
+    cmp     #0, r13 ; bgt sd_bias
 
 meta_done:
     // work = lut | toner | fill | grain | (halation & gain)

@@ -111,4 +111,18 @@ struct dp2m_hook {
 #define HOOK_WORD(site, val, stock) DP2M_HOOK(HK_WORD, site, val, stock)
 #define HOOK_HALF(site, val, stock) DP2M_HOOK(HK_HALF, site, val, stock)
 
+/* stock icon lookup result: 8bpp tile, rows of w */
+struct icon { const uint8_t *data; uint16_t w, h; };
+const struct icon *stock_icon(uint32_t id);
+void stock_lv_status_cm(uint32_t cm);
+/* weight 0..9 (8+ bold), outline px (draws over thin strokes), narrow = 0.75 width; rect y >= 480 = line buffer only */
+uint32_t stock_text(uint32_t lang, const char *s, int32_t n, uint32_t px, uint32_t weight, uint32_t outline,
+                    uint32_t narrow, const uint16_t *rect, uint32_t style, uint32_t z);
+void stock_font_scale(uint32_t num, uint32_t den); /* text width x num / den */
+
+void *memset(void *d, int c, __SIZE_TYPE__ n);
+void *memcpy(void *d, const void *s, __SIZE_TYPE__ n);
+const struct icon *label_icon(uint32_t id);
+uint32_t osd_map(uint32_t cm);
+
 #endif

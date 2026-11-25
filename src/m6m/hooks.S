@@ -186,3 +186,25 @@ fn autoiso_p_hook
     .ltorg
     hook HOOK_BL, 0xA000D9A2, autoiso_p_hook, 0x20090400
     hook HOOK_BL, 0xA000D9E8, autoiso_p_hook, 0x20090400
+
+// icon lookup 0xA0042AAC after `push {r4-r6,lr}`: ids >= 0x400 are dp2m label icons
+fn icon_hook
+    lsrs r1, r0, #10
+    bne  1f
+    movs r4, r0
+    movs r2, #0xFF
+    bx   lr
+1:  bl   label_icon
+    pop  {r4, r5, r6, pc}
+    hook HOOK_BL, 0xA0042AAE, icon_hook, 0x000422FF
+
+// QS strip 0xA0043E9C (`ldr r1,=iso getter; ldr r0,[r0,#0x14]`): color mode joins ISO on the scrolling strip
+fn qs_strip_hook
+    ldr  r0, [r0, #0x14]
+    ldr  r1, =stock_get_cm
+    cmp  r0, r1
+    beq  1f
+    ldr  r1, =stock_get_iso
+1:  bx   lr
+    .ltorg
+    hook HOOK_BL, 0xA0043E9C, qs_strip_hook, 0x49F36940

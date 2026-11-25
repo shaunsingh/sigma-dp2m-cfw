@@ -25,3 +25,8 @@ stock stock_accel_x,       0xA001A38F
 stock stock_accel_y,       0xA001A3A3
 stock stock_b2y_set_mat,   0xA009C334
 stock stock_b2y_set_gamma, 0xA009D940
+stock stock_get_iso,       0xA016F5AF
+stock stock_icon,          0xA0042AAD
+stock stock_lv_status_cm,  0xA004C7BD
+stock stock_text,          0xA0042685
+stock stock_font_scale,    0xA004226D

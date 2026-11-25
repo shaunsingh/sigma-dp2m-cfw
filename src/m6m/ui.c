@@ -61,11 +61,9 @@ const char *dp2m_str(uint32_t sid, uint32_t lang) {
     return i < dp2m_string_count ? dp2m_strings[i] : 0;
 }
 
-// LV info icon: films read as Vivid / B&W to the stock 0..8 icon switch
+// LV info icon: films show their own label (osd_map)
 uint32_t osd_cm(void) {
-    uint32_t cm = stock_get_cm();
-    const struct film_info *f = film_of(cm);
-    return f ? (f->mono ? 2u : 4u) : cm;
+    return osd_map(stock_get_cm());
 }
 HOOK_CALL(0xA016BC4E, osd_cm, 0xA0167926);
 

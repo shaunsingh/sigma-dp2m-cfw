@@ -12,10 +12,12 @@ from tools.re.emu import STACK, SCRATCH, Machine
 
 from .harness import Build, Report
 
-DIM = {"L": (110, 70), "S": (54, 42), "OSD": (76, 26), "MODE": (51, 31), "WIDGET": (35, 20)}  # stock tile size per class
-STOCK_IDS = {"L": [0x10E, 0x10F, 0x115, 0x113], "S": [0x159, 0x15A, 0x160], "OSD": [0x27, 0x28, 0x2E], "MODE": [0xB4, 0xB6], "WIDGET": [0xB7, 0xB9]}
+DIM = {"L": (110, 70), "S": (54, 42), "OSD": (76, 26), "MODE": (51, 31), "WIDGET": (35, 20), "QS": (42, 34)}  # stock tile size per class
+STOCK_IDS = {"L": [0x10E, 0x10F, 0x115, 0x113], "S": [0x159, 0x15A, 0x160], "OSD": [0x27, 0x28, 0x2E], "MODE": [0xB4, 0xB6], "WIDGET": [0xB7, 0xB9],
+             "QS": [0xA1, 0x9B]}
 NAMES = ["Velvia 100", "FOV Classic Yellow", "Kodak Tri-X 400", "Teal & Orange", "Cinema", "Portra 800 +2", "Mono Orange #21",
          "SD Custom LUT", "Rollei Retro 80S", "Fujicolor C200", "Zebras (95% IRE)", "Fill -0.5 (Contrast)"]
+QS_ITEMS = ["Print Paper", "Film Engine", "Film Grain", "Halation", "X3 Fill Light"]
 TOKENS = {"Red": "C4", "Yellow": "C5", "White": "M2", "Black": "P"}  # short test strings for the MODE / WIDGET classes
 TOKEN_VA = SCRATCH + 0x10000
 GET_CM, GET_ISO = stock.GET_CM | 1, 0xA016F5AF
@@ -62,7 +64,7 @@ def run(b: Build, r: Report) -> None:
         dirty0 = m.rd(stock.OSD_DIRTY, 16)
         for c, base in cls.items():
             sheets += [(f"stock {i:#x}", icon(i)[2]) for i in STOCK_IDS[c]]
-            for name in (list(TOKENS.values()) + ["Cinema"]) if c in ("MODE", "WIDGET") else NAMES:
+            for name in (list(TOKENS.values()) + ["Cinema"]) if c in ("MODE", "WIDGET") else QS_ITEMS if c == "QS" else NAMES:
                 i = base + strings.index(name)
                 x, x2 = icon(i), icon(i)
                 if not r.check(x is not None, f"{c} {name!r} ({i:#x}) renders"):
@@ -101,7 +103,7 @@ def run(b: Build, r: Report) -> None:
         m.w32(b.sym("cache") + 4, arena.size - 100)
         x = icon(cls["L"] + strings.index("Velvia 100"))
         r.check(x is not None and x[1] == a0, "arena full -> reset & re-render at the arena base")
-        bad = [i for i in (0x1800 + 1, cls["L"] + len(strings), 0x1FFF) if m.call(stock.ICON_GET, i)]
+        bad = [i for i in (0x1C00 + 1, cls["L"] + len(strings), 0x1FFF) if m.call(stock.ICON_GET, i)]
         r.eq(bad, [], "invalid label ids return NULL")
     r.eq(sorted({hex(a) for a, _ in log})[:8], [], "arena reset writes only allowed ranges")
     if r.artifacts:

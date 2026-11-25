@@ -48,7 +48,7 @@ static uint32_t paper_cls(void) {
 }
 
 const struct menu_row *menu_lookup(uint32_t id) {
-    if (id == MENU_PAPER) id = MENU_PAPER_CLS0 + paper_cls();
+    if ((id & ~MENU_QS_COPY) == MENU_PAPER) id += MENU_PAPER_CLS0 - MENU_PAPER + paper_cls();
     for (const struct menu_map *m = dp2m_menus; m->rows; m++)
         if (m->id == id) return m->rows;
     return 0;

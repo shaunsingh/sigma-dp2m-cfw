@@ -8,7 +8,7 @@
 #define FONT_SCALE  0xA07DD774u              /* stock text width scale {num, den}, set by some screens around text */
 #define OSD_DIRTY   0xA07DD760u              /* 8bpp OSD dirty rect; the offscreen text blit still widens it */
 
-_Static_assert(ICON_LABEL_L == 1u << 10 && ICON_LABEL_WIDGET == 5u << 10, "label id = class << 10 | string index");
+_Static_assert(ICON_LABEL_L == 1u << 10 && ICON_LABEL_QS == 6u << 10, "label id = class << 10 | string index");
 
 /* tile indices follow font coverage: 1 solid white .. 15 faint, 16 black outline, 0 transparent */
 #define OUTLINE  16u
@@ -33,6 +33,7 @@ static const struct cls { uint8_t w, h, mx, my, hmax, ring, weight, flags; } cla
     { 76, 26, 1, 1, 23, 2, 8, LEFT }, /* ICON_LABEL_OSD: LV color mode, left aligned like stock */
     { 51, 31, 2, 1, 29, 2, 9, BOLD }, /* ICON_LABEL_MODE */
     { 35, 20, 1, 0, 19, 1, 9, BOLD }, /* ICON_LABEL_WIDGET */
+    { 42, 34, 2, 2, 20, 1, 8, 0 },    /* ICON_LABEL_QS: Custom QS item */
 };
 #define N_CLASSES (sizeof classes / sizeof *classes)
 

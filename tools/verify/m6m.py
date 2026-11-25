@@ -19,6 +19,11 @@ LV_DIRTY = (0xA07B1398, 0xA07B139C)  # LV refresh flags, set by the paper setter
 LV_CMCM, LV_MONO_Q7, LV_KNOTS = 1, 2, 4
 PAPER_NV = {1: "color_paper", 2: "bw_paper", 3: "lut_slot"}
 PAGE_RESET, PAGE_LIST = 0xA0058A0A, 0xA07F230E  # menu entry copies the page template (state + 0x14) to the live list
+SID0 = 672
+QS_SLOT_MENUS = range(0xE5, 0xED)
+# slot getters called by QS_SLOT_ROWS(page, slot)
+QS_SLOT_GET = {0xA01684FE: (0, 0), 0xA0168504: (0, 1), 0xA016850A: (0, 2), 0xA0168510: (0, 3),
+               0xA0168516: (1, 0), 0xA016851C: (1, 1), 0xA0168522: (1, 2), 0xA0168528: (1, 3)}
 
 
 @dataclass(frozen=True)
@@ -87,7 +92,7 @@ def check_menus(b: Build, r: Report) -> None:
     m.load_nv_defaults()
     ms.load_nv_defaults()
     gen = menu_map(b)
-    film_page, paper, paper0 = b.cat["MENU_FILM_PAGE"], b.cat["MENU_PAPER"], b.cat["MENU_PAPER_CLS0"]
+    film_page, paper, paper0, qs = b.cat["MENU_FILM_PAGE"], b.cat["MENU_PAPER"], b.cat["MENU_PAPER_CLS0"], b.cat["MENU_QS_COPY"]
     r.check(film_page in gen, f"Film page {film_page:#x} in the generated menu map")
     names = {s.va: n for n, s in b.syms.items()}
     for mid, rows in sorted(gen.items()):
@@ -108,6 +113,23 @@ def check_menus(b: Build, r: Report) -> None:
         cm = next((f.cm for f in fl if f.paper_cls == cls), 0)
         m.w8(stock.NV_CM, cm)
         r.eq(ui.menu_table(m, paper), gen[paper0 + cls], f"Get_Menu_Table({paper:#x}) for cm {cm} -> paper class {cls}")
+        r.eq(ui.menu_table(m, paper | qs), gen[(paper0 + cls) | qs], f"Get_Menu_Table({paper | qs:#x}) for cm {cm} -> QS paper class {cls}")
+    m.load_nv_defaults()
+
+    strs = b.gen.strings
+    for mid in sorted(i for i in gen if i & qs):
+        bad = [row.sid for row in ui.rows(m, gen[mid])
+               if row.qs_icon != b.cat["ICON_LABEL_L"] + (k := row.qs_icon & 0x3FF) or row.strip_icon != b.cat["ICON_LABEL_S"] + k
+               or strs[k] != (ui.string(m, row.sid) if row.sid < SID0 else strs[row.sid - SID0])]
+        r.eq(bad, [], f"QS copy {mid:#x}: value label icons match their text")
+    for mid in QS_SLOT_MENUS:
+        items = [row for row in ui.rows(m, gen[mid]) if row.value & qs]
+        page, slot = QS_SLOT_GET[items[0].get & ~1]
+        got = []
+        for row in items:
+            m.call(row.set & ~1, row.value)
+            got.append(m.call(stock.QS_SLOT_ROWS, page, slot) == ui.menu_table(m, row.value) == gen.get(row.value, gen.get(paper0 | qs)))
+        r.check(len(items) == 5 and all(got), f"QS slot menu {mid:#x} (page {page} slot {slot}): {len(items)} film items open their QS copies")
     m.load_nv_defaults()
 
     iso = {name: b.sym(name) for name in ("m_iso_1ev", "m_iso_3ev") if name in b.syms}

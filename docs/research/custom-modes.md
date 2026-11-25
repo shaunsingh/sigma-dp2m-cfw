@@ -82,6 +82,6 @@ The persisted block has only about 159 scattered free bytes, so two more slots (
 | Custom Mode Setting | `0xA0059AE0`, `0xA0059898`, `0xA0059914`, `0xA00598F4`, `0xA00599E4`, `0xA0059A02`, cell geometry sites | 5 cells, 120 px from x 20 |
 | NVRAM load / flush / reset | `0xA0040168`, `0xA00401E6`, `0xA016757E` | C4/C5 record in NOR bank 0 at `0x400` |
 
-C4/C5 icons use label icon ids (`0x1000` / `0x1400` / `0x400` / `0x800` + string index). Until the label renderer lands they draw blank; see [m6m-ui.md](m6m-ui.md#dp2m-label-icon-ids).
+C4/C5 icons use label icon ids (`0x1000` / `0x1400` / `0x400` / `0x800` + string index), rendered at run time; see [m6m-ui.md](m6m-ui.md#dp2m-label-icon-ids).
 
 Not patched because they already behave for 9/10: display-class switches `0xA0167832` / `0xA0167876`, program setter `0xA016F81E`, consumers of the effective program (`0xA004CC94`, `0xA016AC2E`), all `cmp #4` / `cmp #8` sites, QS menus 0xE5..0xEC (QS positions, not modes). `is_custom` at `0xA016F3C8` has no static references.

@@ -12,6 +12,7 @@ dp2m starts from the stock 1.05 package (`DP2MV105.bin`). It assembles FR80 code
 ## Features
 
 - **Film** menu page: color mode, print paper, 3D spectral engine, grain, halation, X3 fill.
+- Custom QS can assign print paper, engine, grain, halation and X3 fill to any Quick Set slot.
 - 36 color modes after the 8 stock ones: Quattro looks, optical-filter mono, reversal, negative and B&W films, and an SD-card LUT mode. Negative films take one of 8 print papers, B&W films one of 8 darkroom papers, the SD LUT mode one of `LUT1.BIN`..`LUT8.BIN`.
 - 3D spectral engine, grain and halation are independent toggles.
 - Live view uses each film's color matrix and tone curve, and follows mode and paper changes immediately.

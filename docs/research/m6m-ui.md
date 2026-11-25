@@ -102,6 +102,13 @@ A table ends with an all-zero row. Shooting and Setup pages clip rows beyond 6.
 - QS commits on every step. Arrows (key codes 2..5) and dials (0x40 / 0x20) call step forward `0xA0044078` / back `0xA0043FCA`, which call the row setter (`0xA0044106` / `0xA0044062`) and redraw. Leaving QS (keys 0xA / 0xC) restores nothing.
 - The LV status icon switch `0xA004C7BC` (called from `0xA0048A62`) has no case for color modes >= 9. The other OSD switch `0xA016BC4A` reads the color mode at `0xA016BC4E`; dp2m maps films to the Vivid / B&W icon there.
 
+### Custom QS (screen 67, state `0xA07F2E30`)
+
+- Menus 0xE3 / 0xE4 hold the 4 slots of QS1 / QS2. A slot row's w0 names its item menu: 0xE8 0xE6 0xE7 0xE5 (QS1 slots 0..3), 0xEC 0xEA 0xEB 0xE9 (QS2).
+- An item menu lists 14 items (ids 0xED..0x100, 42x34 icons, sid = item name). Its setter stores the item's w4, a menu id (Color Mode 9, Exposure Mode 5, ...), as a u32 at NVRAM `0xA0939784 + 8 + 4 * n`; no code range-checks it.
+- `QS_SLOT_ROWS` `0xA00435D8(page, slot)` reads that u32 through the slot getters `0xA01684FE..0xA0168528` and returns `Get_Menu_Table(value)`.
+- dp2m appends 5 items to every item menu (row ids 0x109..0x10D, which resolve to the stock empty table like the stock ids): print paper, engine, grain, halation, X3 fill. Their w4 is the setting menu id `| 0x200`, a QS copy of the setting menu whose values carry label icons (w1 110x70, w2 low 54x42). The originals keep w2 low = 0 so the Film page still shows value text.
+
 ## Icons
 
 - `0xA0042AAC(id)` serves ids 1..0x1A1 from `0xA07DD784 + 12 * id`: three ARM functions returning bits, width and height. The result struct is at `0xA07DD77C` (`{bits, u16 w, u16 h}`). Other ids return NULL and every caller skips the draw.
@@ -126,7 +133,7 @@ Icon sizes by use:
 
 ### dp2m label icon ids
 
-Payload rows use ids `class + string index` (string index = sid - 672): `0x400` 110x70, `0x800` 54x42, `0xC00` 76x26, `0x1000` 51x31, `0x1400` 35x20. The stock lookup returns NULL for them, so they stay blank until a renderer serves them. A renderer (font engine into cached tiles in payload RAM, outline by dilation) is in progress on a separate branch.
+Payload rows use ids `class + string index` (string index = sid - 672): `0x400` 110x70, `0x800` 54x42, `0xC00` 76x26, `0x1000` 51x31, `0x1400` 35x20, `0x1800` 42x34. The stock lookup returns NULL for them; `icon_hook` sends them to `label_icon` (`src/m6m/labels.c`), which renders the string with the stock font into cached tiles in payload RAM, outlined by dilation.
 
 ## Text
 

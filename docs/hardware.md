@@ -264,7 +264,7 @@ The packed mode follows `packed_mode` in `crates/dp2m/src/catalog.rs` (film orde
 
 Verified so far in emulation only (`dp2m build` verifiers, `python -m tools.verify`); nothing below has been tested on a camera.
 
-- **On-camera checks**: full `DP2MV200.bin` install from 1.05 and reinstall of stock 1.05; runtime label icons (QS, OSD, MODE, LV status, playback info); C4/C5 slot persistence across power cycles; payload RAM window `0xA1C00000..0xA1E00000` under LV, capture, playback, movie and USB; M5 engine wall time per fx combination.
+- **On-camera checks**: full `DP2MV200.bin` install from 1.05 and reinstall of stock 1.05; runtime label icons (QS, OSD, MODE, LV status, playback info); Custom QS film items in each slot; C4/C5 slot persistence across power cycles; payload RAM window `0xA1C00000..0xA1E00000` under LV, capture, playback, movie and USB; M5 engine wall time per fx combination.
 - **Verifier coverage**: `.dp2m.hooks` application over every record, the 11-page menu list and `page_group`, HUD grid drawing.
 
 ### M5 performance notes

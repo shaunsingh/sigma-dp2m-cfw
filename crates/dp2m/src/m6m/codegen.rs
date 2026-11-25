@@ -26,14 +26,21 @@ const MENU_GRAIN: u32 = 0xF5;
 const MENU_HALATION: u32 = 0xF6;
 pub const MENU_FILM_PAGE: u32 = 0xF7;
 const MENU_PAPER_CLS0: u32 = 0x1F0;
+// QS copy of a setting menu: values carry label icons, which the menu page would show in place of their text
+const MENU_QS_COPY: u32 = 0x200;
+// Custom QS slot menus 0xE5..0xEC: a slot stores the chosen row's w4 and QS opens Get_Menu_Table(w4)
+const STOCK_QS_SLOTS: [u32; 8] = [0xA07F_032C, 0xA07E_FF6C, 0xA07F_014C, 0xA07E_FD8C, 0xA07F_0AAC, 0xA07F_06EC, 0xA07F_08CC, 0xA07F_050C];
+// row ids of added slot items: unused ids that resolve to the stock empty table, like the stock items 0xED..0x100
+const QS_ROW0: u32 = 0x109;
 
 // label icons rendered on camera from string index (`class + index`): 110x70 QS value, 54x42 QS strip,
-// 76x26 OSD, 51x31 MODE screen, 35x20 LV widget
+// 76x26 OSD, 51x31 MODE screen, 35x20 LV widget, 42x34 QS item
 const ICON_LABEL_L: u32 = 0x400;
 const ICON_LABEL_S: u32 = 0x800;
 const ICON_LABEL_OSD: u32 = 0xC00;
 const ICON_LABEL_MODE: u32 = 0x1000;
 const ICON_LABEL_WIDGET: u32 = 0x1400;
+const ICON_LABEL_QS: u32 = 0x1800;
 
 const STOCK_COLOR_MENU: u32 = 0xA07E_BFEC;
 const STOCK_EXPO_MENU: u32 = 0xA07E_C8AC;
@@ -208,6 +215,35 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
         ],
     ));
 
+    let qs_items = [(MENU_PAPER, paper_title), (MENU_ENGINE, t_engine), (MENU_GRAIN, t_grain), (MENU_HALATION, t_halation), (MENU_FILL, t_fill)];
+    let stock_label = [(SID_OFF, st.add("Off")), (SID_ON, st.add("On")), (SID_AUTO, st.add("Auto"))];
+    let label = |sid: u32| stock_label.iter().find(|l| l.0 == sid).map_or(sid, |l| l.1).checked_sub(SID0).expect("QS value without a dp2m label");
+    let qs_copies: Vec<_> = menus
+        .iter()
+        .filter(|(id, ..)| qs_items.iter().any(|q| q.0 == *id) || (MENU_PAPER_CLS0..MENU_PAPER_CLS0 + 4).contains(id))
+        .map(|(id, _, rows)| {
+            let rows = rows
+                .iter()
+                .map(|r| {
+                    let si = label(r.w[3] >> 16);
+                    Row { w: [r.w[0], 0x0100_0000 | (ICON_LABEL_L + si), ICON_LABEL_S + si, r.w[3], r.w[4]], ..*r }
+                })
+                .collect();
+            (id | MENU_QS_COPY, ".data.menu", rows)
+        })
+        .collect();
+    menus.extend(qs_copies);
+    for (k, &va) in STOCK_QS_SLOTS.iter().enumerate() {
+        let slot = stock_rows(s3, va);
+        let t = slot[0];
+        let mut rows: Vec<Row> = slot.iter().copied().map(Row::stock).collect();
+        for (j, &(id, title)) in qs_items.iter().enumerate() {
+            let icon = 0x0100_0000 | (ICON_LABEL_QS + title - SID0);
+            rows.push(Row::stock([QS_ROW0 + j as u32, icon, 0, title << 16, id | MENU_QS_COPY, t[5], t[6], 0]));
+        }
+        menus.push((0xE5 + k as u32, ".data.menu", rows));
+    }
+
     let page = |va: u32, drop: u32, add: &[Row]| -> Vec<Row> {
         let mut rows: Vec<Row> = stock_rows(s3, va).into_iter().filter(|w| w[0] != drop).map(Row::stock).collect();
         rows.extend_from_slice(add);
@@ -258,6 +294,7 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
         ("MENU_PAPER", MENU_PAPER),
         ("MENU_PAPER_CLS0", MENU_PAPER_CLS0),
         ("MENU_FILM_PAGE", MENU_FILM_PAGE),
+        ("MENU_QS_COPY", MENU_QS_COPY),
         ("SID_PAPER_TITLE", paper_title),
         ("SID_C4", c_label[0]),
         ("SID_C5", c_label[1]),
@@ -266,6 +303,7 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
         ("ICON_LABEL_OSD", ICON_LABEL_OSD),
         ("ICON_LABEL_MODE", ICON_LABEL_MODE),
         ("ICON_LABEL_WIDGET", ICON_LABEL_WIDGET),
+        ("ICON_LABEL_QS", ICON_LABEL_QS),
         ("PACKED_MAX", PACKED_MAX as u32),
         ("PEAKING_THRESH", cfg.m6m.peaking_threshold),
         ("ZEBRA_THRESH", cfg.m6m.zebra_threshold as u32),

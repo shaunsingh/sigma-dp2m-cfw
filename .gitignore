@@ -9,9 +9,9 @@ dp2m.fnl
 *.map
 
 # Proprietary Sigma firmware binaries
-*.bin
-*.BIN
-!data/film_pack.bin
+# *.bin
+# *.BIN
+# !data/film_pack.bin
 *.X3F
 *.x3f
 *.zip

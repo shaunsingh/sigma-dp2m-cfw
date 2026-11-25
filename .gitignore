@@ -25,5 +25,6 @@ dp2m.fnl
 # Python & OS artifacts
 __pycache__/
 *.pyc
+*.egg-info/
 .venv/
 .DS_Store

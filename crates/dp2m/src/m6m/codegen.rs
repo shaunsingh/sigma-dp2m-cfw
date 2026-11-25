@@ -27,10 +27,13 @@ const MENU_HALATION: u32 = 0xF6;
 pub const MENU_FILM_PAGE: u32 = 0xF7;
 const MENU_PAPER_CLS0: u32 = 0x1F0;
 
-// label icons rendered on camera from string index: 110x70 QS value, 54x42 QS strip, 76x26 OSD
+// label icons rendered on camera from string index (`class + index`): 110x70 QS value, 54x42 QS strip,
+// 76x26 OSD, 51x31 MODE screen, 35x20 LV widget
 const ICON_LABEL_L: u32 = 0x400;
 const ICON_LABEL_S: u32 = 0x800;
 const ICON_LABEL_OSD: u32 = 0xC00;
+const ICON_LABEL_MODE: u32 = 0x1000;
+const ICON_LABEL_WIDGET: u32 = 0x1400;
 
 const STOCK_COLOR_MENU: u32 = 0xA07E_BFEC;
 const STOCK_GRID_MENU: u32 = 0xA07E_EFCC;
@@ -236,6 +239,8 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
         ("ICON_LABEL_L", ICON_LABEL_L),
         ("ICON_LABEL_S", ICON_LABEL_S),
         ("ICON_LABEL_OSD", ICON_LABEL_OSD),
+        ("ICON_LABEL_MODE", ICON_LABEL_MODE),
+        ("ICON_LABEL_WIDGET", ICON_LABEL_WIDGET),
         ("PACKED_MAX", PACKED_MAX as u32),
         ("PEAKING_THRESH", cfg.m6m.peaking_threshold),
         ("ZEBRA_THRESH", cfg.m6m.zebra_threshold as u32),

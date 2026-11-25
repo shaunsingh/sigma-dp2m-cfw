@@ -42,6 +42,7 @@ void stock_lv_status_cm(uint32_t cm);
 uint32_t stock_text(uint32_t lang, const char *s, int32_t n, uint32_t px, uint32_t weight, uint32_t outline,
                     uint32_t narrow, const uint16_t *rect, uint32_t style, uint32_t z);
 void stock_font_scale(uint32_t num, uint32_t den); /* text width x num / den */
+void stock_disp_init(void);                        /* boot: LV display setup per DISP mode */
 
 #define REG8(a)  (*(volatile uint8_t *)(a))
 #define REG16(a) (*(volatile uint16_t *)(a))

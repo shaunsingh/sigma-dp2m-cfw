@@ -3,7 +3,7 @@
 #include "catalog.h"
 
 #define ICON_RESULT ((struct icon *)0xA07DD77Cu)
-#define LINE_BUF    ((uint8_t *)0xA093A514u) /* stock text line buffer; every stock text call clears it first */
+#define LINE_BUF    ((uint8_t *)0xA093A514u) /* stock text scratch: cleared on entry, read only within the call */
 #define LB_W        640u
 #define FONT_SCALE  0xA07DD774u              /* stock text width scale {num, den}, set by some screens around text */
 #define OSD_DIRTY   0xA07DD760u              /* 8bpp OSD dirty rect; the offscreen text blit still widens it */
@@ -17,8 +17,8 @@ _Static_assert(ICON_LABEL_L == 1u << 10 && ICON_LABEL_WIDGET == 5u << 10, "label
 #define PX_MIN   8u
 #define PX_MAX   96u /* keeps rows_of(px) inside the 256-row line buffer */
 #define PX_RING2 16u /* 2 px outlines from here */
-#define PX_BOLD0 14u /* 1 px heavier strokes in [PX_BOLD0, PX_BOLD1): smaller text closes its counters, */
-#define PX_BOLD1 24u /* larger already matches the stock label weight */
+#define PX_BOLD0 14u /* [PX_BOLD0, PX_BOLD1): 1 px heavier strokes; smaller text would close its counters */
+#define PX_BOLD1 24u
 #define LEN_MAX  48u
 #define TILE_MAX (110u * 70u)
 #define ARENA    (512u * 1024u)
@@ -36,7 +36,7 @@ static const struct cls { uint8_t w, h, mx, my, hmax, ring, weight, flags; } cla
 };
 #define N_CLASSES (sizeof classes / sizeof *classes)
 
-/* payload .bss is not zeroed at boot: the cache validates itself */
+/* payload .bss is not zeroed: labels_boot resets the cache, the magic covers lookups before it */
 static struct {
     uint32_t magic, top;
     uint8_t *tile[N_CLASSES][1024];
@@ -127,7 +127,7 @@ static void outline(uint8_t *t, uint32_t w, uint32_t h, uint32_t r, uint8_t *m) 
 
 static void reset(void) {
     memset(&cache, 0, sizeof cache);
-    cache.magic = MAGIC ^ (uint32_t)(uintptr_t)dp2m_strings; /* a reflash with other strings drops stale tiles */
+    cache.magic = MAGIC;
 }
 
 static uint8_t *alloc(uint32_t n) {
@@ -142,7 +142,7 @@ static uint32_t best_split(const char *s, struct box b, uint32_t aw, uint32_t ah
     uint16_t g0[LEN_MAX], g1[LEN_MAX];
     uint32_t ng = 0, nsp = 0, split = 0, best = 0;
     for (const char *p = s; *p; p++) nsp += *p == ' ';
-    for (uint32_t x = b.x0; x < b.x1 && nsp;) {
+    for (uint32_t x = b.x0; x < b.x1 && nsp && ng < LEN_MAX;) {
         uint32_t e = x;
         while (!cols[e]) e++;
         if (e > x) { g0[ng] = (uint16_t)(x - b.x0); g1[ng++] = (uint16_t)(e - b.x0); }
@@ -208,7 +208,6 @@ static uint8_t *render(const struct cls *c, const char *src) {
         y += (int32_t)(h1 + r + 1u);
     }
     put(t, c, (c->flags & LEFT) ? x : ((int32_t)(c->w - (split ? w2 : w1)) - (int32_t)bold) / 2, y, last, split ? w2 : w1, split ? h2 : h1, LB_W);
-    memset(LINE_BUF, 0, rows_of(px) * LB_W);
     if (bold) embolden(t, c->w, c->h);
     outline(t, c->w, c->h, r, scratch);
     return t;
@@ -218,7 +217,7 @@ static uint8_t *render(const struct cls *c, const char *src) {
 const struct icon *label_icon(uint32_t id) {
     uint32_t k = (id >> 10) - 1u, i = id & 0x3FFu;
     if (k >= N_CLASSES || i >= dp2m_string_count) return 0;
-    if (cache.magic != (MAGIC ^ (uint32_t)(uintptr_t)dp2m_strings) || cache.top > ARENA) reset();
+    if (cache.magic != MAGIC) reset();
     const struct cls *c = &classes[k];
     uint8_t *t = cache.tile[k][i];
     if (!t) {
@@ -237,6 +236,13 @@ const struct icon *label_icon(uint32_t id) {
     ICON_RESULT->h = c->h;
     return ICON_RESULT;
 }
+
+// boot init 0xA01689BC: SDRAM may keep a decayed cache across a short power cycle
+void labels_boot(void) {
+    reset();
+    stock_disp_init();
+}
+HOOK_CALL(0xA01689BE, labels_boot, 0xA0168D0C);
 
 /* film label for the LV color mode icon about to be looked up; 0 = stock icon */
 static uint32_t osd_label;

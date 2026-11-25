@@ -37,3 +37,4 @@ stock stock_get_iso,       0xA016F5AF
 stock stock_lv_status_cm,  0xA004C7BD
 stock stock_text,          0xA0042685
 stock stock_font_scale,    0xA004226D
+stock stock_disp_init,     0xA0168D0D

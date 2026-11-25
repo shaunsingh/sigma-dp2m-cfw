@@ -25,8 +25,15 @@ stock stock_accel_x,       0xA001A38F
 stock stock_accel_y,       0xA001A3A3
 stock stock_b2y_set_mat,   0xA009C334
 stock stock_b2y_set_gamma, 0xA009D940
-stock stock_get_iso,       0xA016F5AF
 stock stock_icon,          0xA0042AAD
+stock stock_nor_write,     0xA00206FB
+stock stock_cur_backup,    0xA01675B7
+stock stock_cur_restore,   0xA01675C9
+stock stock_cur_apply,     0xA016F963
+stock stock_slot_same,     0xA0167619
+stock stock_still_apply,   0xA003D9FB
+stock stock_movie_apply,   0xA003E85B
+stock stock_get_iso,       0xA016F5AF
 stock stock_lv_status_cm,  0xA004C7BD
 stock stock_text,          0xA0042685
 stock stock_font_scale,    0xA004226D

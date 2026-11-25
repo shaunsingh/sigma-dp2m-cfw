@@ -111,7 +111,7 @@ do_work:
     st      r0, @(r14, #-12)
     st      r4, @(r14, #-16)
 
-    // packed_1d: cs=[1:0], fx=[4:2], fill=[6:5]
+    // packed_1d: cs=[1:0], fx=[4:2] (b0 3d lut, b1 grain, b2 halation), fill=[6:5]
     mov     r2, r0 ; ldi:8 #3, r5 ; and r5, r0 ; st r0, @(r14, #-20)
     mov     r2, r0 ; lsr #2, r0 ; ldi:8 #7, r5 ; and r5, r0 ; st r0, @(r14, #-24)
     mov     r2, r0 ; lsr #5, r0 ; ldi:8 #3, r5 ; and r5, r0 ; st r0, @(r14, #-28)
@@ -148,7 +148,7 @@ cd_ok:
     ldi:8   #19, r0  ; cmp r0, r4 ; blt.far meta_done
     ldi:8   #150, r0 ; cmp r0, r4 ; bgt chk_bw
 
-    ld      @(r14, #-24), r0 ; cmp #0, r0 ; beq.far meta_done
+    ld      @(r14, #-24), r0 ; ldi:8 #1, r1 ; and r1, r0 ; beq.far meta_done
     mov     r4, r0 ; ldi:8 #19, r1 ; sub r1, r0
     ldi:20  #LUT3D_STRIDE, r1 ; mul r1, r0 ; mov MDL, r0
     ld      @(r14, #-20), r2 ; cmp #2, r2 ; beq l3_argb
@@ -166,8 +166,9 @@ chk_bw:
     st_ctx  40, r0
     jmp.far meta_done
 
-// 191..198 -> D:\LUT1.BIN..D:\LUT8.BIN
+// 191..198 -> D:\LUT1.BIN..D:\LUT8.BIN (grain/halation meta even w/o the 3d lut)
 load_sd_lut:
+    ld      @(r14, #-24), r0 ; cmp #0, r0 ; beq.far meta_done
     ldi:32  #VA_SD_PATH_TMPL, r8
     ldi:32  #SCRATCH_SD_PATH, r9
     ldi:8   #12, r13
@@ -199,12 +200,17 @@ sd_cd:
     lsl     #8, r0 ; ldi:32 #VA_GRAIN_ENVS, r1 ; add r1, r0 ; st_ctx 44, r0
     ldi:8   #7, r13 ; ldub @(r13, r8), r0 ; st_ctx 56, r0
     ldi:8   #8, r13 ; ldub @(r13, r8), r0 ; st_ctx 60, r0
+    ld      @(r14, #-24), r0 ; ldi:8 #1, r1 ; and r1, r0 ; beq meta_done
     ldi:8   #0x10, r0 ; add r8, r0 ; st_ctx 36, r0
 
 meta_done:
+    // work = lut | toner | fill | grain | (halation & gain)
     ld_ctx  36, r0 ; ld_ctx 40, r1 ; or r1, r0
     ld_ctx  32, r1 ; or r1, r0
-    ld_ctx  28, r1 ; cmp #2, r1 ; bge has_work
+    ld      @(r14, #-24), r1 ; ldi:8 #2, r2 ; and r1, r2 ; or r2, r0
+    ldi:8   #4, r2 ; and r2, r1 ; beq no_halo_work
+    ld_ctx  56, r1 ; or r1, r0
+no_halo_work:
     cmp     #0, r0 ; bne has_work
 done_exit:
     leave
@@ -254,7 +260,9 @@ ptrs_ok:
     ld_ctx  12, r0 ; ldi:8 #32, r1 ; cmp r1, r0 ; blt.far done_exit
     ld_ctx  16, r0 ; cmp r1, r0 ; blt.far done_exit
 
-    ld      @(r14, #-24), r0 ; cmp #3, r0 ; bge need_pyr
+    ld      @(r14, #-24), r0 ; ldi:8 #4, r1 ; and r1, r0 ; beq no_halo_pyr
+    ld_ctx  56, r0 ; cmp #0, r0 ; bne need_pyr
+no_halo_pyr:
     ld      @(r14, #-28), r0 ; cmp #0, r0 ; beq.far run_passes
 
 need_pyr:
@@ -334,7 +342,7 @@ div_skip:
     ldi:8   #128, r0 ; add r0, r2 ; lsr #1, r2 ; st_ctx 84, r2
 
     // two-scale halo psf: 1-pass core + 3-pass tail, 50/50 blend
-    ld      @(r14, #-24), r0 ; cmp #3, r0 ; blt.far chk_fill_blur
+    ld      @(r14, #-24), r0 ; ldi:8 #4, r1 ; and r1, r0 ; beq.far chk_fill_blur
     ld_ctx  56, r0 ; cmp #0, r0 ; beq.far chk_fill_blur
     blur_5tap SCRATCH_HALO_CORE, SCRATCH_BLUR_LINE, 1, hcore
     blur_5tap SCRATCH_HALO_GRID, SCRATCH_BLUR_LINE, 3, hwide

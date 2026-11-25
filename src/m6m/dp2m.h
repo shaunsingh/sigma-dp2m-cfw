@@ -1,7 +1,15 @@
 #ifndef DP2M_H
 #define DP2M_H
 
+#include <stddef.h>
 #include <stdint.h>
+
+/* rt.c */
+void *memcpy(void *d, const void *s, size_t n);
+void *memset(void *d, int c, size_t n);
+
+/* stock icon lookup result: 8bpp tile, rows of w */
+struct icon { const uint8_t *data; uint16_t w, h; };
 
 /* stock M6M ABI (S3, Thumb unless noted); symbols are absolute, defined in stock.S */
 uint32_t stock_get_cm(void);
@@ -21,6 +29,19 @@ uint32_t stock_accel_x(void);
 uint32_t stock_accel_y(void);
 void stock_b2y_set_mat(void *mat);                                   /* ARM */
 void stock_b2y_set_gamma(uint32_t ch, const void *lut, uint32_t sz); /* ARM */
+const struct icon *stock_icon(uint32_t id);                          /* 0 = unknown id */
+void stock_nor_write(uint32_t off, uint32_t n, const void *buf);     /* NOR bank 0 read-modify-write */
+void stock_cur_backup(void);                                         /* shooting settings -> pre-custom backup */
+void stock_cur_restore(void);                                        /* pre-custom backup -> shooting settings */
+void stock_cur_apply(void);                                          /* re-apply the shooting settings */
+uint32_t stock_slot_same(uint32_t slot);                             /* 1 = custom slot matches the shooting settings */
+void stock_still_apply(void);
+void stock_movie_apply(void);
+void stock_lv_status_cm(uint32_t cm);
+/* weight 0..9 (8+ bold), outline px (draws over thin strokes), narrow = 0.75 width; rect y >= 480 = line buffer only */
+uint32_t stock_text(uint32_t lang, const char *s, int32_t n, uint32_t px, uint32_t weight, uint32_t outline,
+                    uint32_t narrow, const uint16_t *rect, uint32_t style, uint32_t z);
+void stock_font_scale(uint32_t num, uint32_t den); /* text width x num / den */
 
 #define REG8(a)  (*(volatile uint8_t *)(a))
 #define REG16(a) (*(volatile uint16_t *)(a))
@@ -111,17 +132,6 @@ struct dp2m_hook {
 #define HOOK_WORD(site, val, stock) DP2M_HOOK(HK_WORD, site, val, stock)
 #define HOOK_HALF(site, val, stock) DP2M_HOOK(HK_HALF, site, val, stock)
 
-/* stock icon lookup result: 8bpp tile, rows of w */
-struct icon { const uint8_t *data; uint16_t w, h; };
-const struct icon *stock_icon(uint32_t id);
-void stock_lv_status_cm(uint32_t cm);
-/* weight 0..9 (8+ bold), outline px (draws over thin strokes), narrow = 0.75 width; rect y >= 480 = line buffer only */
-uint32_t stock_text(uint32_t lang, const char *s, int32_t n, uint32_t px, uint32_t weight, uint32_t outline,
-                    uint32_t narrow, const uint16_t *rect, uint32_t style, uint32_t z);
-void stock_font_scale(uint32_t num, uint32_t den); /* text width x num / den */
-
-void *memset(void *d, int c, __SIZE_TYPE__ n);
-void *memcpy(void *d, const void *s, __SIZE_TYPE__ n);
 const struct icon *label_icon(uint32_t id);
 uint32_t osd_map(uint32_t cm);
 

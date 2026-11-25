@@ -6,4 +6,4 @@ pub mod emu;
 
 pub use asm::{assemble_file, assemble_sections, assemble_str, AsmError};
 pub use dis::{dis_one, dis_range};
-pub use emu::{Emulator, Handler};
+pub use emu::{Emulator, Handler, RETURN};

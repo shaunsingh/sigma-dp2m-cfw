@@ -1,0 +1,118 @@
+start	end	size	kind	fns	hint
+0xa0265670	0xa0268870	12800	data:double table used only by orphan code	0	
+0xa0094658	0xa009688c	8756	code:stock-orphan	23	E:Im_TFR_Get_Operation(): status parameter is NULL.
+0xa010af44	0xa010c250	4876	code:stock-orphan	2	C3bSjShO& C
+0xa0085c44	0xa0086f04	4800	code:stock-orphan	30	Im_VLD_Set_VGR_Area_Size() error. Parameters is NULL.
+0xa0107bd8	0xa0108e14	4668	code:stock-orphan	3	r:>EKOTY^diotz~
+0xa00ba1c8	0xa00bb008	3648	code:stock-orphan	4	
+0xa002a834	0xa002b5e0	3500	code:stock-orphan	32	KpSettingList && iSettingCount
+0xa002f234	0xa002ff70	3388	code:stock-orphan	16	
+0xa005cdf4	0xa005d924	2864	code:newly-dead(factory)	8	
+0xa0028578	0xa0029038	2752	code:stock-orphan	7	iRAMSize & (iRAMSize - 1))
+0xa00ab7d8	0xa00ac294	2748	code:stock-orphan	5	CI:Im_REC_Get_Ctrl_Common. rec_ctrl=NULL
+0xa008891c	0xa00893b4	2712	code:stock-orphan	10	cE:Im_HIF_Stop: Range error. stop_mode = %d
+0xa00a7fa0	0xa00a89c0	2592	code:stock-orphan	4	I:[%d]ch im_rec_ctrl_edge_en. rec_ctrl_edge_enh=NULL
+0xa00cdc48	0xa00ce664	2588	code:stock-orphan	8	
+0xa01360fc	0xa0136ab8	2492	code:stock-orphan	7	AUDIO_DIRECT]Wav ID = 0
+0xa00acf10	0xa00ad83c	2348	code:stock-orphan	4	I:Im_REC_Convert_Edge_Enh_Sync. rec_ch param error
+0xa0140cb0	0xa01415b0	2304	code:stock-orphan	19	V8!$NnCHFi
+0xa005dadc	0xa005e344	2152	code:newly-dead(factory)	7	The operation is success.
+0xa002e0d0	0xa002e902	2098	code:stock-orphan	38	
+0xa0007ff4	0xa00087a2	1966	code:stock-orphan	2	s#%d Pulse=%d Pos_Cur=%d dir=%d
+0xa00b60c8	0xa00b67cc	1796	code:stock-orphan	3	I:Im_JPEG_Decode_Sync. input_param = NULL
+0xa0086fd8	0xa00876a8	1744	code:stock-orphan	5	mLVch error
+0xa011868c	0xa0118d40	1716	code:stock-orphan	6	SDIO Build Options: 
+0xa0059d50	0xa005a400	1712	code:newly-dead(factory)	5	
+0xa0087f7c	0xa008862c	1712	code:stock-orphan	6	E:im_hif_set_hd_ctrl: Address setting error.
+0xa00cc73c	0xa00ccda0	1636	code:stock-orphan	6	
+0xa014d624	0xa014dc7c	1624	code:stock-orphan	0	
+0xa01507f0	0xa0150e3e	1614	code:stock-orphan	11	BF_Mdf_Wrapper_Sync() failed: ercd=%d, drvname=%s
+0xa00893b8	0xa00899f2	1594	code:stock-orphan	6	E:Im_HIF_Set_Exr_Control: Channel number check error.
+0xa014de90	0xa014e4c8	1592	code:stock-orphan	1	
+0xa000a47c	0xa000aaae	1586	code:stock-orphan	2	s#%d result=%d pos=%d to (PI=%d Sft=%d)
+0xa0025fa4	0xa00265c8	1572	code:stock-orphan	10	m_pData->m_pPointer
+0xa008b0e4	0xa008b6a4	1472	code:stock-orphan	3	pE:Im_RAW_Ctrl_Data_Decompress error. rawDataInfo=NULL
+0xa009943c	0xa00999bc	1408	code:stock-orphan	6	
+0xa00a0d24	0xa00a120c	1256	code:stock-orphan	6	I:Im_PRO_Ctrl_OBF. obf_ctrl=NULL
+0xa0089dd4	0xa008a2a4	1232	code:stock-orphan	6	V5d!! Assert : %s (%d)
+0xa01650bc	0xa016556a	1198	code:stock-orphan	3	
+0xa0162710	0xa0162ba8	1176	code:stock-orphan	4	
+0xa015db58	0xa015dfdc	1156	code:stock-orphan	6	xBF_Dcf_If_Get_Exif_Info_Jpeg err
+0xa0162e6a	0xa01632dc	1138	code:stock-orphan	4	BF_Play_Macro_Wrap_Convert_Size() : REC Open ERR.[ret=%d]
+0xa0163474	0xa01638ca	1110	code:stock-orphan	14	Offset is %d , length is %d 
+0xa00b5200	0xa00b5644	1092	code:stock-orphan	2	Im_JPEG_Wait_End_Dec(): pointer value error.
+0xa0077ea8	0xa00782bc	1044	code:stock-orphan	3	V%dCSIO input param error. [csio_ch] = %x
+0xa00aa758	0xa00aab60	1032	code:stock-orphan	4	I:[%d]ch Im_REC_Ctrl_Edge_Enh. rec_ctrl_edge_enh=NULL
+0xa0027420	0xa0027810	1008	code:stock-orphan	6	NIBFNot a FBIN file.
+0xa010ab54	0xa010af40	1004	code:stock-orphan	1	
+0xa04f31a8	0xa04f3594	1004	data:factory-screen RO layout	0	
+0xa00b1fc4	0xa00b23a8	996	code:stock-orphan	3	I:Im_Xch_Examine_Histogram_Async. hist_param = NULL
+0xa07ed82c	0xa07edc0c	992	menu:factory submenus b0 ac b1 ad b2 b4 b5 b8 a2	0	
+0xa00bb1d0	0xa00bb5a4	980	code:stock-orphan	1	
+0xa007abec	0xa007afb4	968	code:stock-orphan	2	sDMA: input param error. [addr] = 0
+0xa0007c28	0xa0007fec	964	code:stock-orphan	5	
+0xa0066358	0xa0066710	952	code:stock-orphan	9	
+0xa010629c	0xa0106638	924	code:stock-orphan	1	
+0xa00ce668	0xa00cea00	920	code:stock-orphan	3	
+0xa0151008	0xa0151398	912	code:stock-orphan	23	BF_Mdf_Wrapper_UtimeEx() failed: ercd=%d, fname=%s
+0xa00b4898	0xa00b4c20	904	code:stock-orphan	3	Im_JPEG_Wait_End_Enc(): pjpg_enc_mng address error.
+0xa00bc80c	0xa00bcb90	900	code:stock-orphan	1	
+0xa014d29a	0xa014d618	894	code:stock-orphan	8	
+0xa07f23f0	0xa07f274c	860	data:factory-screen state/layout	0	
+0xa0063798	0xa0063aec	852	code:stock-orphan	5	
+0xa00077ec	0xa0007b3a	846	code:stock-orphan	7	
+0xa0087c20	0xa0087f6c	844	code:stock-orphan	4	
+0xa00a6e48	0xa00a7190	840	code:stock-orphan	5	
+0xa007a664	0xa007a990	812	code:stock-orphan	8	
+0xa0090c58	0xa0090f80	808	code:stock-orphan	1	
+0xa00914d8	0xa00917f8	800	code:stock-orphan	4	
+0xa007a190	0xa007a4a4	788	code:stock-orphan	5	
+0xa01670ae	0xa01673c2	788	code:stock-orphan	1	
+0xa0029554	0xa0029860	780	code:stock-orphan	10	GpH,8\GpH*8aGpH)8
+0xa0034850	0xa0034b58	776	code:stock-orphan	6	
+0xa00cf6b8	0xa00cf9bc	772	code:stock-orphan	1	
+0xa0048af4	0xa0048de6	754	code:stock-orphan	0	
+0xa0077bb4	0xa0077ea4	752	code:stock-orphan	2	
+0xa0079230	0xa007951c	748	code:stock-orphan	2	
+0xa00b77cc	0xa00b7ab8	748	code:stock-orphan	1	
+0xa00b264c	0xa00b2934	744	code:stock-orphan	2	
+0xa00cad70	0xa00cb054	740	code:stock-orphan	2	
+0xa002e978	0xa002ec58	736	code:stock-orphan	16	
+0xa0025518	0xa00257f6	734	code:stock-orphan	10	
+0xa00908b0	0xa0090b8c	732	code:stock-orphan	2	
+0xa009ef2c	0xa009f1f4	712	code:stock-orphan	2	I:Im_PRO_SG_Ctrl. vdocyc value error!!
+0xa0091d4c	0xa0092008	700	code:stock-orphan	2	Im_MBch_Result_Frame_Diff() error. monitor = NULL
+0xa0174edc	0xa0175198	700	code:stock-orphan	6	
+0xa00b0f18	0xa00b11cc	692	code:stock-orphan	3	I:Im_Xch_Get_Ctrl_Half_Thin: Channel number error. Xch = %d
+0xa009aeb4	0xa009b15c	680	code:stock-orphan	2	I:Im_B2Y_Set_OutAddr_Info_Coop error. buf_index > MAX
+0xa00b2938	0xa00b2be0	680	code:stock-orphan	2	VsT!! Assert : %s (%d)
+0xa00cb86c	0xa00cbb00	660	code:stock-orphan	4	
+0xa00c9a94	0xa00c9d24	656	code:stock-orphan	2	
+0xa0152c90	0xa0152f14	644	code:stock-orphan	1	
+0xa005eb4c	0xa005edcc	640	code:newly-dead(factory)	5	
+0xa0121210	0xa0121488	632	code:stock-orphan	7	
+0xa01604f0	0xa0160768	632	code:stock-orphan	1	Play Top. input error. top_image_flg=%d top_image=0x%x 
+0xa0025a08	0xa0025c7a	626	code:stock-orphan	3	
+0xa0089b60	0xa0089dd0	624	code:stock-orphan	1	pE:Im_HIF_Get_Clip: NULL check error. calc = NULL
+0xa008a784	0xa008a9f0	620	code:stock-orphan	3	
+0xa0151400	0xa015166a	618	code:stock-orphan	2	
+0xa015263a	0xa01528a2	616	code:stock-orphan	7	
+0xa0152a20	0xa0152c88	616	code:stock-orphan	0	d--- Play BF USER_EXC ERR. gBF_Mjpeg_User_User_Exc=%d
+0xa002bbf4	0xa002be58	612	code:stock-orphan	4	GpGpVariable
+0xa0079e08	0xa007a05c	596	code:stock-orphan	2	
+0xa00854ec	0xa0085740	596	code:stock-orphan	2	
+0xa012c0c8	0xa012c31c	596	code:stock-orphan	2	
+0xa0120fb6	0xa0121208	594	code:stock-orphan	17	
+0xa008032c	0xa0080578	588	code:stock-orphan	3	
+0xa01226e8	0xa0122924	572	code:stock-orphan	6	AUDIO_REC]DCF Make New File Path ERR : ret=%d, Line=%d
+0xa004f0e4	0xa004f318	564	code:stock-orphan	1	
+0xa0076258	0xa007648c	564	code:stock-orphan	6	
+0xa00ab5a0	0xa00ab7cc	556	code:stock-orphan	3	
+0xa0158e64	0xa015908e	554	code:stock-orphan	2	
+0xa0076c4c	0xa0076e74	552	code:stock-orphan	3	
+0xa0137946	0xa0137b60	538	code:stock-orphan	3	
+0xa015053a	0xa015074c	530	code:stock-orphan	3	
+0xa004aff8	0xa004b208	528	code:stock-orphan	4	
+0xa014f00c	0xa014f20c	512	code:stock-orphan	1	
+0xa07edc6c	0xa07ede4c	480	menu:factory submenus b6 a4	0	
+0xa07f100c	0xa07f106c	96	menu:factory submenu b9 (AF Debug Mode)	0	

@@ -128,6 +128,7 @@ Safe zero-external-caller ROM caves:
   - `0xA093968C`: `PeakColor` (`0=Red, 1=Yellow, 2=White, 3=Black`) — NVRAM persisted
   - `0xA0939694`: volatile Live View frame counter (`u32`)
   - `0xA0939698..0xA09396A3`: volatile Live View `Y`, `Cb`, `Cr` SDRAM plane pointers (`3 × u32`)
+- Exposure mode `0xA09396AC` (`+0x28`): `0..3` M/S/A/P, `4` Movie, `5..7` C1..C3, `8` temporary (playback), `9/10` C4/C5. C1..C3 slots are NVRAM `+0x194` (`3 × 0x8C`); C4/C5 slots live in payload `.bss` and persist in NOR bank 0 at `0x400..0x51B` (magic `"C4C5"` + `2 × 0x8C`; the stock record ends at `0x3E4`).
 
 ### 3.3 Milbeaut B2Y Live View Hardware Findings
 

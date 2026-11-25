@@ -752,9 +752,10 @@ mod tests {
         build_m5(&fw, &pack, &root.join("src/asm/m5"), &Config::default()).unwrap()
     }
 
-    /// ycc engine insns & SDRAM / ROM data accesses per pixel pair for every fx combo. `DP2M_REF_ASM=<dir>`
-    /// (e.g. `git archive <rev> src/asm/m5`) also runs that engine & driver on the same ctx / input and diffs them;
-    /// `DP2M_PROF=1` prints engine hot spots. `cargo test --release --offline ycc_bench -- --ignored --nocapture`
+    /// ycc engine insns & SDRAM / ROM data accesses per pixel pair for every fx x fill combo; `s/L` = engine
+    /// seconds for a 4704x3136 capture at ~70M insns/s. `DP2M_REF_ASM=<dir>` (e.g. `git archive <rev> src/asm/m5`)
+    /// also runs that engine & driver on the same ctx / input and diffs them; `DP2M_PROF=1` prints insns/pair per
+    /// engine block. `cargo test --release --offline ycc_bench -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn ycc_bench() {
@@ -772,11 +773,12 @@ mod tests {
         let mut labels = fr80::assemble_file_labels(&root.join("src/asm/m5/ycc_engine.fr80"), VA_YCC_SUB, &HashMap::new()).unwrap().1;
         labels.insert(0, (VA_YCC_SUB, "<entry>".into()));
         let cm_c = 23 + 12 * 8 + 5;
-        let groups = [("color", cm_c, 0), ("color fill=2", cm_c, 2), ("B&W toner", 151 + 13, 0)];
+        let groups = [("color", cm_c, 0), ("color fill=1", cm_c, 1), ("color fill=2", cm_c, 2), ("color fill=3", cm_c, 3), ("B&W toner", 151 + 13, 0), ("B&W fill=2", 151 + 13, 2)];
         let sizes = [(Ycc::synth(256, 128), Ycc::synth(256, 128)), (Ycc::synth(4704, 8), Ycc::synth(4704, 3136))];
+        let l_pairs = 4704.0 * 3136.0 / 2.0;
         for (img, cap) in &sizes {
             let pairs = (img.w / 2 * img.h) as f64;
-            println!("\n{}x{} ({} pairs)  insns/pair  sdram/pair  rom/pair  [ref insns/pair  max|d| (diff px)]", img.w, img.h, pairs);
+            println!("\n{}x{} ({} pairs)  insns/pair  sdram/pair  rom/pair   s/L  [ref insns  ref sdram  max|d|  mean|d|  (diff px)]", img.w, img.h, pairs);
             for (label, cm, fill) in groups {
                 for fx in 0..8u32 {
                     let p1d = (fill << 5) | (fx << 2) | 1;
@@ -789,30 +791,27 @@ mod tests {
                     let (out, run) = run_engine(&s2, &c.ctx, &c.scratch, img, prof.then_some(&mut hits)).unwrap();
                     let per = |v: u64| v as f64 / pairs;
                     let mut line = format!(
-                        "  {:<13} fx={}  {:>9.1}  {:>9.2}  {:>8.2}",
-                        label, fx, per(run.steps), per(run.mem[0]), per(run.mem[1])
+                        "  {:<13} fx={}  {:>9.1}  {:>9.2}  {:>8.2}  {:>5.1}",
+                        label, fx, per(run.steps), per(run.mem[0]), per(run.mem[1]), per(run.steps) * l_pairs / 70e6
                     );
                     if let Some(r) = &refs {
-                        let old_fx = [0, 1, 0, 2, 0, 3, 0, 4][fx as usize];
-                        if fx & 1 == 1 || fx == 0 {
-                            let rc = run_driver(r, cm, (fill << 5) | (old_fx << 2) | 1, cap, None, false).unwrap().call.unwrap();
-                            let same = |a: &[u32]| a.iter().enumerate().filter(|&(i, _)| i != 7).map(|(_, v)| *v).collect::<Vec<_>>();
-                            assert!(same(&rc.ctx) == same(&c.ctx) && rc.scratch == c.scratch, "{} fx={}: driver ctx/scratch differ from ref", label, fx);
-                        }
-                        let mut ctx = c.ctx.clone();
-                        ctx[7] = if fx & 2 != 0 { 2 } else { 1 };
-                        let (rout, rrun) = run_engine(r, &ctx, &c.scratch, img, None).unwrap();
-                        let d = (0..3).flat_map(|k| out.p[k].iter().zip(&rout.p[k])).map(|(&a, &b)| (a as i32 - b as i32).abs());
-                        let (maxd, ndiff) = d.fold((0, 0), |(m, n), v| (m.max(v), n + (v != 0) as u32));
-                        line += &format!("  {:>9.1}  {:>3} ({})", per(rrun.steps), maxd, ndiff);
+                        let rc = run_driver(r, cm, p1d, cap, None, false).unwrap().call.unwrap();
+                        assert!(rc.ctx == c.ctx && rc.scratch == c.scratch, "{} fx={}: driver ctx/scratch differ from ref", label, fx);
+                        let (rout, rrun) = run_engine(r, &c.ctx, &c.scratch, img, None).unwrap();
+                        let d: Vec<u32> = (0..3).flat_map(|k| out.p[k].iter().zip(&rout.p[k])).map(|(&a, &b)| a.abs_diff(b) as u32).collect();
+                        let (maxd, ndiff) = (d.iter().max().unwrap(), d.iter().filter(|&&v| v != 0).count());
+                        let mean = d.iter().sum::<u32>() as f64 / d.len() as f64;
+                        line += &format!("  {:>9.1}  {:>9.2}  {:>6}  {:>7.4}  ({})", per(rrun.steps), per(rrun.mem[0]), maxd, mean, ndiff);
                     }
                     println!("{}", line);
-                    // insns/pair per labelled block (a block runs to the next label)
-                    for (k, (va, name)) in labels.iter().enumerate() {
-                        let end = labels.get(k + 1).map_or(VA_SPATIAL_DRV, |l| l.0);
-                        let n: u64 = hits.get(((va - VA_YCC_SUB) / 2) as usize..((end - VA_YCC_SUB) / 2) as usize).map_or(0, |h| h.iter().sum());
-                        if per(n) >= 0.5 {
-                            println!("      {:>7.2}  0x{:06x}  {}", per(n), va, name);
+                    if prof {
+                        // insns/pair per labelled block (a block runs to the next label)
+                        for (k, (va, name)) in labels.iter().enumerate() {
+                            let end = labels.get(k + 1).map_or(VA_SPATIAL_DRV, |l| l.0);
+                            let n: u64 = hits[((va - VA_YCC_SUB) / 2) as usize..((end - VA_YCC_SUB) / 2) as usize].iter().sum();
+                            if per(n) >= 0.5 {
+                                println!("      {:>7.2}  0x{:06x}  {}", per(n), va, name);
+                            }
                         }
                     }
                 }

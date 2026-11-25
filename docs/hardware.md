@@ -107,7 +107,7 @@ Additional verified stock M5Slave addresses:
 
 ### 2.5 Color Pipeline & `D2ML` SD-Card 3D LUT Format
 
-- **Dual-colorspace 17×9×9 Q1 Sakamoto 3D residual LUT**: `17` luma (`step 16`) × `9` Cb (`step 32`) × `9` Cr (`step 32`) × `3` signed `i8` (`0.5`-LSB Q1 deltas) = `4,131` B (`LUT3D_STRIDE = 0x1028`).
+- **Dual-colorspace 17×9×9 Q1 Sakamoto 3D residual LUT**: `17` luma (`step 16`) × `9` Cb (`step 32`) × `9` Cr (`step 32`) × `3` signed `i8` (`0.5`-LSB Q1 deltas) = `4,131` B (`LUT3D_STRIDE = 0x1028`). The engine reads them biased (`s8 ^ 0x80`, folding `-128 × 32` into the rounding term) to skip sign extension: the ROM copies are stored biased, and the driver biases a `D2ML` file in place after loading it.
 - **`D2ML` SD-card binary (`4,160` B = `0x1040`, Big-Endian)**:
   - `0x0000` (4 B): `"D2ML"` (`0x44324D4C`)
   - `0x0004` (1 B): version `0x01`
@@ -117,15 +117,15 @@ Additional verified stock M5Slave addresses:
   - `0x0008` (1 B): `halo_tint` (`0=Crimson, 1=Neutral B&W, 2=Warm Amber`)
   - `0x0009` (7 B): ASCII tag (zero-padded)
   - `0x0010` (4,131 B): `17×9×9×3` Q1 `i8` residual LUT, zero-padded to `0x1040`.
-- **Measured cost on a 1:1 crop** (`SDIM4449.JPG` 256x128 in the FR80 emulator; about 70 M effective FR80 instructions/s on the camera with uncached SDRAM). Times are for L / M / S output. `cargo test --release -p dp2m ycc_bench -- --ignored --nocapture` prints the current figures.
+- **Measured cost** in the FR80 emulator (`ycc_bench`) on synthetic frames: 256x128 (mostly smooth) and a 4704x8 strip (steep rows, hard edges, a noisy quarter, so most `4x2` tiles fall back to per-pair evaluation). L time assumes about 70 M effective FR80 instructions/s with uncached SDRAM; M ≈ 0.48 L, S ≈ 0.25 L. `cargo test --release --offline -p dp2m ycc_bench -- --ignored --nocapture` prints every fx × fill combination.
 
-| `fx` | Stages | insns / pair | L | M | S |
+| `fx` | Stages | insns / pair (256x128) | L | insns / pair (4704x8) | L |
 | --- | --- | --- | --- | --- | --- |
 | `0` | stock HW path | 0 | 0 | 0 | 0 |
-| `1` | 3D LUT | 73.4 | ~7.7 s | ~3.7 s | ~1.9 s |
-| `3` | 3D LUT + grain | 126.6 | ~13.3 s | ~6.4 s | ~3.3 s |
-| `5` | 3D LUT + halation | 173.6 | ~18.3 s | ~8.8 s | ~4.5 s |
-| `7` | 3D LUT + grain + halation | 222.7 | ~23.5 s | ~11.3 s | ~5.8 s |
+| `1` | 3D LUT | 81.3 | ~8.6 s | 114.4 | ~12.1 s |
+| `3` | 3D LUT + grain | 140.1 | ~14.8 s | 187.3 | ~19.7 s |
+| `5` | 3D LUT + halation | 164.6 | ~17.3 s | 184.4 | ~19.4 s |
+| `7` | 3D LUT + grain + halation | 211.2 | ~22.3 s | 230.5 | ~24.3 s |
 
 ---
 
@@ -264,15 +264,14 @@ The packed mode follows `packed_mode` in `crates/dp2m/src/catalog.rs` (film orde
 
 Verified so far in emulation only (`dp2m build` verifiers, `python -m tools.verify`); nothing below has been tested on a camera.
 
-- **On-camera checks**: full `DP2MV200.bin` install from 1.05 and reinstall of stock 1.05; runtime label icons (QS, OSD, MODE, LV status); C4/C5 slot persistence across power cycles; payload RAM window `0xA1C00000..0xA1E00000` under LV, capture, playback, movie and USB.
-- **Playback info icon**: `0xA0047734` draws the detailed-info color mode icon from file info `+0x157` and has no case for film modes.
-- **M5 engine**: the two items below; baseline per fx/fill combination from `ycc_bench`.
+- **On-camera checks**: full `DP2MV200.bin` install from 1.05 and reinstall of stock 1.05; runtime label icons (QS, OSD, MODE, LV status, playback info); C4/C5 slot persistence across power cycles; payload RAM window `0xA1C00000..0xA1E00000` under LV, capture, playback, movie and USB; M5 engine wall time per fx combination.
 - **Verifier coverage**: `.dp2m.hooks` application over every record, the 11-page menu list and `page_group`, HUD grid drawing.
-- **Browser build**: WASM build of the emulator for UX review.
 
 ### M5 performance notes
 
-1. **32-bit word-packed Y loads/stores in `src/asm/m5/ycc_engine.fr80`**: the M5Slave D-cache is disabled, so uncached byte loads and stores dominate. Loading 4 horizontal Y bytes with one aligned 32-bit `ld` and writing one 32-bit `st` per `4x2` tile row (when `Y_row & 3 == 0` and `y_stride & 3 == 0`) cuts Y-plane SDRAM transactions by 4x.
-2. **Coarse `8x4` tile coherence for the 3D LUT**: extending the smooth-tile check to `8x4` (falling back to `4x2`, then per pair) halves Sakamoto evaluations across smooth gradients.
+- **Done (bit-exact)**: biased 3D LUT bytes (no `extsb`, 12 instructions per evaluation); the fast `4x2` tile adds the luma delta to 4 pixels per aligned 32-bit `ld`/`st` with a SWAR saturating add (`x - e = ~(~x + e)`), replacing 16 byte accesses and 8 clamp-table reads per tile; flag `b6` enables fast tiles only when `Y` and `y_stride` are word-aligned, else jobs run per pair. Together: 4704x8 `fx=1` 123.8 → 114.4 insns/pair, 17.7 → 16.5 SDRAM accesses/pair.
+- **Rejected**: `8x4` block coherence (one evaluation per coherent block, `4x2` fallback). 256x128 `fx=1` dropped 9 % but max |Δ| vs `4x2` reached 15 levels, and the 4704x8 strip got 9 % slower from the extra block test.
+- **Not worth it**: SWAR for chroma (2 bytes per row per plane costs more ALU work than it saves) and `mulh` (fewer cycles on paper, but unverified on this silicon).
+- **Remaining cost**: per-pair evaluation in edge tiles (`f3d_ed_ev`, about half of `fx=1` on the strip) and per-pair flag tests in the general path (`pair_loop`, `after_halo`).
 
 The halation row zero-skip (`OR(row0 | row1) < 2 -> skip bilerp_2d`) is already in `ycc_engine.fr80`.

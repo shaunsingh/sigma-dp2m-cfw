@@ -121,7 +121,7 @@ Icon sizes by use:
 | LV widget 0x2E | 35x20 | `0xB7..0xB9` |
 | "modified" star | 11x11 | `0x2F` |
 
-`python -m tools.re icons --fw data/DP2MV105.bin` (RE CLI, in progress on a separate branch) renders the stock icon set; extracted images are not kept in the repository.
+`python -m tools.re icons --sheet icons.png` renders the stock icon set; extracted images are not kept in the repository.
 
 ### dp2m label icon ids
 

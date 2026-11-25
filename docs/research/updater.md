@@ -74,4 +74,4 @@ Confirmed from `0xA000CFCA`, `0xA000D3BC..0xA000D40A` and on-camera flashing:
 ## Tools
 
 - `cargo run --release -- inspect <file>` identifies a package, `Firm.bin` or `C78FRM.bin` and prints the package version and date.
-- `python -m tools.re package --fw data/DP2MV105.bin` (RE CLI, in progress on a separate branch) dumps the header and segments.
+- `python -m tools.re package [path]` dumps the header and segments.

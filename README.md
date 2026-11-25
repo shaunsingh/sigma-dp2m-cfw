@@ -123,7 +123,13 @@ Scripts in `tools/`:
 | `pack_builder.py` | build `data/film_pack.bin` from calibration data |
 | `x3f_camf.py` | decode X3F CAMF sections |
 | `x3f_raw_dump.c` | decode Merrill X3F raw data to 16-bit samples |
-| `verify_m6m_unicorn.py` | Unicorn run of M6M hooks; written for the earlier fixed-address payload |
+
+Python packages in `tools/` (deps in `tools/pyproject.toml`; run from the repository root):
+
+| Command | Purpose |
+| --- | --- |
+| `python -m tools.verify out` | emulated M6M suites on a build output: hooks, menus, settings, IPC, live view, updater, C1..C5, label icons; exits 1 on any failure |
+| `python -m tools.re [--fw f] [--image f] <cmd>` | M6M reverse engineering: `package`, `dis`, `xrefs`, `callers`, `sid`, `strings`, `menus`, `screens`, `icons`, `text`, `liveness`, `nvram` (`-h` per command) |
 
 ## Repository layout
 

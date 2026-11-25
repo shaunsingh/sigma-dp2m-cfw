@@ -62,4 +62,4 @@ Screen 50 looks factory-only from the menus, but `0xA0042CBC` / `0xA0042CCE` pos
 | `data:*` | data referenced only by dead code |
 | `menu:*` | factory menu tables |
 
-`python -m tools.re liveness --fw data/DP2MV105.bin` (RE CLI, in progress on a separate branch) regenerates the analysis.
+`python -m tools.re liveness` regenerates the analysis (`--image out/C78FRM.bin` re-checks a build).

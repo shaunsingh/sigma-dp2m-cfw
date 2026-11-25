@@ -260,7 +260,17 @@ The packed mode follows `packed_mode` in `crates/dp2m/src/catalog.rs` (film orde
 
 ---
 
-## 4. M5 performance notes
+## 4. Open work
+
+Verified so far in emulation only (`dp2m build` verifiers, `python -m tools.verify`); nothing below has been tested on a camera.
+
+- **On-camera checks**: full `DP2MV200.bin` install from 1.05 and reinstall of stock 1.05; runtime label icons (QS, OSD, MODE, LV status); C4/C5 slot persistence across power cycles; payload RAM window `0xA1C00000..0xA1E00000` under LV, capture, playback, movie and USB.
+- **Playback info icon**: `0xA0047734` draws the detailed-info color mode icon from file info `+0x157` and has no case for film modes.
+- **M5 engine**: the two items below; baseline per fx/fill combination from `ycc_bench`.
+- **Verifier coverage**: `.dp2m.hooks` application over every record, the 11-page menu list and `page_group`, HUD grid drawing.
+- **Browser build**: WASM build of the emulator for UX review.
+
+### M5 performance notes
 
 1. **32-bit word-packed Y loads/stores in `src/asm/m5/ycc_engine.fr80`**: the M5Slave D-cache is disabled, so uncached byte loads and stores dominate. Loading 4 horizontal Y bytes with one aligned 32-bit `ld` and writing one 32-bit `st` per `4x2` tile row (when `Y_row & 3 == 0` and `y_stride & 3 == 0`) cuts Y-plane SDRAM transactions by 4x.
 2. **Coarse `8x4` tile coherence for the 3D LUT**: extending the smooth-tile check to `8x4` (falling back to `4x2`, then per pair) halves Sakamoto evaluations across smooth gradients.

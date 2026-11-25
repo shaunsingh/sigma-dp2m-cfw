@@ -153,7 +153,11 @@ Stock `0xA0035FCE` clamps `meta[+0x1E]` to `0..7` and `meta[+0x1D]` to `0..1` an
   - `23..150`: `23 + neg_idx * 8 + paper_idx` (16 negative films × 8 print papers)
   - `151..190`: `151 + bw_idx * 8 + paper_idx` (5 B&W stocks × 8 darkroom papers/toners)
   - `191..198`: SD-card custom 3D LUTs (`D:\LUT1.BIN..D:\LUT8.BIN`)
-- `cmd[6]`: `(fill << 5) | (fx << 2) | cs` (`cs`: `1=sRGB, 2=AdobeRGB`; `fx`: `0..4`; `fill`: `0..3`).
+- `cmd[6]`: `(fill << 5) | (fx << 2) | cs` (`cs`: `1=sRGB, 2=AdobeRGB`; `fill`: `0..3`), stored by M5Slave `ipc_unpack` in `slot+0x14C`. `fx` holds three independent toggles, all 8 combinations valid:
+  - bit 0: 3D LUT engine (`19..150` film LUTs, `191..198` SD LUTs; ignored by other modes)
+  - bit 1: film grain
+  - bit 2: halation (needs the mode's `halo_gain > 0`)
+  - Grain and halation also run on the HW color path (bit 0 clear). B&W toners (`151..190`) and X3 Fill always apply. SD-LUT modes load `D:\LUTn.BIN` whenever any `fx` bit is set (its header supplies grain/halation params). With no stage active, the hook falls through to the stock HW JPEG path untouched.
 
 ---
 

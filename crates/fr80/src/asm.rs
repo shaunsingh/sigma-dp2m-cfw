@@ -724,6 +724,20 @@ fn encode_stmt(loc: &str, line: &str, syms: &HashMap<String, i64>) -> Result<Ite
             }
             vec![0xB8, ((u4 as u8) << 4) | dst]
         }
+        // *2 forms shift by 16..31 (stock `b1f1 lsr2 #31` @ 0x4D3F6E)
+        "lsr2" | "lsl2" | "asr2" => {
+            let n = eval_expr(&ops[0], syms).map_err(e)?;
+            let dst = parse_reg(&ops[1]).map_err(e)?;
+            if !(16..=31).contains(&n) {
+                return Err(e(format!("{} #n out of [16..31]: {}", mnem, n)));
+            }
+            let op = match mnem.as_str() {
+                "lsr2" => 0xB1,
+                "lsl2" => 0xB5,
+                _ => 0xB9,
+            };
+            vec![op, (((n - 16) as u8) << 4) | dst]
+        }
         "extsb" => vec![0x97, 0x80 | parse_reg(&ops[0]).map_err(e)?],
         "extub" => vec![0x97, 0x90 | parse_reg(&ops[0]).map_err(e)?],
         "extsh" => vec![0x97, 0xA0 | parse_reg(&ops[0]).map_err(e)?],
@@ -848,6 +862,9 @@ mod tests {
         assert_eq!(assemble_str("asr #1, r0", 0, &empty).unwrap(), vec![0xB8, 0x10]);
         assert_eq!(assemble_str("lsr #1, r0", 0, &empty).unwrap(), vec![0xB0, 0x10]);
         assert_eq!(assemble_str("lsl #1, r0", 0, &empty).unwrap(), vec![0xB4, 0x10]);
+        assert_eq!(assemble_str("lsr2 #31, r1", 0, &empty).unwrap(), vec![0xB1, 0xF1]);
+        assert_eq!(assemble_str("lsl2 #24, r2", 0, &empty).unwrap(), vec![0xB5, 0x82]);
+        assert!(assemble_str("lsr2 #15, r0", 0, &empty).is_err());
     }
 
     #[test]

@@ -4,6 +4,9 @@ use std::collections::HashMap;
 
 pub type Handler = Box<dyn FnMut(&mut Emulator) -> u32>;
 
+/// `rp` on entry to [`Emulator::run`]; returning to it ends the run
+pub const RETURN: u32 = 0xDEAD_BEEF;
+
 pub struct SdramRegion {
     pub base: u32,
     pub data: Vec<u8>,
@@ -18,6 +21,10 @@ pub struct Emulator<'a> {
     pub flags: (bool, bool, bool, bool), // (N, Z, V, C)
     pub sdram: Vec<SdramRegion>,
     pub sparse_ram: HashMap<u32, u8>,
+    /// data accesses per instruction: [sdram (>= 0x8000_0000), rom/other]
+    pub mem: [u64; 2],
+    /// optional per-halfword execution counts over `base..base + 2 * len`
+    pub prof: Option<(u32, Vec<u64>)>,
     handlers: HashMap<u32, Handler>,
 }
 
@@ -32,8 +39,16 @@ impl<'a> Emulator<'a> {
             flags: (false, false, false, false),
             sdram: Vec::new(),
             sparse_ram: HashMap::new(),
+            mem: [0; 2],
+            prof: None,
             handlers: HashMap::new(),
         }
+    }
+
+    #[inline(always)]
+    fn tally(&mut self, addr: u32) -> u32 {
+        self.mem[(addr < 0x8000_0000) as usize] += 1;
+        addr
     }
 
     pub fn map_sdram(&mut self, base: u32, size: usize) -> usize {
@@ -126,13 +141,12 @@ impl<'a> Emulator<'a> {
     }
 
     pub fn run(&mut self, start_va: u32, max_steps: u64) -> Result<u64, String> {
-        const SENTINEL: u32 = 0xDEAD_BEEF;
         let mut pc = start_va;
-        self.rp = SENTINEL;
+        self.rp = RETURN;
         let mut steps = 0u64;
 
         while steps < max_steps {
-            if pc == SENTINEL {
+            if pc == RETURN {
                 return Ok(steps);
             }
             if let Some(mut h) = self.handlers.remove(&pc) {
@@ -140,6 +154,11 @@ impl<'a> Emulator<'a> {
                 self.handlers.insert(pc, h);
                 pc = next_pc;
                 continue;
+            }
+            if let Some((base, counts)) = &mut self.prof {
+                if let Some(c) = counts.get_mut((pc.wrapping_sub(*base) / 2) as usize) {
+                    *c += 1;
+                }
             }
             let op = self.fetch16(pc);
             pc = pc.wrapping_add(2);
@@ -159,11 +178,13 @@ impl<'a> Emulator<'a> {
                 // nop
             } else if op == 0x9F90 {
                 self.r[15] = self.r[14];
-                self.r[14] = self.r32(self.r[15]);
+                let a = self.tally(self.r[15]);
+                self.r[14] = self.r32(a);
                 self.r[15] = self.r[15].wrapping_add(4);
             } else if hi8 == 0x0F {
                 self.r[15] = self.r[15].wrapping_sub(4);
-                self.w32(self.r[15], self.r[14]);
+                let a = self.tally(self.r[15]);
+                self.w32(a, self.r[14]);
                 self.r[14] = self.r[15];
                 self.r[15] = self.r[15].wrapping_sub((lo8 as u32) * 4);
             } else if hi8 == 0x9B {
@@ -197,12 +218,12 @@ impl<'a> Emulator<'a> {
                 self.set_cmp(self.r[n0], self.r[n1]);
             } else if hi8 == 0xA8 {
                 self.set_cmp(self.r[n0], n1 as u32);
-            } else if hi8 == 0xB4 {
-                self.r[n0] = self.r[n0].wrapping_shl(n1 as u32);
-            } else if hi8 == 0xB0 {
-                self.r[n0] = self.r[n0].wrapping_shr(n1 as u32);
-            } else if hi8 == 0xB8 {
-                self.r[n0] = ((self.r[n0] as i32) >> n1) as u32;
+            } else if hi8 == 0xB4 || hi8 == 0xB5 {
+                self.r[n0] = self.r[n0].wrapping_shl(n1 as u32 + ((hi8 & 1) as u32) * 16);
+            } else if hi8 == 0xB0 || hi8 == 0xB1 {
+                self.r[n0] = self.r[n0].wrapping_shr(n1 as u32 + ((hi8 & 1) as u32) * 16);
+            } else if hi8 == 0xB8 || hi8 == 0xB9 {
+                self.r[n0] = ((self.r[n0] as i32) >> (n1 + ((hi8 & 1) as usize) * 16)) as u32;
             } else if hi8 == 0x97 && n1 == 0x8 {
                 self.r[n0] = (self.r[n0] as u8 as i8 as i32) as u32;
             } else if hi8 == 0x97 && n1 == 0x9 {
@@ -220,53 +241,57 @@ impl<'a> Emulator<'a> {
                 pc = self.rp;
             } else if hi8 == 0x17 && n1 == 0 {
                 self.r[15] = self.r[15].wrapping_sub(4);
-                self.w32(self.r[15], self.r[n0]);
+                let a = self.tally(self.r[15]);
+                self.w32(a, self.r[n0]);
             } else if hi8 == 0x17 && n1 == 8 && n0 == 1 {
                 self.r[15] = self.r[15].wrapping_sub(4);
-                self.w32(self.r[15], self.rp);
+                let a = self.tally(self.r[15]);
+                self.w32(a, self.rp);
             } else if hi8 == 0x07 && n1 == 0 {
-                self.r[n0] = self.r32(self.r[15]);
+                let a = self.tally(self.r[15]);
+                self.r[n0] = self.r32(a);
                 self.r[15] = self.r[15].wrapping_add(4);
             } else if hi8 == 0x07 && n1 == 8 && n0 == 1 {
-                self.rp = self.r32(self.r[15]);
+                let a = self.tally(self.r[15]);
+                self.rp = self.r32(a);
                 self.r[15] = self.r[15].wrapping_add(4);
             } else if hi8 == 0xA3 {
                 let d = (lo8 as i8 as i32) * 4;
                 self.r[15] = self.r[15].wrapping_add(d as u32);
             } else if n3 == 0x2 {
                 let d = ((((n2 << 4) | n1) as u8 as i8) as i32) * 4;
-                self.r[n0] = self.r32(self.r[14].wrapping_add(d as u32));
+                let a = self.tally(self.r[14].wrapping_add(d as u32));
+                self.r[n0] = self.r32(a);
             } else if n3 == 0x3 {
                 let d = ((((n2 << 4) | n1) as u8 as i8) as i32) * 4;
-                self.w32(self.r[14].wrapping_add(d as u32), self.r[n0]);
+                let a = self.tally(self.r[14].wrapping_add(d as u32));
+                self.w32(a, self.r[n0]);
             } else if hi8 == 0x03 {
-                self.r[n0] = self.r32(self.r[15].wrapping_add((n1 as u32) * 4));
+                let a = self.tally(self.r[15].wrapping_add((n1 as u32) * 4));
+                self.r[n0] = self.r32(a);
             } else if hi8 == 0x13 {
-                self.w32(self.r[15].wrapping_add((n1 as u32) * 4), self.r[n0]);
-            } else if hi8 == 0x00 {
-                self.r[n0] = self.r32(self.r[n1].wrapping_add(self.r[13]));
-            } else if hi8 == 0x01 {
-                self.r[n0] = self.r16(self.r[n1].wrapping_add(self.r[13])) as u32;
-            } else if hi8 == 0x02 {
-                self.r[n0] = self.r8(self.r[n1].wrapping_add(self.r[13])) as u32;
-            } else if hi8 == 0x04 {
-                self.r[n0] = self.r32(self.r[n1]);
-            } else if hi8 == 0x05 {
-                self.r[n0] = self.r16(self.r[n1]) as u32;
-            } else if hi8 == 0x06 {
-                self.r[n0] = self.r8(self.r[n1]) as u32;
-            } else if hi8 == 0x10 {
-                self.w32(self.r[n1].wrapping_add(self.r[13]), self.r[n0]);
-            } else if hi8 == 0x11 {
-                self.w16(self.r[n1].wrapping_add(self.r[13]), self.r[n0] as u16);
-            } else if hi8 == 0x12 {
-                self.w8(self.r[n1].wrapping_add(self.r[13]), self.r[n0] as u8);
-            } else if hi8 == 0x14 {
-                self.w32(self.r[n1], self.r[n0]);
-            } else if hi8 == 0x15 {
-                self.w16(self.r[n1], self.r[n0] as u16);
-            } else if hi8 == 0x16 {
-                self.w8(self.r[n1], self.r[n0] as u8);
+                let a = self.tally(self.r[15].wrapping_add((n1 as u32) * 4));
+                self.w32(a, self.r[n0]);
+            } else if hi8 <= 0x02 || (0x10..=0x12).contains(&hi8) {
+                let a = self.tally(self.r[n1].wrapping_add(self.r[13]));
+                match hi8 {
+                    0x00 => self.r[n0] = self.r32(a & !3),
+                    0x01 => self.r[n0] = self.r16(a & !1) as u32,
+                    0x02 => self.r[n0] = self.r8(a) as u32,
+                    0x10 => self.w32(a & !3, self.r[n0]),
+                    0x11 => self.w16(a & !1, self.r[n0] as u16),
+                    _ => self.w8(a, self.r[n0] as u8),
+                }
+            } else if (0x04..=0x06).contains(&hi8) || (0x14..=0x16).contains(&hi8) {
+                let a = self.tally(self.r[n1]);
+                match hi8 {
+                    0x04 => self.r[n0] = self.r32(a & !3),
+                    0x05 => self.r[n0] = self.r16(a & !1) as u32,
+                    0x06 => self.r[n0] = self.r8(a) as u32,
+                    0x14 => self.w32(a & !3, self.r[n0]),
+                    0x15 => self.w16(a & !1, self.r[n0] as u16),
+                    _ => self.w8(a, self.r[n0] as u8),
+                }
             } else if n3 == 0xE {
                 let (n, z, v, c) = self.flags;
                 let take = match n2 {

@@ -31,7 +31,7 @@ Defined in `REGIONS` in `crates/dp2m/src/m6m/mod.rs` and emitted as the linker `
 | `MENU` | `0xA07EC9CC..0xA07EDC0C` | 4,672 B | factory service menus 0x18..0x22 and their submenus; menu 0xA3 at `0xA07EDC0C` stays |
 | `RAM` | `0xA1C00000..0xA1E00000` | 2 MB | unreferenced SDRAM (see [m6m-memory.md](m6m-memory.md)), `.bss` only |
 
-The `CODE` region is contiguous: dead code below the former cave 1 (`0xA0059D50..0xA005A400`), cave 1 (`0xA005A400..0xA005BE38`, screens 33..42), cave 2S (`0xA005BE38..0xA005CDF4`, screens 43..46) and screens 47..49 (`0xA005CDF4..0xA005D924`). The builder refuses to retire a vtable slot that does not point into `CODE`.
+The `CODE` region is contiguous: `0xA0059D50..0xA005A400` (screen 33), `0xA005A400..0xA005BE38` (screens 34..43), `0xA005BE38..0xA005CDF4` (screens 44..47) and `0xA005CDF4..0xA005D924` (screens 48, 49). The builder refuses to retire a vtable slot that does not point into `CODE`.
 
 ### Unused candidates
 

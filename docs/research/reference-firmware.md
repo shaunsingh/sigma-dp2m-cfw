@@ -54,7 +54,7 @@ Same header layout as `DP2MV105.bin`:
 
 - The main ARM image is little-endian; the DP2M M6M is big-endian, so code cannot be copied across, only logic and constants.
 - Version print format on the sd Quattro H: `%s %s ver%d.%d.0.%04X`.
-- The ISO 50, 5-shot bracketing and ISO-auto minimum shutter features in dp2m follow the sd Quattro H behaviour (see [../hardware.md](../hardware.md#backports-and-peripherals)).
+- The ISO 50, 5-shot bracketing and ISO-auto minimum shutter features in dp2m follow the sd Quattro H behaviour (see [../hardware.md](../hardware.md#37-backports-and-peripherals)).
 
 ## fp 5.02
 

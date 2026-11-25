@@ -244,8 +244,7 @@ fl1:
 fl2:
     ld_ctx  76, r1 ; cmp #0, r1 ; beq fl3 ; ldi:8 #8, r2 ; or r2, r0
 fl3:
-    ld_ctx  28, r1 ; cmp #2, r1 ; beq fl4_on ; cmp #4, r1 ; bne fl4_no
-fl4_on:
+    ld_ctx  28, r1 ; ldi:8 #2, r2 ; and r2, r1 ; beq fl4_no
     ldi:8   #16, r2 ; or r2, r0
 fl4_no:
     ld_ctx  52, r1 ; cmp #0, r1 ; beq fl5 ; ldi:8 #32, r2 ; or r2, r0

@@ -280,6 +280,9 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
     }
 
     let strs = &st.0;
+    if strs.len() > (ICON_LABEL_S - ICON_LABEL_L) as usize {
+        return Err(format!("{} strings overflow the label icon index (class << 10 | string index)", strs.len()));
+    }
     writeln!(c, "\nconst char *const dp2m_strings[] __attribute__((section(\".menu.str\"))) = {{").unwrap();
     for s in strs {
         writeln!(c, "    \"{}\",", s.replace('\\', "\\\\").replace('"', "\\\"")).unwrap();

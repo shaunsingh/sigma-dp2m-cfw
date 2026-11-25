@@ -1,4 +1,4 @@
-//! m5slave (fujitsu fr80 BE, `Firm.bin`) fw patcher & native fr80 verifier
+//! m5slave (fujitsu fr80 BE, `Firm.bin`) fw patcher & fr80 verifier
 
 use std::collections::HashMap;
 use std::path::Path;

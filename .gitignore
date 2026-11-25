@@ -8,6 +8,10 @@ dp2m.fnl
 *.elf
 *.map
 
+# Host-local offline crate vendoring
+/vendor/
+/.cargo/
+
 # Proprietary Sigma firmware binaries
 # *.bin
 # *.BIN

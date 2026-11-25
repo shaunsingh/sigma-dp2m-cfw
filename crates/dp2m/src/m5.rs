@@ -5,6 +5,7 @@ use std::path::Path;
 
 use fr80::{assemble_file, assemble_sections, Emulator};
 
+use crate::catalog::MONO_FILTER_Q7;
 use crate::config::Config;
 use crate::pack::{build_argb_std_lut, build_mcas_struct, calibrate_lut_dp2m, rint_even, FilmPack};
 
@@ -57,11 +58,12 @@ pub fn m5_checksum(buf: &[u8]) -> u32 {
 }
 
 fn scale_meta(mut meta: [u8; 4], cfg: &Config) -> [u8; 4] {
-    if (cfg.grain_scale - 1.0).abs() > 1e-9 {
-        meta[0] = rint_even((meta[0] as f64) * cfg.grain_scale).clamp(0.0, 64.0) as u8;
+    let (g, h) = (cfg.m5.grain_scale, cfg.m5.halo_scale);
+    if (g - 1.0).abs() > 1e-9 {
+        meta[0] = rint_even((meta[0] as f64) * g).clamp(0.0, 64.0) as u8;
     }
-    if (cfg.halo_scale - 1.0).abs() > 1e-9 {
-        meta[2] = rint_even((meta[2] as f64) * cfg.halo_scale).clamp(0.0, 255.0) as u8;
+    if (h - 1.0).abs() > 1e-9 {
+        meta[2] = rint_even((meta[2] as f64) * h).clamp(0.0, 255.0) as u8;
     }
     meta
 }
@@ -184,10 +186,7 @@ pub fn build_m5(fw_raw: &[u8], pack: &FilmPack, asm_dir: &Path, cfg: &Config) ->
     s2[va_off(VA_GRAIN_ENVS)..va_off(VA_GRAIN_ENVS) + 768].copy_from_slice(&pack.rom_grain_envs);
     s2[va_off(VA_SD_PATH_TMPL)..va_off(VA_SD_PATH_TMPL) + 12].copy_from_slice(b"D:\\LUT1.BIN\0");
 
-    const MONO_W: [(i16, i16, i16); 5] = [
-        (26, 51, 51), (46, 58, 24), (60, 52, 16), (72, 46, 10), (22, 82, 24),
-    ];
-    for (i, &(wr, wg, wb)) in MONO_W.iter().enumerate() {
+    for (i, &(wr, wg, wb)) in MONO_FILTER_Q7.iter().enumerate() {
         let o = va_off(VA_MONO_TABLE + (i as u32) * 20);
         s2[o] = 0x02;
         s2[o + 1] = 0x00;
@@ -283,7 +282,7 @@ pub fn build_m5(fw_raw: &[u8], pack: &FilmPack, asm_dir: &Path, cfg: &Config) ->
     }
 
     // modes 191..198 (sd lut slots)
-    let sd_meta = scale_meta(cfg.sd_lut_meta, cfg);
+    let sd_meta = scale_meta(cfg.m5.sd_lut_defaults.meta(), cfg);
     for s_i in 0..8 {
         write_mode(&mut s2, stock_mcb, stock_mcid, 182 + s_i, &eye_q10, stock_std_lut, &argb_std_lut, sd_meta, None, None);
     }

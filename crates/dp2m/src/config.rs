@@ -1,55 +1,99 @@
-//! native zero-dep parser for fennel config tables (`dp2m.fnl`)
-//! supports `;` comments, `{:k v}` tables, `[a b]` vecs, `:keywords`, strings, bools, `nil`, hex/dec ints, floats
+//! `dp2m.fnl` loader: Fennel compiled & evaluated by embedded LuaJIT, then deserialized via serde
 
-use std::collections::HashMap;
-use std::fs;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-// m5slave paper slot order (0..7)
-pub const PAPER_KEYS: [&str; 8] = [
-    "endura-premier",
-    "ektacolor-edge",
-    "supra-endura",
-    "portra-endura",
-    "crystal-archive",
-    "kodak-2383",
-    "kodak-2393",
-    "ultra-endura",
-];
+use mlua::{Lua, LuaSerdeExt, Table, Value};
+use serde::Deserialize;
 
-pub fn paper_index(key: &str) -> Option<u8> {
-    PAPER_KEYS.iter().position(|&k| k == key).map(|i| i as u8)
-}
+use crate::catalog::{self, FilmKind, Paper};
 
-#[derive(Debug, Clone)]
-pub struct ModeOverride {
-    pub enabled: bool,
-    pub paper: Option<u8>,
-}
+const FENNEL: &str = include_str!("../lua/fennel.lua");
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 pub struct Config {
     pub firmware: Option<PathBuf>,
     pub out_dir: Option<PathBuf>,
     pub pack: Option<PathBuf>,
     pub verify: bool,
+    /// `major.minor` shown by the stock updater & "Current version"; must be >= 1.05.
+    pub version: String,
+    pub films: BTreeMap<String, FilmCfg>,
+    pub m5: M5Cfg,
+    pub m6m: M6mCfg,
+    pub sd: SdCfg,
+}
 
-    pub modes: HashMap<String, ModeOverride>,
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum FilmCfg {
+    Enabled(bool),
+    Spec {
+        #[serde(default = "yes")]
+        enabled: bool,
+        paper: Option<String>,
+    },
+}
 
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct M5Cfg {
     pub grain_scale: f64,
     pub halo_scale: f64,
-    pub sd_lut_meta: [u8; 4], // [grain_amp, grain_profile, halo_gain, halo_tint]
+    pub sd_lut_defaults: SdLutCfg,
+}
 
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct SdLutCfg {
+    pub grain: u8,
+    pub grain_profile: GrainProfile,
+    pub halo: u8,
+    pub halo_tint: HaloTint,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GrainProfile {
+    Negative,
+    Slide,
+    Bw,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HaloTint {
+    Crimson,
+    Neutral,
+    Amber,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct M6mCfg {
     pub iso50: bool,
     pub bkt5: bool,
     pub peaking_threshold: u32,
-    pub zebra_threshold: u32,
+    pub zebra_threshold: u8,
+    /// APEX Tv Q16 for Auto(stock), 1/15 .. 1/500.
     pub min_shutter_q16: [u32; 7],
-    pub grid_modes: HashMap<String, bool>,
+    pub grids: BTreeMap<String, bool>,
+}
 
-    pub sd_mount: Option<PathBuf>,
-    pub sd_copy_firm: bool,
-    pub sd_copy_c78: bool,
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+pub struct SdCfg {
+    pub mount: Option<PathBuf>,
+    /// Copy `DP2MVxxx.bin` (stock updater path).
+    pub package: bool,
+    /// Copy loose `Firm.bin` / `C78FRM.bin` (debug updater path, no version check).
+    pub firm: bool,
+    pub c78: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for Config {
@@ -59,377 +103,186 @@ impl Default for Config {
             out_dir: None,
             pack: None,
             verify: true,
-            modes: HashMap::new(),
-            grain_scale: 1.0,
-            halo_scale: 1.0,
-            sd_lut_meta: [24, 0, 64, 0],
+            version: "2.00".into(),
+            films: BTreeMap::new(),
+            m5: M5Cfg::default(),
+            m6m: M6mCfg::default(),
+            sd: SdCfg::default(),
+        }
+    }
+}
+
+impl Default for M5Cfg {
+    fn default() -> Self {
+        Self { grain_scale: 1.0, halo_scale: 1.0, sd_lut_defaults: SdLutCfg::default() }
+    }
+}
+
+impl Default for SdLutCfg {
+    fn default() -> Self {
+        Self { grain: 24, grain_profile: GrainProfile::Negative, halo: 64, halo_tint: HaloTint::Crimson }
+    }
+}
+
+impl Default for M6mCfg {
+    fn default() -> Self {
+        Self {
             iso50: true,
             bkt5: true,
             peaking_threshold: 44,
             zebra_threshold: 242,
-            min_shutter_q16: [
-                0x0005_AAAA, 0x0004_0000, 0x0005_0000, 0x0006_0000,
-                0x0007_0000, 0x0008_0000, 0x0009_0000,
-            ],
-            grid_modes: HashMap::new(),
-            sd_mount: None,
-            sd_copy_firm: true,
-            sd_copy_c78: true,
+            min_shutter_q16: [0x0005_AAAA, 0x0004_0000, 0x0005_0000, 0x0006_0000, 0x0007_0000, 0x0008_0000, 0x0009_0000],
+            grids: BTreeMap::new(),
         }
     }
 }
 
+impl Default for SdCfg {
+    fn default() -> Self {
+        Self { mount: None, package: true, firm: false, c78: false }
+    }
+}
+
+impl SdLutCfg {
+    /// D2ML header order: grain_amp, grain_profile, halo_gain, halo_tint.
+    pub fn meta(&self) -> [u8; 4] {
+        [self.grain.min(64), self.grain_profile as u8, self.halo, self.halo_tint as u8]
+    }
+}
+
 impl Config {
-    pub fn mode_enabled(&self, slug: &str) -> bool {
-        self.modes.get(slug).map(|m| m.enabled).unwrap_or(true)
+    pub fn film_enabled(&self, slug: &str) -> bool {
+        match self.films.get(slug) {
+            Some(FilmCfg::Enabled(b)) => *b,
+            Some(FilmCfg::Spec { enabled, .. }) => *enabled,
+            None => true,
+        }
     }
 
-    pub fn mode_paper(&self, slug: &str, default_paper: u8) -> u8 {
-        self.modes
-            .get(slug)
-            .and_then(|m| m.paper)
-            .unwrap_or(default_paper)
+    /// 0-based paper chosen for "Auto"; `None` keeps the pack default.
+    pub fn film_paper(&self, slug: &str) -> Option<u8> {
+        match self.films.get(slug) {
+            Some(FilmCfg::Spec { paper: Some(p), .. }) => {
+                let (_, f) = catalog::film(slug)?;
+                catalog::paper_index(f.kind.papers()?, p)
+            }
+            _ => None,
+        }
     }
 
     pub fn grid_enabled(&self, slug: &str) -> bool {
-        self.grid_modes.get(slug).copied().unwrap_or(true)
+        self.m6m.grids.get(slug).copied().unwrap_or(true)
     }
-}
 
-#[derive(Debug, Clone)]
-enum Val {
-    Nil,
-    Bool(bool),
-    Int(i64),
-    Float(f64),
-    Str(String),
-    Seq(Vec<Val>),
-    Map(HashMap<String, Val>),
-}
-
-impl Val {
-    fn as_map(&self) -> Option<&HashMap<String, Val>> {
-        match self { Val::Map(m) => Some(m), _ => None }
-    }
-    fn as_str(&self) -> Option<&str> {
-        match self { Val::Str(s) => Some(s), _ => None }
-    }
-    fn as_bool(&self) -> Option<bool> {
-        match self { Val::Bool(b) => Some(*b), _ => None }
-    }
-    fn as_u32(&self) -> Option<u32> {
-        match self {
-            Val::Int(n) if *n >= 0 && *n <= u32::MAX as i64 => Some(*n as u32),
-            _ => None,
+    /// `(major, minor)` as parsed by the stock updater (`strtoul` on both halves).
+    pub fn version_pair(&self) -> Result<(u8, u8), String> {
+        let bad = || format!("version '{}' must be 'major.minor' >= 1.05 (e.g. \"2.00\")", self.version);
+        let (a, b) = self.version.split_once('.').ok_or_else(bad)?;
+        let v = (a.parse::<u8>().map_err(|_| bad())?, b.parse::<u8>().map_err(|_| bad())?);
+        if v < (1, 5) || b.len() != 2 {
+            return Err(bad());
         }
-    }
-    fn as_f64(&self) -> Option<f64> {
-        match self {
-            Val::Float(f) => Some(*f),
-            Val::Int(n) => Some(*n as f64),
-            _ => None,
-        }
-    }
-    fn as_seq(&self) -> Option<&[Val]> {
-        match self { Val::Seq(v) => Some(v), _ => None }
-    }
-}
-
-struct Parser<'a> {
-    bytes: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Parser<'a> {
-    fn skip_ws(&mut self) {
-        while self.pos < self.bytes.len() {
-            let b = self.bytes[self.pos];
-            if b.is_ascii_whitespace() || b == b',' {
-                self.pos += 1;
-            } else if b == b';' {
-                while self.pos < self.bytes.len() && self.bytes[self.pos] != b'\n' {
-                    self.pos += 1;
-                }
-            } else {
-                break;
-            }
-        }
+        Ok(v)
     }
 
-    fn peek(&mut self) -> Option<u8> {
-        self.skip_ws();
-        self.bytes.get(self.pos).copied()
-    }
-
-    fn parse_val(&mut self) -> Result<Val, String> {
-        let b = self.peek().ok_or("unexpected EOF in Fennel config")?;
-        match b {
-            b'{' => self.parse_map(),
-            b'[' => self.parse_seq(),
-            b'"' => self.parse_str().map(Val::Str),
-            b':' => {
-                self.pos += 1;
-                Ok(Val::Str(self.parse_atom()))
-            }
-            _ => {
-                let tok = self.parse_atom();
-                if tok == "true" { return Ok(Val::Bool(true)); }
-                if tok == "false" { return Ok(Val::Bool(false)); }
-                if tok == "nil" { return Ok(Val::Nil); }
-                let clean = tok.replace('_', "");
-                if let Some(hex) = clean.strip_prefix("0x").or_else(|| clean.strip_prefix("0X")) {
-                    return i64::from_str_radix(hex, 16)
-                        .map(Val::Int)
-                        .map_err(|_| format!("invalid hex '{}'", tok));
-                }
-                if let Ok(i) = clean.parse::<i64>() {
-                    return Ok(Val::Int(i));
-                }
-                if let Ok(f) = clean.parse::<f64>() {
-                    return Ok(Val::Float(f));
-                }
-                Err(format!("unsupported Fennel token '{}'", tok))
-            }
-        }
-    }
-
-    fn parse_map(&mut self) -> Result<Val, String> {
-        self.pos += 1;
-        let mut map = HashMap::new();
-        loop {
-            match self.peek() {
-                Some(b'}') => { self.pos += 1; return Ok(Val::Map(map)); }
-                Some(_) => {
-                    let k = match self.parse_val()? {
-                        Val::Str(s) => s,
-                        other => return Err(format!("expected keyword/string key, got {:?}", other)),
-                    };
-                    let v = self.parse_val()?;
-                    map.insert(k, v);
-                }
-                None => return Err("unterminated '{' in Fennel config".into()),
-            }
-        }
-    }
-
-    fn parse_seq(&mut self) -> Result<Val, String> {
-        self.pos += 1;
-        let mut seq = Vec::new();
-        loop {
-            match self.peek() {
-                Some(b']') => { self.pos += 1; return Ok(Val::Seq(seq)); }
-                Some(_) => seq.push(self.parse_val()?),
-                None => return Err("unterminated '[' in Fennel config".into()),
-            }
-        }
-    }
-
-    fn parse_str(&mut self) -> Result<String, String> {
-        self.pos += 1;
-        let mut s = String::new();
-        while self.pos < self.bytes.len() {
-            let b = self.bytes[self.pos];
-            self.pos += 1;
-            if b == b'"' {
-                return Ok(s);
-            }
-            if b == b'\\' && self.pos < self.bytes.len() {
-                let esc = self.bytes[self.pos];
-                self.pos += 1;
-                match esc {
-                    b'n' => s.push('\n'),
-                    b't' => s.push('\t'),
-                    b'\\' => s.push('\\'),
-                    b'"' => s.push('"'),
-                    other => s.push(other as char),
-                }
-            } else {
-                s.push(b as char);
-            }
-        }
-        Err("unterminated string in Fennel config".into())
-    }
-
-    fn parse_atom(&mut self) -> String {
-        let start = self.pos;
-        while self.pos < self.bytes.len() {
-            let b = self.bytes[self.pos];
-            if b.is_ascii_whitespace()
-                || matches!(b, b'{' | b'}' | b'[' | b']' | b'(' | b')' | b';' | b'"' | b',')
-            {
-                break;
-            }
-            self.pos += 1;
-        }
-        String::from_utf8_lossy(&self.bytes[start..self.pos]).to_string()
-    }
-}
-
-fn parse_grain_profile(s: &str) -> Result<u8, String> {
-    match s {
-        "negative" => Ok(0),
-        "slide" => Ok(1),
-        "bw" => Ok(2),
-        _ => Err(format!("unknown :grain-profile '{}' (expected :negative, :slide, or :bw)", s)),
-    }
-}
-
-fn parse_halo_tint(s: &str) -> Result<u8, String> {
-    match s {
-        "crimson" => Ok(0),
-        "neutral" => Ok(1),
-        "amber" => Ok(2),
-        _ => Err(format!("unknown :halo-tint '{}' (expected :crimson, :neutral, or :amber)", s)),
-    }
-}
-
-impl Config {
     pub fn load(path: &Path) -> Result<Self, String> {
-        let src = fs::read_to_string(path)
-            .map_err(|e| format!("read config {}: {}", path.display(), e))?;
-        Self::parse(&src)
-    }
+        let lua = Lua::new();
+        let err = |e: mlua::Error| format!("{}: {e}", path.display());
+        let fennel: Table = lua.load(FENNEL).set_name("@fennel.lua").eval().map_err(err)?;
+        let loaded: Table = lua.globals().get::<Table>("package").and_then(|p| p.get("loaded")).map_err(err)?;
+        loaded.set("fennel", &fennel).map_err(err)?;
+        lua.globals().set("dp2m", catalog_table(&lua).map_err(err)?).map_err(err)?;
 
-    pub fn parse(src: &str) -> Result<Self, String> {
-        let mut p = Parser { bytes: src.as_bytes(), pos: 0 };
-        let root_val = p.parse_val()?;
-        let root = root_val.as_map().ok_or("Fennel config root must be a table `{...}`")?;
-        let mut cfg = Config::default();
-
-        if let Some(v) = root.get("firmware").and_then(Val::as_str) {
-            cfg.firmware = Some(PathBuf::from(v));
-        }
-        if let Some(v) = root.get("out-dir").and_then(Val::as_str) {
-            cfg.out_dir = Some(PathBuf::from(v));
-        }
-        if let Some(v) = root.get("pack").and_then(Val::as_str) {
-            cfg.pack = Some(PathBuf::from(v));
-        }
-        if let Some(v) = root.get("verify").and_then(Val::as_bool) {
-            cfg.verify = v;
-        }
-
-        if let Some(modes_map) = root.get("modes").and_then(Val::as_map) {
-            for (slug, val) in modes_map {
-                let entry = match val {
-                    Val::Bool(b) => ModeOverride { enabled: *b, paper: None },
-                    Val::Map(m) => {
-                        let enabled = m.get("enabled").and_then(Val::as_bool).unwrap_or(true);
-                        let paper = match m.get("paper") {
-                            None | Some(Val::Nil) => None,
-                            Some(v) => {
-                                let pk = v.as_str().ok_or_else(|| format!("mode {}: :paper must be a keyword", slug))?;
-                                Some(paper_index(pk).ok_or_else(|| format!("mode {}: unknown paper ':{}'", slug, pk))?)
-                            }
-                        };
-                        ModeOverride { enabled, paper }
-                    }
-                    _ => return Err(format!("mode '{}' must be a boolean or table", slug)),
-                };
-                cfg.modes.insert(slug.clone(), entry);
-            }
-        }
-
-        if let Some(m5) = root.get("m5").and_then(Val::as_map) {
-            if let Some(v) = m5.get("grain-scale").and_then(Val::as_f64) {
-                cfg.grain_scale = v.clamp(0.0, 4.0);
-            }
-            if let Some(v) = m5.get("halo-scale").and_then(Val::as_f64) {
-                cfg.halo_scale = v.clamp(0.0, 4.0);
-            }
-            if let Some(sd) = m5.get("sd-lut-defaults").and_then(Val::as_map) {
-                if let Some(v) = sd.get("grain").and_then(Val::as_u32) {
-                    cfg.sd_lut_meta[0] = v.min(64) as u8;
-                }
-                if let Some(s) = sd.get("grain-profile").and_then(Val::as_str) {
-                    cfg.sd_lut_meta[1] = parse_grain_profile(s)?;
-                }
-                if let Some(v) = sd.get("halo").and_then(Val::as_u32) {
-                    cfg.sd_lut_meta[2] = v.min(255) as u8;
-                }
-                if let Some(s) = sd.get("halo-tint").and_then(Val::as_str) {
-                    cfg.sd_lut_meta[3] = parse_halo_tint(s)?;
-                }
-            }
-        }
-
-        if let Some(m6) = root.get("m6m").and_then(Val::as_map) {
-            if let Some(v) = m6.get("iso50").and_then(Val::as_bool) {
-                cfg.iso50 = v;
-            }
-            if let Some(v) = m6.get("bkt5").and_then(Val::as_bool) {
-                cfg.bkt5 = v;
-            }
-            if let Some(v) = m6.get("peaking-threshold").and_then(Val::as_u32) {
-                cfg.peaking_threshold = v;
-            }
-            if let Some(v) = m6.get("zebra-threshold").and_then(Val::as_u32) {
-                cfg.zebra_threshold = v.min(255);
-            }
-            if let Some(seq) = m6.get("min-shutter-q16").and_then(Val::as_seq) {
-                if seq.len() != 7 {
-                    return Err(format!("m6m.min-shutter-q16 must have 7 entries, got {}", seq.len()));
-                }
-                for (i, item) in seq.iter().enumerate() {
-                    cfg.min_shutter_q16[i] = item
-                        .as_u32()
-                        .ok_or_else(|| format!("invalid u32 in min-shutter-q16[{}]", i))?;
-                }
-            }
-            if let Some(gm) = m6.get("grid-modes").and_then(Val::as_map) {
-                for (k, v) in gm {
-                    if let Some(b) = v.as_bool() {
-                        cfg.grid_modes.insert(k.clone(), b);
-                    }
-                }
-            }
-        }
-
-        if let Some(sd) = root.get("sd").and_then(Val::as_map) {
-            if let Some(v) = sd.get("mount").and_then(Val::as_str) {
-                cfg.sd_mount = Some(PathBuf::from(v));
-            }
-            if let Some(v) = sd.get("copy-firm").and_then(Val::as_bool) {
-                cfg.sd_copy_firm = v;
-            }
-            if let Some(v) = sd.get("copy-c78").and_then(Val::as_bool) {
-                cfg.sd_copy_c78 = v;
-            }
-        }
+        let dofile: mlua::Function = fennel.get("dofile").map_err(err)?;
+        let value: Value = dofile.call(path.to_string_lossy().as_ref()).map_err(err)?;
+        let cfg: Self = lua.from_value(value).map_err(err)?;
+        cfg.validate().map_err(|e| format!("{}: {e}", path.display()))?;
         Ok(cfg)
     }
+
+    fn validate(&self) -> Result<(), String> {
+        self.version_pair()?;
+        for (slug, f) in &self.films {
+            let (_, film) = catalog::film(slug).ok_or_else(|| format!("unknown film :{slug}"))?;
+            if let FilmCfg::Spec { paper: Some(p), .. } = f {
+                let papers = film.kind.papers().ok_or_else(|| format!(":{slug} takes no :paper"))?;
+                catalog::paper_index(papers, p).ok_or_else(|| format!(":{slug} has no paper :{p}"))?;
+            }
+        }
+        for slug in self.m6m.grids.keys() {
+            if !catalog::GRIDS.iter().any(|g| g.slug == slug) {
+                return Err(format!("unknown grid :{slug}"));
+            }
+        }
+        if !(0.0..=4.0).contains(&self.m5.grain_scale) || !(0.0..=4.0).contains(&self.m5.halo_scale) {
+            return Err("m5 grain/halo scales must be within 0..4".into());
+        }
+        Ok(())
+    }
+}
+
+/// `dp2m` global: the catalog, so configs can be computed (`(icollect [_ f (ipairs dp2m.films)] ...)`).
+fn catalog_table(lua: &Lua) -> mlua::Result<Table> {
+    let papers = |list: &[Paper]| {
+        lua.create_sequence_from(list.iter().map(|p| lua.create_table_from([("slug", p.slug), ("label", p.label)]).unwrap()))
+    };
+    let films = lua.create_sequence_from(catalog::FILMS.iter().map(|f| {
+        lua.create_table_from([("slug", f.slug), ("label", f.label), ("kind", f.kind.key())]).unwrap()
+    }))?;
+    let grids = lua.create_sequence_from(
+        catalog::GRIDS.iter().map(|g| lua.create_table_from([("slug", g.slug), ("label", g.label)]).unwrap()),
+    )?;
+    let paper_sets = lua.create_table()?;
+    for kind in [FilmKind::Negative, FilmKind::BwSilver, FilmKind::SdLut] {
+        paper_sets.set(kind.key(), papers(kind.papers().unwrap())?)?;
+    }
+    let t = lua.create_table()?;
+    t.set("films", films)?;
+    t.set("papers", paper_sets)?;
+    t.set("grids", grids)?;
+    Ok(t)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_example_fennel_template() {
-        let src = include_str!("../../../dp2m.example.fnl");
-        let cfg = Config::parse(src).unwrap();
-        assert!(cfg.verify);
-        assert!(cfg.iso50 && cfg.bkt5);
-        assert_eq!(cfg.modes.len(), 36);
-        assert_eq!(cfg.mode_paper("portra-400", 0), 3);
-        assert_eq!(cfg.mode_paper("vision3-500t", 0), 5);
-        assert_eq!(cfg.peaking_threshold, 44);
-        assert_eq!(cfg.zebra_threshold, 242);
-        assert_eq!(cfg.sd_lut_meta, [24, 0, 64, 0]);
-        assert!(cfg.grid_enabled("rgb-hist"));
+    fn load_str(src: &str) -> Result<Config, String> {
+        let dir = std::env::temp_dir().join(format!("dp2m-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(format!("{:x}.fnl", src.len() ^ src.as_ptr() as usize));
+        std::fs::write(&p, src).unwrap();
+        let r = Config::load(&p);
+        let _ = std::fs::remove_file(&p);
+        r
     }
 
     #[test]
-    fn supports_mode_disable_and_paper_override() {
-        let cfg = Config::parse(
-            r#"{:modes {:velvia-100 false
-                        :portra-400 {:enabled true :paper :kodak-2383}}
-                :m5 {:grain-scale 0.5 :halo-scale 1.25}}"#,
+    fn example_template_loads() {
+        let cfg = Config::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../dp2m.example.fnl")).unwrap();
+        assert!(cfg.verify && cfg.m6m.iso50 && cfg.m6m.bkt5);
+        assert_eq!(cfg.version_pair().unwrap(), (2, 0));
+        assert_eq!(cfg.film_paper("portra-400"), catalog::paper_index(catalog::COLOR_PAPERS, "portra-endura"));
+        assert_eq!(cfg.m5.sd_lut_defaults.meta(), [24, 0, 64, 0]);
+    }
+
+    #[test]
+    fn programmatic_config_uses_catalog() {
+        let cfg = load_str(
+            r#"{:films (collect [_ f (ipairs dp2m.films)] (values f.slug (not= f.kind :mono)))
+                :m5 {:grain-scale (/ 1 2)}}"#,
         )
         .unwrap();
-        assert!(!cfg.mode_enabled("velvia-100"));
-        assert!(cfg.mode_enabled("portra-400"));
-        assert_eq!(cfg.mode_paper("portra-400", 3), 5);
-        assert!((cfg.grain_scale - 0.5).abs() < 1e-9);
+        assert!(!cfg.film_enabled("mono-red-25") && cfg.film_enabled("velvia-100"));
+        assert!((cfg.m5.grain_scale - 0.5).abs() < 1e-12);
+    }
+
+    #[test]
+    fn rejects_typos_and_bad_papers() {
+        assert!(load_str("{:verfy true}").is_err());
+        assert!(load_str("{:films {:velvia-100 {:paper :kodak-2383}}}").is_err());
+        assert!(load_str("{:films {:kodak-trix-400 {:paper :kodak-2383}}}").is_err());
+        assert!(load_str("{:films {:kodak-trix-400 {:paper :selenium-tone}}}").is_ok());
+        assert!(load_str("{:version \"1.04\"}").is_err());
     }
 }

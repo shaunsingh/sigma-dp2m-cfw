@@ -81,9 +81,9 @@ Only `+0x04..+0x13` is reserved. Writing volatile data at `+0x14..` (for example
 | `0x10..0x1F` | used by `0xA001D35E`, `0xA001D5BC`, `0xA01702FA` |
 | `0x20..0x3E3` | NVRAM block (`0x3C4` B) |
 | `0x3E4..0x7FF` | no accessor (every caller of the bank-0 helpers checked) |
-| `0x400..0x51B` | dp2m: `"C4C5"` magic + 2 x `0x8C` (C4/C5 slots) |
+| `0x400..0x51B` | dp2m: `"C4C5"` magic + 2 x `0x8C` (F1/F2 slots) |
 
-- **Flush** `0xA004017A` (callers `0xA0061430`, `0xA01694AA`, `0xA0169790`, `0xA01697A8`): allocates `0x800` B, reads the header, copies the block with `0xA01674FA` (`0xA0167538`), writes `0xA00206FA(8, 0x3DC, buf)` at `0xA00401E6`. dp2m extends this write to `0x514` B with the C4/C5 record; still one erase cycle.
+- **Flush** `0xA004017A` (callers `0xA0061430`, `0xA01694AA`, `0xA0169790`, `0xA01697A8`): allocates `0x800` B, reads the header, copies the block with `0xA01674FA` (`0xA0167538`), writes `0xA00206FA(8, 0x3DC, buf)` at `0xA00401E6`. dp2m extends this write to `0x514` B with the F1/F2 record; still one erase cycle.
 - **Load** `0xA0165912 -> 0xA01673C2 -> 0xA0040110`: reads `0x800` B and copies `buf + 0x20` into RAM at `0xA0040168`. Version `0x20120605` (via `0xA0166DE8`, `0x1C0` B) and `0x20120725` (via `0xA016675C`, `0x1D4` B) are migrated; anything else gets ROM defaults. dp2m copies `buf + 0x400` into payload RAM in the same call.
-- **Camera reset** `0xA0167574` restores the block from ROM (`0xA016757E`); dp2m also resets C4/C5 there.
+- **Camera reset** `0xA0167574` restores the block from ROM (`0xA016757E`); dp2m also resets F1/F2 there.
 - Other banks seen as helper arguments: bank 1 `(0x200, 0x300, 0x10)`, bank 2 `(0x400, 0x2000, 0x1C00)`, bank 3 `(0x3C00, 0x4500, 0x900)`; not analysed.

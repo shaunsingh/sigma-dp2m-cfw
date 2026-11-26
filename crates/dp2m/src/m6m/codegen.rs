@@ -263,12 +263,12 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
     }
     menus.push((0x28, ".data.menu", bkt_rows));
 
-    // exposure modes C4/C5 (9, 10) as copies of C3; the "C4"/"C5" strings label their icons like the stock "C1" glyphs
+    // exposure modes F1/F2 (9, 10) as copies of C3; the "F1"/"F2" strings label their icons like the stock "C1" glyphs
     let expo = stock_rows(s3, STOCK_EXPO_MENU);
     let c3 = *expo.iter().find(|w| w[4] == 7).ok_or("stock exposure menu 0x05 has no C3 row")?;
     let mut expo_rows: Vec<Row> = expo.iter().copied().map(Row::stock).collect();
     let mut c_label = [0; 2];
-    for (k, (text, label)) in [("Custom 4", "C4"), ("Custom 5", "C5")].into_iter().enumerate() {
+    for (k, (text, label)) in [("Custom F1", "F1"), ("Custom F2", "F2")].into_iter().enumerate() {
         let sid = st.add(text);
         c_label[k] = st.add(label);
         let si = c_label[k] - SID0;
@@ -296,8 +296,8 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
         ("MENU_FILM_PAGE", MENU_FILM_PAGE),
         ("MENU_QS_COPY", MENU_QS_COPY),
         ("SID_PAPER_TITLE", paper_title),
-        ("SID_C4", c_label[0]),
-        ("SID_C5", c_label[1]),
+        ("SID_F1", c_label[0]),
+        ("SID_F2", c_label[1]),
         ("ICON_LABEL_L", ICON_LABEL_L),
         ("ICON_LABEL_S", ICON_LABEL_S),
         ("ICON_LABEL_OSD", ICON_LABEL_OSD),

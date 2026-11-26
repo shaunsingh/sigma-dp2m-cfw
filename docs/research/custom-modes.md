@@ -1,4 +1,4 @@
-# Custom exposure modes (C1..C5)
+# Custom exposure modes (C1..C3, F1, F2)
 
 Addresses are M6M virtual addresses in the stock 1.05 image. The implementation is `src/m6m/custom.c`.
 
@@ -18,7 +18,7 @@ Addresses are M6M virtual addresses in the stock 1.05 image. The implementation 
 | 4 | Movie |
 | 5..7 | C1..C3 |
 | 8 | temporary mode set by screen 25 (`0xA005742A`) and left at `0xA0057B64`; shutdown (`0xA016949A`) restores the previous mode. About 30 sites test `cmp r0,#8`. Very likely playback. |
-| 9 / 10 | C4 / C5 (dp2m) |
+| 9 / 10 | F1 / F2 (dp2m) |
 
 Stock code treats values above 8 as P in the resolver, so a camera downgraded with mode 9/10 saved falls back to P.
 
@@ -70,7 +70,7 @@ The persisted block has only about 159 scattered free bytes, so two more slots (
 
 | Hook | Site | Change |
 | --- | --- | --- |
-| menu 0x05 | payload table | adds C4 (9) and C5 (10), copied from the C3 row |
+| menu 0x05 | payload table | adds F1 (9) and F2 (10), copied from the C3 row |
 | setter tail | `0xA016FA2E` | `expo_switch(old, new)`: back up when entering the custom range from 0..4, restore when leaving it for 0..4, load the slot unless coming from 8; covers direct jumps (for example QS C2 → M) |
 | resolver | `0xA01675E2` | 9/10 take the C1..C3 path |
 | slot compare | `0xA016761C`, `0xA0167622`, `0xA0167628` | `slot_ptr(i)` for i = 0..4 |
@@ -80,8 +80,8 @@ The persisted block has only about 159 scattered free bytes, so two more slots (
 | widget icon / star | `0xA016BC26`, `0xA016BBBA` | per-slot icon and compare |
 | MODE screen | `0xA005247C`, `0xA00522A2`, `0xA00522EC`, `0xA0052342`, `0xA00523AC`, `0xA005220E` | 10 cells, 60 px from x 20 |
 | Custom Mode Setting | `0xA0059AE0`, `0xA0059898`, `0xA0059914`, `0xA00598F4`, `0xA00599E4`, `0xA0059A02`, cell geometry sites | 5 cells, 120 px from x 20 |
-| NVRAM load / flush / reset | `0xA0040168`, `0xA00401E6`, `0xA016757E` | C4/C5 record in NOR bank 0 at `0x400` |
+| NVRAM load / flush / reset | `0xA0040168`, `0xA00401E6`, `0xA016757E` | F1/F2 record in NOR bank 0 at `0x400` |
 
-C4/C5 icons use label icon ids (`0x1000` / `0x1400` / `0x400` / `0x800` + string index), rendered at run time; see [m6m-ui.md](m6m-ui.md#dp2m-label-icon-ids).
+F1/F2 icons use label icon ids (`0x1000` / `0x1400` / `0x400` / `0x800` + string index), rendered at run time; see [m6m-ui.md](m6m-ui.md#dp2m-label-icon-ids).
 
 Not patched because they already behave for 9/10: display-class switches `0xA0167832` / `0xA0167876`, program setter `0xA016F81E`, consumers of the effective program (`0xA004CC94`, `0xA016AC2E`), all `cmp #4` / `cmp #8` sites, QS menus 0xE5..0xEC (QS positions, not modes). `is_custom` at `0xA016F3C8` has no static references.

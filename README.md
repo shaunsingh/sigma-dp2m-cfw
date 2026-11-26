@@ -16,7 +16,7 @@ dp2m starts from the stock 1.05 package (`DP2MV105.bin`). It assembles FR80 code
 - 36 color modes after the 8 stock ones: Quattro looks, optical-filter mono, reversal, negative and B&W films, and an SD-card LUT mode. Negative films take one of 8 print papers, B&W films one of 8 darkroom papers, the SD LUT mode one of `LUT1.BIN`..`LUT8.BIN`.
 - 3D spectral engine, grain and halation are independent toggles.
 - Live view uses each film's color matrix and tone curve, and follows mode and paper changes immediately.
-- Custom exposure modes C1..C5.
+- Custom exposure modes C1..C3, F1, F2.
 - ISO 50, 5-shot bracketing, minimum shutter speed for ISO auto.
 - Live-view overlays as extra grid modes: electronic level, aspect masks, focus peaking, zebras, RGB histogram.
 
@@ -129,7 +129,7 @@ Python packages in `tools/` (deps in `tools/pyproject.toml`; run from the reposi
 
 | Command | Purpose |
 | --- | --- |
-| `python -m tools.verify out` | emulated M6M suites on a build output: hooks, menus, settings, IPC, live view, updater, C1..C5, label icons; exits 1 on any failure |
+| `python -m tools.verify out` | emulated M6M suites on a build output: hooks, menus, settings, IPC, live view, updater, C1..C3, F1, F2, label icons; exits 1 on any failure |
 | `python -m tools.re [--fw f] [--image f] <cmd>` | M6M reverse engineering: `package`, `dis`, `xrefs`, `callers`, `sid`, `strings`, `menus`, `screens`, `icons`, `text`, `liveness`, `nvram` (`-h` per command) |
 
 ## Repository layout

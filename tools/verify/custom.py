@@ -1,4 +1,4 @@
-"""custom suite: C4/C5 custom exposure modes (slots, NOR persistence, mode switching, MODE & Custom Mode Setting screens)."""
+"""custom suite: F1/F2 custom exposure modes (slots, NOR persistence, mode switching, MODE & Custom Mode Setting screens)."""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def run(b: Build, r: Report) -> None:
     b.require("cs", "expo_switch", "slot_ptr", "mode_strip", "custom_icons")
     img, cat = b.img, b.cat
     cs, cs_end = b.sym("cs"), b.sym("cs") + b.syms["cs"].size
-    si4, si5 = cat["SID_C4"] - stock.STOCK_SIDS, cat["SID_C5"] - stock.STOCK_SIDS
+    si4, si5 = cat["SID_F1"] - stock.STOCK_SIDS, cat["SID_F2"] - stock.STOCK_SIDS
     mode_icon, widget_icon = cat["ICON_LABEL_MODE"], cat["ICON_LABEL_WIDGET"]
     rom_cur = img.rd(stock.NV_DEFAULTS + 0x3C, SZ)
     m = Machine(img)
@@ -115,7 +115,7 @@ def run(b: Build, r: Report) -> None:
         m.wr(cs, b"\xA5" * 0x11C)
         call(stock.NV_LOAD, stock.NV_BLOCK)
         r.check(m.rd(stock.NV_BLOCK, stock.NV_PERSIST) == bytes(nv_img), "load: stock 0x3C4 B copied")
-        r.check(m.rd(cs, 0x11C) == bytes(nor.data[0x400:0x51C]), "load: C4/C5 record restored from NOR 0x400")
+        r.check(m.rd(cs, 0x11C) == bytes(nor.data[0x400:0x51C]), "load: F1/F2 record restored from NOR 0x400")
         r.eq(stray(nv, csr, HDR, buf), [], "load: no stray writes")
         nor.data[0x400:0x404] = b"\xFF" * 4
         call(stock.NV_LOAD, stock.NV_BLOCK)
@@ -146,7 +146,7 @@ def run(b: Build, r: Report) -> None:
         saved = m.rd(stock.NV_BLOCK, stock.NV_LEN)
         call(stock.NV_RESET)
         r.check(m.rd(stock.NV_BLOCK, stock.NV_PERSIST) == img.rd(stock.NV_DEFAULTS, stock.NV_PERSIST), "reset: NVRAM block = ROM")
-        r.check(m.rd(cs, 0x11C) == cs_rom, "reset: C4/C5 = ROM defaults")
+        r.check(m.rd(cs, 0x11C) == cs_rom, "reset: F1/F2 = ROM defaults")
         r.eq(stray(nv, csr), [], "reset: no stray writes")
         m.wr(stock.NV_BLOCK, saved)
         m.wr(cs, cs_test)
@@ -177,21 +177,21 @@ def run(b: Build, r: Report) -> None:
             r.eq(got, (True, True, exp_seq, (new, new, old), []), f"setter {label}")
 
         m.wr(BACKUP, pat(0x70, 0))
-        trans("P->C4", 3, 9, p_set, slot(3), p_set, ["apply"])
+        trans("P->F1", 3, 9, p_set, slot(3), p_set, ["apply"])
         edit = bytearray(slot(3))
         edit[5] ^= 0xFF
-        trans("C4(edited)->C5", 9, 10, bytes(edit), slot(4), None, ["apply"])
-        r.check(slot(3) != bytes(edit), "C4 edits not written back to slot 3 without save")
-        trans("C5->M", 10, 0, slot(4), p_set, None, ["apply", "still"])
+        trans("F1(edited)->F2", 9, 10, bytes(edit), slot(4), None, ["apply"])
+        r.check(slot(3) != bytes(edit), "F1 edits not written back to slot 3 without save")
+        trans("F2->M", 10, 0, slot(4), p_set, None, ["apply", "still"])
         trans("M->C2", 0, 6, p_set, slot(1), p_set, ["apply"])
-        trans("C2->C5", 6, 10, slot(1), slot(4), None, ["apply"])
+        trans("C2->F2", 6, 10, slot(1), slot(4), None, ["apply"])
         mark = bytearray(slot(4))
         mark[7] ^= 0x55
-        trans("C5->playback 8", 10, 8, bytes(mark), bytes(mark), None, [])
-        trans("playback 8->C5 (no reload)", 8, 10, bytes(mark), bytes(mark), None, ["apply"])
-        trans("C5->Movie", 10, 4, slot(4), p_set, None, ["movie", "apply"])
-        trans("Movie->C5", 4, 10, p_set, slot(4), p_set, ["apply"])
-        trans("C5->C1", 10, 5, slot(4), slot(0), None, ["apply"])
+        trans("F2->playback 8", 10, 8, bytes(mark), bytes(mark), None, [])
+        trans("playback 8->F2 (no reload)", 8, 10, bytes(mark), bytes(mark), None, ["apply"])
+        trans("F2->Movie", 10, 4, slot(4), p_set, None, ["movie", "apply"])
+        trans("Movie->F2", 4, 10, p_set, slot(4), p_set, ["apply"])
+        trans("F2->C1", 10, 5, slot(4), slot(0), None, ["apply"])
         trans("C1->P", 5, 3, slot(0), p_set, None, ["apply", "still"])
         trans("P->C1", 3, 5, p_set, slot(0), p_set, ["apply"])
         trans("C3->Movie", 7, 4, slot(2), p_set, None, ["movie", "apply"])
@@ -201,7 +201,7 @@ def run(b: Build, r: Report) -> None:
         m.w8(SHADOW, 9)
         m.wr(stock.NV_CUR, p_set)
         call(0xA016F9EC, 9)
-        r.check(seq() == [] and m.rd(stock.NV_CUR, SZ) == p_set, "C4->C4 is a no-op")
+        r.check(seq() == [] and m.rd(stock.NV_CUR, SZ) == p_set, "F1->F1 is a no-op")
 
         # slot save (Custom Mode Setting "Yes") / boot reload
         for cursor in range(5):
@@ -269,7 +269,7 @@ def run(b: Build, r: Report) -> None:
         st = [struct.unpack(">8I", img.rd(0xA07EC8AC + 32 * k, 32)) for k in range(8)]
         r.check(rows[:8] == st, "menu 0x05 rows 0..7 = stock")
         c3 = st[7]
-        for k, (si, v, sid) in enumerate(((si4, 9, "SID_C4"), (si5, 10, "SID_C5"))):
+        for k, (si, v, sid) in enumerate(((si4, 9, "SID_F1"), (si5, 10, "SID_F2"))):
             exp = (c3[0], 0x01000000 | (cat["ICON_LABEL_L"] + si), (mode_icon + si) << 16 | (cat["ICON_LABEL_S"] + si),
                    (cat[sid] - 1) << 16, v, c3[5], c3[6], c3[7])
             r.eq(rows[8 + k] if len(rows) > 8 + k else None, exp, f"menu 0x05 row {8 + k} (mode {v})")
@@ -286,7 +286,7 @@ def run(b: Build, r: Report) -> None:
         xs = [c[1][1] for c in calls if c[0] == "blit"]
         r.eq([c[1][0] for c in calls if c[0] == "icon"], [c[1] for c in exp_cells[:10]], "MODE draw fetches 10 icons in ring order")
         r.check(xs == [24 + 60 * k for k in range(10)] and max(xs) + 51 <= 640, f"MODE icon x {xs}")
-        r.eq(rects, [(20 + 60 * 8, 0x1B0, 60, 0x2E)], "MODE highlight on the C4 cell")
+        r.eq(rects, [(20 + 60 * 8, 0x1B0, 60, 0x2E)], "MODE highlight on the F1 cell")
         r.eq(stray(), [], "MODE draw: no stray writes")
 
         def key(k: int, cursor: int, mode: int) -> tuple[int, list[int]]:
@@ -297,16 +297,16 @@ def run(b: Build, r: Report) -> None:
             call(0xA00522AA, k)
             return m.u16(ms), [c[1][0] for c in calls if c[0] == "prog_set"]
 
-        r.eq(key(0x40, 7, 7), (8, [9]), "MODE key 0x40: C3 -> C4")
-        r.eq(key(0x40, 8, 9), (9, [10]), "MODE key 0x40: C4 -> C5")
-        r.eq(key(0x40, 9, 10), (0, [4]), "MODE key 0x40: C5 -> Movie (wrap)")
-        r.eq(key(0x20, 0, 4), (9, [10]), "MODE key 0x20: Movie -> C5 (wrap)")
+        r.eq(key(0x40, 7, 7), (8, [9]), "MODE key 0x40: C3 -> F1")
+        r.eq(key(0x40, 8, 9), (9, [10]), "MODE key 0x40: F1 -> F2")
+        r.eq(key(0x40, 9, 10), (0, [4]), "MODE key 0x40: F2 -> Movie (wrap)")
+        r.eq(key(0x20, 0, 4), (9, [10]), "MODE key 0x20: Movie -> F2 (wrap)")
         r.eq(stray(nv, csr, sh, (ms, ms + 2)), [], "MODE keys: no stray writes")
         m.w8(stock.NV_EXPO, 10)
         m.w16(ms, 0)
         writes.clear()
         m.run(0xA005238E, 0xA00523B2, count=10_000)
-        r.check(m.u16(ms) == 9 and stray((ms, ms + 2)) == [], f"MODE open: cursor search finds C5 -> {m.u16(ms)}")
+        r.check(m.u16(ms) == 9 and stray((ms, ms + 2)) == [], f"MODE open: cursor search finds F2 -> {m.u16(ms)}")
 
         # Custom Mode Setting screen 31
         icons5 = (0xB4, 0xB5, 0xB6, mode_icon + si4, mode_icon + si5)
@@ -322,4 +322,4 @@ def run(b: Build, r: Report) -> None:
             r.check(ok, f"Custom Mode Setting cursor {cursor}: box {rects} blit x {bl}")
         m.wr(CUSTOM_STATE, struct.pack(">HH", 4, 1))
         call(0xA0059790)
-        r.eq([c[1][0] for c in calls if c[0] == "icon"], [mode_icon + si5], "confirm view shows the C5 icon")
+        r.eq([c[1][0] for c in calls if c[0] == "icon"], [mode_icon + si5], "confirm view shows the F2 icon")

@@ -18,7 +18,7 @@ STOCK_IDS = {"L": [0x10E, 0x10F, 0x115, 0x113], "S": [0x159, 0x15A, 0x160], "OSD
 NAMES = ["Velvia 100", "FOV Classic Yellow", "Kodak Tri-X 400", "Teal & Orange", "Cinema", "Portra 800 +2", "Mono Orange #21",
          "SD Custom LUT", "Rollei Retro 80S", "Fujicolor C200", "Zebras (95% IRE)", "Fill -0.5 (Contrast)"]
 QS_ITEMS = ["Print Paper", "Film Engine", "Film Grain", "Halation", "X3 Fill Light"]
-TOKENS = {"Red": "C4", "Yellow": "C5", "White": "M2", "Black": "P"}  # short test strings for the MODE / WIDGET classes
+TOKENS = {"Red": "F1", "Yellow": "F2", "White": "M2", "Black": "P"}  # short test strings for the MODE / WIDGET classes
 TOKEN_VA = SCRATCH + 0x10000
 GET_CM, GET_ISO = stock.GET_CM | 1, 0xA016F5AF
 STATE = stock.QS_STATE

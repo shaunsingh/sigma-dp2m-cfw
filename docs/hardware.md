@@ -190,7 +190,7 @@ Every patch to stock code is a 16-byte record `{kind, site, target, expect}` (BE
 | `HOOK_WORD` (3) | write a 32-bit value | stock word |
 | `HOOK_HALF` (4) | write a 16-bit value | stock halfword |
 
-Thumb BL reaches ±4 MB. Sources: `ui.c` (settings, menus, strings, IPC packing, Film page), `custom.c` (C4/C5), `lv.c` (live-view color), `hud.c` (overlays), `hooks.S` (register-exact trampolines), `rt.c` (`memcpy`, `memset`).
+Thumb BL reaches ±4 MB. Sources: `ui.c` (settings, menus, strings, IPC packing, Film page), `custom.c` (F1/F2), `lv.c` (live-view color), `hud.c` (overlays), `hooks.S` (register-exact trampolines), `rt.c` (`memcpy`, `memset`).
 
 ### 3.4 NVRAM
 
@@ -208,9 +208,9 @@ Block `0xA0939684`: `0x44C` B in RAM, initialised from ROM defaults `0xA07F9E68`
 | `0xA093968F` | B&W paper | 0 = Auto, 1..8 |
 | `0xA0939690` | SD LUT slot | 0 = Auto, 1..8 |
 
-Stock fields used: exposure mode `0xA09396AC` (`+0x28`; 0..3 M/S/A/P, 4 Movie, 5..7 C1..C3, 8 temporary, 9/10 C4/C5), shooting settings `0xA09396C0` (`+0x3C`, `0x8C` B), color mode `0xA09396C3`, C1..C3 slots `0xA0939818`, backup `0xA09399BC`.
+Stock fields used: exposure mode `0xA09396AC` (`+0x28`; 0..3 M/S/A/P, 4 Movie, 5..7 C1..C3, 8 temporary, 9/10 F1/F2), shooting settings `0xA09396C0` (`+0x3C`, `0x8C` B), color mode `0xA09396C3`, C1..C3 slots `0xA0939818`, backup `0xA09399BC`.
 
-The 2 KB NOR record uses `0x00..0x3E3`; `0x3E4..0x7FF` has no accessor. C4/C5 live in payload `.bss` and persist at `0x400..0x51B` (magic `"C4C5"` + 2 x `0x8C`) through an extended flush write and boot load. See [research/m6m-memory.md](research/m6m-memory.md) and [research/custom-modes.md](research/custom-modes.md).
+The 2 KB NOR record uses `0x00..0x3E3`; `0x3E4..0x7FF` has no accessor. F1/F2 live in payload `.bss` and persist at `0x400..0x51B` (magic `"C4C5"` + 2 x `0x8C`) through an extended flush write and boot load. See [research/m6m-memory.md](research/m6m-memory.md) and [research/custom-modes.md](research/custom-modes.md).
 
 ### 3.5 UI
 
@@ -267,7 +267,7 @@ The packed mode follows `packed_mode` in `crates/dp2m/src/catalog.rs` (film orde
 
 Verified so far in emulation only (`dp2m build` verifiers, `python -m tools.verify`); nothing below has been tested on a camera.
 
-- **On-camera checks**: full `DP2MV200.bin` install from 1.05 and reinstall of stock 1.05; runtime label icons (QS, OSD, MODE, LV status, playback info); film name in playback info for new JPG and X3F files, and how Sigma Photo Pro treats `"Film NN"` X3F files; Custom QS film items in each slot; C4/C5 slot persistence across power cycles; payload RAM window `0xA1C00000..0xA1E00000` under LV, capture, playback, movie and USB; M5 engine wall time per fx combination.
+- **On-camera checks**: full `DP2MV200.bin` install from 1.05 and reinstall of stock 1.05; runtime label icons (QS, OSD, MODE, LV status, playback info); film name in playback info for new JPG and X3F files, and how Sigma Photo Pro treats `"Film NN"` X3F files; Custom QS film items in each slot; F1/F2 slot persistence across power cycles; payload RAM window `0xA1C00000..0xA1E00000` under LV, capture, playback, movie and USB; M5 engine wall time per fx combination.
 - **Verifier coverage**: `.dp2m.hooks` application over every record, the 11-page menu list and `page_group`, HUD grid drawing.
 
 ### M5 performance notes

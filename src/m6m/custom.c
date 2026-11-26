@@ -1,11 +1,11 @@
-// exposure modes C4/C5 (values 9/10): slots 3/4 live in payload RAM and persist after the stock record in NOR bank 0
+// exposure modes F1/F2 (values 9/10): slots 3/4 live in payload RAM and persist after the stock record in NOR bank 0
 #include "dp2m.h"
 #include "catalog.h"
 
 #define EXPO_MOVIE    4u
 #define EXPO_C1       5u
 #define EXPO_PLAYBACK 8u
-#define EXPO_C4       9u
+#define EXPO_F1       9u
 #define NO_SLOT       0xFFu
 
 #define NV_CUR   0xA09396C0u           /* shooting settings, the unit a slot stores */
@@ -24,7 +24,7 @@ static struct {
 } cs;
 
 static uint32_t cslot(uint32_t mode) {
-    return mode - EXPO_C1 < 3u ? mode - EXPO_C1 : mode - EXPO_C4 < 2u ? mode - EXPO_C4 + 3u : NO_SLOT;
+    return mode - EXPO_C1 < 3u ? mode - EXPO_C1 : mode - EXPO_F1 < 2u ? mode - EXPO_F1 + 3u : NO_SLOT;
 }
 
 static void cs_reset(void) {
@@ -120,7 +120,7 @@ HOOK_CALL(0xA0169884, expo_mode_c1, 0xA0167892); // still-mode apply switch
 HOOK_CALL(0xA016BAE8, expo_mode_c1, 0xA0167892); // widget 0x2E draw: every custom mode takes the C1 path
 
 static const uint16_t widget_icons[5] = {
-    0xB7, 0xB8, 0xB9, LABEL(ICON_LABEL_WIDGET, SID_C4), LABEL(ICON_LABEL_WIDGET, SID_C5),
+    0xB7, 0xB8, 0xB9, LABEL(ICON_LABEL_WIDGET, SID_F1), LABEL(ICON_LABEL_WIDGET, SID_F2),
 };
 
 const void *widget_icon(void) {
@@ -133,7 +133,7 @@ uint32_t widget_slot_same(void) {
 }
 HOOK_CALL(0xA016BBBA, widget_slot_same, 0xA0167618);
 
-// MODE screen (23): ring Movie, M, S, A, P, C1..C5; the screen keeps its u16 cursor in the word before the cells
+// MODE screen (23): ring Movie, M, S, A, P, C1..C3, F1, F2; the screen keeps its u16 cursor in the word before the cells
 struct mode_cell {
     uint32_t mode;
     uint16_t icon, pad;
@@ -144,7 +144,7 @@ static struct {
 } mode_strip __attribute__((section(".menu.mode_strip"))) = { .cell = {
     { 4, 0xAF, 0 }, { 0, 0xB0, 0 }, { 1, 0xB1, 0 }, { 2, 0xB2, 0 }, { 3, 0xB3, 0 },
     { 5, 0xB4, 0 }, { 6, 0xB5, 0 }, { 7, 0xB6, 0 },
-    { 9, LABEL(ICON_LABEL_MODE, SID_C4), 0 }, { 10, LABEL(ICON_LABEL_MODE, SID_C5), 0 },
+    { 9, LABEL(ICON_LABEL_MODE, SID_F1), 0 }, { 10, LABEL(ICON_LABEL_MODE, SID_F2), 0 },
 } };
 HOOK_WORD(0xA005247C, mode_strip.cell, 0xA07F215C);
 HOOK_HALF(0xA00522A2, 0x2C0A, 0x2C08); // draw loop
@@ -157,7 +157,7 @@ HOOK_HALF(0xA0052210, 0x0080, 0x01C0);
 
 // Custom Mode Setting screen (31): 5 slots in 120 px cells from x = 20 (stock 3 x 188 px from 36)
 static const uint16_t custom_icons[5] __attribute__((aligned(4))) = {
-    0xB4, 0xB5, 0xB6, LABEL(ICON_LABEL_MODE, SID_C4), LABEL(ICON_LABEL_MODE, SID_C5),
+    0xB4, 0xB5, 0xB6, LABEL(ICON_LABEL_MODE, SID_F1), LABEL(ICON_LABEL_MODE, SID_F2),
 };
 HOOK_WORD(0xA0059AE0, custom_icons, 0xA04F3188);
 HOOK_HALF(0xA0059898, 0x4991, 0xA909); // icons[i] through the pool word, not the 4-entry stack copy
@@ -182,7 +182,7 @@ void nv_load_copy(void *dst, const uint8_t *src, uint32_t n) {
 }
 HOOK_CALL(0xA0040168, nv_load_copy, 0xA000EE68);
 
-// flush 0xA004017A writes buf to bank 0 from `off` = 8: extend it over a zeroed gap and the C4/C5 record
+// flush 0xA004017A writes buf to bank 0 from `off` = 8: extend it over a zeroed gap and the F1/F2 record
 void nv_flush_write(uint32_t off, uint32_t n, uint8_t *buf) {
     cs_ready();
     memset(buf + n, 0, NOR_REC - off - n);

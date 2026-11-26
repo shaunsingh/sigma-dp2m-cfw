@@ -96,6 +96,8 @@ Critical concurrency & buffer lessons learned on hardware:
 | `0x00514680` | inline 22 B (X3F EXIF CS) | inline | `crates/dp2m/src/m5.rs` |
 | `0x004D738E` | `0x004D3E82` (HW JPEG enc) | `0x005D1600` | `src/asm/m5/spatial_driver.fr80` |
 
+The two EXIF CS hooks at `0x005147C4` / `0x00514680` sit in SD15-era maker note writers (`0x513530..0x5145FA`, `0x514AD8`) with no static references; the M6M writes the file metadata (3.8).
+
 Additional verified stock M5Slave addresses:
 - `0x8000CC44`: live active Foveon Q7 signed 12-bit CCMatrix (9 × `u16 BE`, sign bit `0x0800`). Committed via `0x004B1F20(struct_ptr)` where `struct[0..2] = 0x0200`.
 - `0x80001B88`: live ColorSpace RAM flag (`1 = sRGB`, `2 = AdobeRGB`).
@@ -219,6 +221,7 @@ The 2 KB NOR record uses `0x00..0x3E3`; `0x3E4..0x7FF` has no accessor. C4/C5 li
 - Icons: `0xA0042AAC(id)` for ids 1..0x1A1 (table `0xA07DD784`); 8 bpp indices 0..16 (0 transparent, 1 white fill, 16 black outline), blitted by `0xA0040DD8` into the index plane `0xA2130000` (CLUT `0xA07DEC54`).
 - Text: `0xA0042684`, engine 0 ("BP4" outline fonts) only, line buffer `0xA093A514`, about 1 M instructions per label.
 - Film page: inserted as menu page 2 in the page template and live list (menu state `0xA07F22D2 + 0x14` / `+ 0x3C`; menu entry copies the template, now 11 pages); page-to-tab-group `0xA0058994` is hooked; tab geometry `0xA04F3100` (stock 56 px per tab, 52 px with 11 pages).
+- File color mode: the M6M writes the Sigma maker note for JPG and X3F (`0xA0148442`). Its color mode switch (`0xA0148CF8`, cm at ctx `+0x8E`) writes tag 0x3D (11 B, `0xA07F7D78`) and tag 0x59 (15 B, `0xA07F8320`) and defaults to `"Standard"`. Playback parses tag 0x3D by prefix (`strncmp`) into info `+0x157` (JPG `0xA0147938`, X3F `0xA0132E9A`; unknown → 0). dp2m writes `"Film NN"` (NN = cm - 9) and the film name for films and maps `"Film NN"` back in both parsers; stock modes are unchanged.
 
 See [research/m6m-ui.md](research/m6m-ui.md).
 
@@ -241,7 +244,7 @@ See [research/live-view.md](research/live-view.md).
 
 ### 3.8 Capture IPC (`cmd 0x20`)
 
-Stock `0xA0035FCE` clamps `meta[+0x1E]` to `0..7` and `meta[+0x1D]` to `0..1` and zeroes `cmd[5]` / `cmd[6]`. The hook at `0xA00360A2` (`ipc_hook` in `src/m6m/hooks.S`, `ipc_pack` in `src/m6m/ui.c`) keeps the live `r1` (`1.0f`) and packs:
+Stock `0xA0035FCE` remaps `meta[+0x1E]` into the low nibble of `cmd[8]` (table `0xA0035FFA`: 3→0, 4→1, 5→2, 6→3, 7→4, 2→5, 1→6, 8→7, else 0), clamps `meta[+0x1D]` to `0..1` and zeroes `cmd[5]` / `cmd[6]`. The hook at `0xA00360A2` (`ipc_hook` in `src/m6m/hooks.S`, `ipc_pack` in `src/m6m/ui.c`) keeps the live `r1` (`1.0f`) and packs:
 - `cmd[5]`: full 8-bit `packed_cm` (`1..198`):
   - `1..8`: stock modes
   - `9..13`: Quattro modes (FOV Classic Yellow, Cinema, Sunset Red, Forest Green, Teal & Orange)
@@ -264,7 +267,7 @@ The packed mode follows `packed_mode` in `crates/dp2m/src/catalog.rs` (film orde
 
 Verified so far in emulation only (`dp2m build` verifiers, `python -m tools.verify`); nothing below has been tested on a camera.
 
-- **On-camera checks**: full `DP2MV200.bin` install from 1.05 and reinstall of stock 1.05; runtime label icons (QS, OSD, MODE, LV status, playback info); Custom QS film items in each slot; C4/C5 slot persistence across power cycles; payload RAM window `0xA1C00000..0xA1E00000` under LV, capture, playback, movie and USB; M5 engine wall time per fx combination.
+- **On-camera checks**: full `DP2MV200.bin` install from 1.05 and reinstall of stock 1.05; runtime label icons (QS, OSD, MODE, LV status, playback info); film name in playback info for new JPG and X3F files, and how Sigma Photo Pro treats `"Film NN"` X3F files; Custom QS film items in each slot; C4/C5 slot persistence across power cycles; payload RAM window `0xA1C00000..0xA1E00000` under LV, capture, playback, movie and USB; M5 engine wall time per fx combination.
 - **Verifier coverage**: `.dp2m.hooks` application over every record, the 11-page menu list and `page_group`, HUD grid drawing.
 
 ### M5 performance notes

@@ -24,6 +24,11 @@ QS_SLOT_MENUS = range(0xE5, 0xED)
 # slot getters called by QS_SLOT_ROWS(page, slot)
 QS_SLOT_GET = {0xA01684FE: (0, 0), 0xA0168504: (0, 1), 0xA016850A: (0, 2), 0xA0168510: (0, 3),
                0xA0168516: (1, 0), 0xA016851C: (1, 1), 0xA0168522: (1, 2), 0xA0168528: (1, 3)}
+# maker note writer: tag buffer setup + color mode switch (r7 = ctx + 0x80, cm at +0xE) up to the common tail
+MN_SWITCH_SETUP, MN_SWITCH_DONE = 0xA0148CE4, 0xA0148D2E
+MN_TAG_3D, MN_TAG_59 = 0xA07F7D78, 0xA07F8320
+# playback parsers: the store of an unmatched name (r0 = 0) -> next insn; string reg, record reg (cm at +0x17)
+PB_STORES = ((0xA0147938, 0xA014793C, "r7", "r4"), (0xA0132E9A, 0xA0132E9E, "r6", "r5"))
 
 
 @dataclass(frozen=True)
@@ -383,6 +388,34 @@ def check_package(b: Build, r: Report, maj: int, mi: int) -> None:
     r.check(p.segment("m6m") == b.img.c78, "M6M segment = C78FRM.bin")
 
 
+def check_makernote(b: Build, r: Report) -> None:
+    """Color mode switch of the maker note writer, then both playback parser stores, for stock modes and films."""
+    m = Machine(b.img)
+    sp, rec, txt = STACK[1] - 0x200, SCRATCH, SCRATCH + 0x100
+    stock_names = {1: "Sepia", 2: "Monochrome", 3: "Standard", 4: "Vivid", 0: "Standard"}
+    fl = films(b)
+    bad = []
+    for cm in [0, 1, 2, 3, 4] + [f.cm for f in fl]:
+        m.w8(rec + 0x8E, cm)
+        m.run(MN_SWITCH_SETUP, MN_SWITCH_DONE, sp=sp, r7=rec + 0x80)
+        tag3d, tag59 = m.rd(MN_TAG_3D, 11), m.rd(MN_TAG_59, 15)
+        if cm < FILM_MODE0:
+            ok = tag3d.startswith(stock_names[cm].encode()) and tag59.startswith(stock_names[cm].encode())
+        else:
+            name = b.gen.strings[cm - FILM_MODE0].encode()[:14]
+            ok = tag3d == f"Film {cm - FILM_MODE0:02d}".encode().ljust(11, b"\0") and tag59 == name.ljust(15, b"\0")
+        if not ok:
+            bad.append((cm, tag3d, tag59))
+            continue
+        for site, until, rs, rr in PB_STORES:
+            m.wr(txt, tag3d + b"\0")
+            m.w8(rec + 0x17, 0xEE)
+            m.run(site, until, sp=sp, r0=0, **{rs: txt, rr: rec})
+            if m.u8(rec + 0x17) != (cm if cm >= FILM_MODE0 else 0):
+                bad.append((cm, hex(site), m.u8(rec + 0x17)))
+    r.eq(bad, [], f"maker note: stock modes keep their names, {len(fl)} films write 'Film NN' + name and parse back in JPG & X3F playback")
+
+
 def run(b: Build, r: Report) -> None:
     check_invariants(b, r)
     check_menus(b, r)
@@ -391,6 +424,7 @@ def run(b: Build, r: Report) -> None:
     check_bracketing(b, r)
     check_min_shutter(b, r, addrs["minshutter"])
     check_ipc(b, r, addrs)
+    check_makernote(b, r)
     check_lv(b, r)
     check_ycap(b, r)
     check_package(b, r, *check_updater(b, r))

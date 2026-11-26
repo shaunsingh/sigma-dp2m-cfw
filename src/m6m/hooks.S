@@ -91,6 +91,40 @@ fn ipc_hook
     hook HOOK_BL, 0xA00360A2, ipc_hook, 0x20007160
     hook HOOK_HALF, 0xA00360A6, 0x46C0, 0x71A0
 
+// maker note color mode switch 0xA0148CF8 (`blx __ARM_common_switch8`, r3 = cm, table at lr): films skip the
+// stock switch, whose default writes "Standard", and rejoin after its common tail memcpy
+fn mn_cm_hook
+    cmp  r3, #9
+    bhs  1f
+    ldr  r2, =0xA0173358
+    bx   r2
+1:  movs r0, r3
+    ldr  r1, [sp, #0x44]
+    ldr  r2, [sp, #0x40]
+    bl   mn_film
+    ldr  r0, =0xA0148D2F
+    bx   r0
+    .ltorg
+    hook HOOK_BL, 0xA0148CF8, mn_cm_hook, 0xF02AEB2E
+
+// playback maker note parsers, at the store all color mode cases share; 0 = no stock name matched
+.macro pb_cm name, site, str, rec, ld, expect
+fn \name
+    cmp  r0, #0
+    bne  1f
+    push {lr}
+    movs r0, \str
+    bl   pb_film_cm
+    pop  {r1}
+    mov  lr, r1
+1:  strb r0, [\rec, #0x17]
+    ldr  r0, [sp, #\ld]
+    bx   lr
+    hook HOOK_BL, \site, \name, \expect
+.endm
+    pb_cm pb_cm_jpg, 0xA0147938, r7, r4, 0x48, 0x75E09812
+    pb_cm pb_cm_x3f, 0xA0132E9A, r6, r5, 0xE4, 0x75E89839
+
 // LV YCC capture 0xA0033F1A after `push {r4-r7,lr}`: replaces `ldr r5,=lit; movs r7,r0`
 fn lv_ycap_hook
     movs r7, r0

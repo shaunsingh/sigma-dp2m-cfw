@@ -25,6 +25,28 @@ void ipc_pack(uint8_t *cmd, const uint8_t *meta) {
     cmd[6] = (uint8_t)((meta[0x1D] & 3u) | fx << 2 | (REG8(NV_FILL) & 3u) << 5);
 }
 
+// maker note: tag 0x3D (11 B, parsed back by playback) "Film NN", tag 0x59 (15 B) the film name; NUL padded,
+// as both buffers are static templates. No stock name is a prefix of "Film", so stock firmware reads it as 0
+static const char film_tag[] = "Film ";
+
+void mn_film(uint32_t cm, char *tag3d, char *tag59) {
+    uint32_t f = cm - FILM_MODE0, tens = (f * 205u) >> 11; /* f / 10 for f < 1029; the payload has no divide */
+    memset(tag3d, 0, 11);
+    memset(tag59, 0, 15);
+    memcpy(tag3d, film_tag, 5);
+    tag3d[5] = (char)('0' + tens);
+    tag3d[6] = (char)('0' + f - 10u * tens);
+    const char *s = f < dp2m_film_count ? dp2m_strings[f] : ""; /* film labels are the first strings */
+    for (uint32_t i = 0; i < 14u && s[i]; i++) tag59[i] = s[i];
+}
+
+uint32_t pb_film_cm(const char *s) {
+    for (uint32_t i = 0; i < 5u; i++)
+        if (s[i] != film_tag[i]) return 0;
+    uint32_t d0 = (uint32_t)(s[5] - '0'), d1 = (uint32_t)(s[6] - '0'), f = 10u * d0 + d1;
+    return d0 < 10u && d1 < 10u && f < dp2m_film_count ? FILM_MODE0 + f : 0;
+}
+
 #define NV_SETTING(name, addr, max, after)                                             \
     uint32_t nv_get_##name(void) { uint32_t v = REG8(addr); return v <= (max) ? v : 0; } \
     void nv_set_##name(uint32_t v) { REG8(addr) = (uint8_t)v; after; }

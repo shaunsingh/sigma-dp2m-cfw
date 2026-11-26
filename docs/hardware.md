@@ -158,7 +158,7 @@ The builder checks these against the stock image after patching:
 | Range | Reason |
 | --- | --- |
 | IPL, `C78FRM.bin[0..0x20000]` | boot loader |
-| `0xA0179000..0xA023D35A` | Spartan-6 FPGA bitstream (803,674 B, length at `0xA07AE444`); any change breaks FPGA configuration (white screen, dead shutter) |
+| `0xA0179000..0xA023D35A` | Spartan-6 FPGA bitstream (803,674 B, length at `0xA07AE444`); any accidental change breaks FPGA configuration (white screen, dead shutter). Deliberate changes: opt-in with valid CRCs, see [../AGENTS.md](../AGENTS.md) |
 | `0xA07FBC1C..0xA0800000` | vector source, cleared at boot |
 | word `0xA004D3D0` (`0xA07EEFCC`) | literal shared with other code; hook `Get_Menu_Table` instead |
 | `0xA005D924..0xA005F1A0` | live screen code (ids 50..55) |

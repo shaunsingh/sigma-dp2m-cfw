@@ -10,14 +10,19 @@
 
 ## Environment & Commands
 
-Always pass `--no-write-lock-file` to `nix develop` so `flake.lock` stays untracked:
+Always pass `--no-write-lock-file` to `nix develop` so `flake.lock` stays untracked. The gate, in order (`build` precedes `test` because `crates/dp2m-sim/tests/camera_flow.rs` and `tools.verify` read the images in `out/`):
 
 ```sh
+nix develop --no-write-lock-file -c cargo clippy --offline --all-targets -- -D warnings
 nix develop --no-write-lock-file -c cargo run --release -- build
 nix develop --no-write-lock-file -c cargo test --release --offline
-nix develop --no-write-lock-file -c cargo clippy --offline --all-targets -- -D warnings
 nix develop --no-write-lock-file -c python3 -m tools.verify out
 ```
+
+## Merging
+
+- Work happens on `ws/<area>` branches in git worktrees. Only the integration agent merges into `main` and pushes `main` to `origin` (no force pushes, no history rewrites); everyone else requests a merge through the orchestrator.
+- The four commands above are the merge gate, run in that order on the rebased branch.
 
 Inspection & simulator workflows:
 
@@ -33,7 +38,7 @@ Inspection & simulator workflows:
 
 - **Protected regions** (enforced by `crates/dp2m/src/m6m/mod.rs`):
   - `C78FRM.bin[0..0x20000]`: IPL bootloader.
-  - `0xA0179000..0xA023D35A`: Spartan-6 FPGA bitstream (`803,674` B). Any byte diff causes a white screen and dead shutter.
+  - `0xA0179000..0xA023D35A`: Spartan-6 FPGA bitstream (`803,674` B). An accidental byte diff causes a white screen and dead shutter, so the builder check stays on by default. Deliberate bitstream work is allowed: it is opt-in in the config, must keep the configuration CRCs valid, and needs a hardware test plan with a recovery path.
   - `0xA07FBC1C..0xA0800000`: exception vector source, zero-filled by boot scatter (`0xA07AD3CC`).
   - `0xA004D3D0`: shared literal pool word (`0xA07EEFCC`); hook `Get_Menu_Table` (`0xA004CD0A`) instead.
   - `0xA005D924..0xA005F1A0` and `0xA07DEBF0..0xA07DEC0B`: live screen 50..55 handlers and vtable slots.

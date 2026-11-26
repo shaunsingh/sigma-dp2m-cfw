@@ -46,9 +46,73 @@ class Machine:
         uc.mem_write(BASE, img.s3)
         uc.mem_map(*PERIPH)
         uc.hook_add(UC_HOOK_INTR, lambda *_: None)
+        self._heap_bump = 0xA0A20000
         self.stub(stock.UITRON[0], ret=0, end=stock.UITRON[1])
+        for va in (0xA0071830, 0xA0071970, 0xA0071C54):
+            self.stub(va, ret=0, on=self._mpf_alloc)
+        for va in (0xA0071F30, 0xA007212C, 0xA00722A0):
+            self.stub(va, ret=0, on=self._mpl_alloc)
+        self.stub(0xA0072C74, ret=0, on=lambda a: self.wr(a[1], b"\0" * 8) if BASE <= a[1] < RAM_END - 8 else None)
+        self.stub(0xA0073B70, ret=0, on=lambda a: self.w16(a[0], 0) if BASE <= a[0] < RAM_END - 2 else None)
+        self.stub(0xA00752D4, ret=0, on=self._ref_tsk)
         self.stub(stock.GET_LANG, ret=lang)
+        self.stub(stock.DMA_2D_COPY_MODE, ret=0, on=self._dma_2d_copy_mode)
+        self.stub(stock.DMA_2D_COPY, ret=0, on=self._dma_2d_copy)
+        self.stub(stock.DMA_RECT_FILL, ret=0, on=self._dma_rect_fill)
+        self.stub(stock.DMA_MEM_COPY, ret=0, on=self._dma_mem_copy)
         self.wr(stock.FONT_SCALE, struct.pack(">II", 1, 1))  # neutral; screens set their own
+
+    def _bump(self, n: int) -> int:
+        sz = max(16, (n + 15) & ~15)
+        ptr = self._heap_bump
+        self._heap_bump += sz
+        self.wr(ptr, b"\0" * sz)
+        return ptr
+
+    def _mpf_alloc(self, a: list[int]) -> None:
+        if BASE <= a[1] < RAM_END - 4:
+            self.w32(a[1], self._bump(256))
+
+    def _mpl_alloc(self, a: list[int]) -> None:
+        if BASE <= a[2] < RAM_END - 4:
+            self.w32(a[2], self._bump(a[1]))
+
+    def _ref_tsk(self, a: list[int]) -> None:
+        if BASE <= a[1] < RAM_END - 0x24:
+            self.wr(a[1], b"\0" * 0x24)
+            self.w16(a[1], 0x10)  # TTS_DMT
+
+    def _dma_2d_copy_mode(self, a: list[int]) -> None:
+        src, src_stride, dst_stride = a[1], a[2], a[3]
+        dst, w_bytes, rows = self.stack_args(3)
+        self._copy_2d(src, src_stride, dst, dst_stride, w_bytes, rows)
+
+    def _dma_2d_copy(self, a: list[int]) -> None:
+        src, src_stride, dst_stride, dst = a
+        w_bytes, rows = self.stack_args(2)
+        self._copy_2d(src, src_stride, dst, dst_stride, w_bytes, rows)
+
+    def _copy_2d(self, src: int, src_stride: int, dst: int, dst_stride: int, w_bytes: int, rows: int) -> None:
+        if BASE <= src and BASE <= dst and w_bytes and 0 < rows <= 2048:
+            for r in range(rows):
+                s, d = src + r * src_stride, dst + r * dst_stride
+                if s + w_bytes <= RAM_END and d + w_bytes <= RAM_END:
+                    self.wr(d, self.rd(s, w_bytes))
+
+    def _dma_rect_fill(self, a: list[int]) -> None:
+        fill, stride, dst = a[1] & 0xFF, a[2], a[3]
+        w_bytes, rows = self.stack_args(2)
+        if BASE <= dst and w_bytes and 0 < rows <= 2048 and stride <= 8192:
+            row = bytes([fill]) * w_bytes
+            for r in range(rows):
+                off = dst + r * stride
+                if off + w_bytes <= RAM_END:
+                    self.wr(off, row)
+
+    def _dma_mem_copy(self, a: list[int]) -> None:
+        dst, src, n = a[:3]
+        if BASE <= dst and BASE <= src and n and dst + n <= RAM_END and src + n <= RAM_END:
+            self.wr(dst, self.rd(src, n))
 
     # memory
     def rd(self, va: int, n: int) -> bytes:

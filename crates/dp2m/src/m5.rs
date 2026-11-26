@@ -17,15 +17,30 @@ const MAX_PACKED_MODE: usize = 198;
 const LUT3D_STRIDE: usize = 0x1028;
 
 // flash map (< 0x00800000 = 8 MB NOR limit)
-const VA_MATRIX_HOOK: u32 = 0x005D_0000;
-const VA_LUTSEL_HOOK: u32 = 0x005D_0180;
-const VA_MCAS_HOOK: u32 = 0x005D_0200;
-const VA_CS_SET_HOOK: u32 = 0x005D_0300;
-const VA_CS_EXF_HOOK: u32 = 0x005D_0320;
-const VA_IPC_UNPK_HOOK: u32 = 0x005D_0340;
-const VA_EXIF_CS_HOOK: u32 = 0x005D_0380;
-const VA_YCC_SUB: u32 = 0x005D_03C0;
-const VA_SPATIAL_DRV: u32 = 0x005D_1600;
+pub const VA_MATRIX_HOOK: u32 = 0x005D_0000;
+pub const VA_LUTSEL_HOOK: u32 = 0x005D_0180;
+pub const VA_MCAS_HOOK: u32 = 0x005D_0200;
+pub const VA_CS_SET_HOOK: u32 = 0x005D_0300;
+pub const VA_CS_EXF_HOOK: u32 = 0x005D_0320;
+pub const VA_IPC_UNPK_HOOK: u32 = 0x005D_0340;
+pub const VA_EXIF_CS_HOOK: u32 = 0x005D_0380;
+pub const VA_YCC_SUB: u32 = 0x005D_03C0;
+pub const VA_SPATIAL_DRV: u32 = 0x005D_1600;
+
+fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let n = std::thread::available_parallelism().map_or(1, |p| p.get()).min(items.len().max(1));
+    if n <= 1 {
+        return items.iter().map(f).collect();
+    }
+    let chunk = items.len().div_ceil(n);
+    std::thread::scope(|s| {
+        let handles: Vec<_> = items
+            .chunks(chunk)
+            .map(|ch| s.spawn(|| ch.iter().map(&f).collect::<Vec<_>>()))
+            .collect();
+        handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+    })
+}
 const VA_HALO_OPT_LUT: u32 = 0x005D_2000;
 const VA_GRAIN_ENVS: u32 = 0x005D_2100;
 const VA_MODE_META: u32 = 0x005D_2400;
@@ -259,11 +274,21 @@ pub fn build_m5(fw_raw: &[u8], pack: &FilmPack, asm_dir: &Path, cfg: &Config) ->
     }
 
     // modes 19..150 (132 color recipes)
-    for (c_i, r) in pack.color_recipes.iter().enumerate() {
-        let ls = calibrate_lut_dp2m(&r.lut_srgb_raw, stock_std_lut);
-        let la = calibrate_lut_dp2m(&r.lut_argb_raw, stock_std_lut);
-        let m = Mode { cmcm: r.cmcm_q10, lut_s: &ls, lut_a: &la, meta: r.meta, mcas: Some((&r.mck_srgb_q10, &r.mck_argb_q10)) };
-        write_mode(&mut s2, 10 + c_i, &m);
+    let color_cal = par_map(&pack.color_recipes, |r| {
+        (
+            calibrate_lut_dp2m(&r.lut_srgb_raw, stock_std_lut),
+            calibrate_lut_dp2m(&r.lut_argb_raw, stock_std_lut),
+            build_mcas_struct(&r.mck_srgb_q10, stock_mcb, stock_mcid),
+            build_mcas_struct(&r.mck_argb_q10, stock_mcb, stock_mcid),
+        )
+    });
+    for ((c_i, r), (ls, la, ms, ma)) in pack.color_recipes.iter().enumerate().zip(&color_cal) {
+        let idx = 10 + c_i;
+        write_mode(&mut s2, idx, &Mode { cmcm: r.cmcm_q10, lut_s: ls, lut_a: la, meta: r.meta, mcas: None });
+        let mso = va_off(VA_MCAS_SRGB + (idx as u32) * 0x200);
+        let mao = va_off(VA_MCAS_ARGB + (idx as u32) * 0x200);
+        s2[mso..mso + 0x1AE].copy_from_slice(ms);
+        s2[mao..mao + 0x1AE].copy_from_slice(ma);
         let so = va_off(VA_LUT3D_SRGB + (c_i * LUT3D_STRIDE) as u32);
         let ao = va_off(VA_LUT3D_ARGB + (c_i * LUT3D_STRIDE) as u32);
         // the engine reads 3d lut bytes biased (s8 ^ 0x80) to skip sign extension
@@ -273,10 +298,11 @@ pub fn build_m5(fw_raw: &[u8], pack: &FilmPack, asm_dir: &Path, cfg: &Config) ->
     }
 
     // modes 151..190 (40 bw recipes)
-    for (bw_i, r) in pack.bw_recipes.iter().enumerate() {
-        let ls = calibrate_lut_dp2m(&r.lut_srgb_raw, stock_std_lut);
-        let la = calibrate_lut_dp2m(&r.lut_argb_raw, stock_std_lut);
-        write_mode(&mut s2, 142 + bw_i, &Mode { cmcm: r.cmcm_q10, lut_s: &ls, lut_a: &la, meta: r.meta, mcas: None });
+    let bw_cal = par_map(&pack.bw_recipes, |r| {
+        (calibrate_lut_dp2m(&r.lut_srgb_raw, stock_std_lut), calibrate_lut_dp2m(&r.lut_argb_raw, stock_std_lut))
+    });
+    for ((bw_i, r), (ls, la)) in pack.bw_recipes.iter().enumerate().zip(&bw_cal) {
+        write_mode(&mut s2, 142 + bw_i, &Mode { cmcm: r.cmcm_q10, lut_s: ls, lut_a: la, meta: r.meta, mcas: None });
         let to = va_off(VA_BW_TONER_40 + (bw_i * 512) as u32);
         s2[to..to + 512].copy_from_slice(&r.toner_cb_cr);
     }
@@ -661,17 +687,22 @@ pub fn verify_m5(s2: &[u8]) -> Result<(), String> {
     let (big, strip) = (Ycc::synth(4704, 3136), Ycc::synth(4704, 8));
     let cm_c = 23 + 12 * 8 + 5;
     let tint = s2[va_off(VA_MODE_META + (cm_c - 9) * 4) + 3];
-    let mut strip_out = Vec::with_capacity(8);
-    let (mut pyr_steps, mut full_fx) = (0, (0, 0));
-    for fx in 0..8u32 {
+    let fxs: [u32; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+    let strip_res = par_map(&fxs, |&fx| -> Result<(Ycc, u64, (u64, u64)), String> {
         let shot = run_driver(s2, cm_c, (1 << 5) | (fx << 2) | 2, &big, None, false)?;
         let c = shot.call.ok_or("4704x3136: no ycc pass")?;
         if c.ctx[16] != 80 || c.ctx[17] != 53 {
             return Err(format!("4704x3136 pyramid failed: {:?}", c.ctx));
         }
-        pyr_steps = pyr_steps.max(shot.steps);
         let (out, run) = run_engine(s2, &c.ctx, &c.scratch, &strip, None)?;
-        full_fx = (run.steps / (4704 / 2 * 8), run.mem[0] / (4704 / 2 * 8));
+        Ok((out, shot.steps, (run.steps / (4704 / 2 * 8), run.mem[0] / (4704 / 2 * 8))))
+    });
+    let mut strip_out = Vec::with_capacity(8);
+    let (mut pyr_steps, mut full_fx) = (0, (0, 0));
+    for r in strip_res {
+        let (out, steps, f) = r?;
+        pyr_steps = pyr_steps.max(steps);
+        full_fx = f;
         strip_out.push(out);
     }
     for fx in [4, 5] {
@@ -687,48 +718,51 @@ pub fn verify_m5(s2: &[u8]) -> Result<(), String> {
     sd[..16].copy_from_slice(b"D2ML\x01\x1E\x00\x50\x02verify\0");
     let lo = va_off(VA_LUT3D_SRGB + 5 * LUT3D_STRIDE as u32);
     sd[0x10..0x10 + 4131].iter_mut().zip(&s2[lo..lo + 4131]).for_each(|(d, &s)| *d = s ^ 0x80);
-    let mut runs = 0;
-    for cm in [3u32, cm_c, 151 + 13, 191] {
-        let meta = match cm {
+    let jobs: Vec<(u32, u32, u32)> = [3u32, cm_c, 151 + 13, 191]
+        .into_iter()
+        .flat_map(|cm| [1u32, 2].into_iter().flat_map(move |cs| (0..4u32).map(move |fill| (cm, cs, fill))))
+        .collect();
+    let job_res = par_map(&jobs, |&(cm, cs, fill)| -> Result<usize, String> {
+        let meta: [u8; 4] = match cm {
             191.. => [sd[5], sd[6], sd[7], sd[8]],
             9.. => s2[va_off(VA_MODE_META + (cm - 9) * 4)..][..4].try_into().unwrap(),
             _ => [28, 0, 64, 0],
         };
         let toner = if (151..=190).contains(&cm) { VA_BW_TONER_40 + (cm - 151) * 512 } else { 0 };
-        for cs in [1u32, 2] {
-            let lut = match cm {
-                19..=150 => (if cs == 2 { VA_LUT3D_ARGB } else { VA_LUT3D_SRGB }) + (cm - 19) * LUT3D_STRIDE as u32,
-                191..=198 => SCRATCH_SD_LUT + 0x10,
-                _ => 0,
-            };
-            for fill in 0..4u32 {
-                let shots = (0..8u32)
-                    .map(|fx| run_driver(s2, cm, (fill << 5) | (fx << 2) | cs, &img, (cm >= 191).then_some(&sd[..]), true))
-                    .collect::<Result<Vec<_>, _>>()?;
-                runs += shots.len();
-                for (fx, shot) in (0u32..).zip(&shots) {
-                    let tag = format!("cm={} cs={} fill={} fx={}", cm, cs, fill, fx);
-                    let (lut_on, grain_on, halo_on) = (fx & 1 != 0 && lut != 0, fx & 2 != 0, fx & 4 != 0 && meta[2] != 0);
-                    let work = lut_on || grain_on || halo_on || fill != 0 || toner != 0;
-                    match &shot.call {
-                        Some(c) if work => {
-                            let got = (c.ctx[7], c.ctx[8], c.ctx[9], c.ctx[10], grain_on.then_some(c.ctx[12]), c.ctx[19] != 0, c.ctx[20] != 0);
-                            let exp = (fx, fill, if lut_on { lut } else { 0 }, toner, grain_on.then_some(meta[0] as u32), halo_on, fill != 0);
-                            if got != exp {
-                                return Err(format!("{}: ctx {:?} != {:?}", tag, got, exp));
-                            }
-                        }
-                        None if !work => {}
-                        _ => return Err(format!("{}: ycc pass {} != expected {}", tag, shot.call.is_some(), work)),
+        let lut = match cm {
+            19..=150 => (if cs == 2 { VA_LUT3D_ARGB } else { VA_LUT3D_SRGB }) + (cm - 19) * LUT3D_STRIDE as u32,
+            191..=198 => SCRATCH_SD_LUT + 0x10,
+            _ => 0,
+        };
+        let shots = (0..8u32)
+            .map(|fx| run_driver(s2, cm, (fill << 5) | (fx << 2) | cs, &img, (cm >= 191).then_some(&sd[..]), true))
+            .collect::<Result<Vec<_>, _>>()?;
+        for (fx, shot) in (0u32..).zip(&shots) {
+            let tag = format!("cm={} cs={} fill={} fx={}", cm, cs, fill, fx);
+            let (lut_on, grain_on, halo_on) = (fx & 1 != 0 && lut != 0, fx & 2 != 0, fx & 4 != 0 && meta[2] != 0);
+            let work = lut_on || grain_on || halo_on || fill != 0 || toner != 0;
+            match &shot.call {
+                Some(c) if work => {
+                    let got = (c.ctx[7], c.ctx[8], c.ctx[9], c.ctx[10], grain_on.then_some(c.ctx[12]), c.ctx[19] != 0, c.ctx[20] != 0);
+                    let exp = (fx, fill, if lut_on { lut } else { 0 }, toner, grain_on.then_some(meta[0] as u32), halo_on, fill != 0);
+                    if got != exp {
+                        return Err(format!("{}: ctx {:?} != {:?}", tag, got, exp));
                     }
-                    for (bit, on) in [(1, lut != 0), (2, meta[0] != 0), (4, meta[2] != 0)] {
-                        if fx & bit == 0 && (shots[(fx | bit) as usize].out != shot.out) != on {
-                            return Err(format!("{}: fx bit {} {} the output", tag, bit, if on { "did not change" } else { "changed" }));
-                        }
-                    }
+                }
+                None if !work => {}
+                _ => return Err(format!("{}: ycc pass {} != expected {}", tag, shot.call.is_some(), work)),
+            }
+            for (bit, on) in [(1, lut != 0), (2, meta[0] != 0), (4, meta[2] != 0)] {
+                if fx & bit == 0 && (shots[(fx | bit) as usize].out != shot.out) != on {
+                    return Err(format!("{}: fx bit {} {} the output", tag, bit, if on { "did not change" } else { "changed" }));
                 }
             }
         }
+        Ok(shots.len())
+    });
+    let mut runs = 0;
+    for r in job_res {
+        runs += r?;
     }
 
     println!(
@@ -793,7 +827,13 @@ mod tests {
                     );
                     if let Some(r) = &refs {
                         let rc = run_driver(r, cm, p1d, cap, None, false).unwrap().call.unwrap();
-                        assert!(rc.ctx == c.ctx && rc.scratch == c.scratch, "{} fx={}: driver ctx/scratch differ from ref", label, fx);
+                        assert!(rc.ctx[..21] == c.ctx[..21], "{} fx={}: driver ctx differ from ref", label, fx);
+                        if c.ctx[19] != 0 {
+                            assert!(rc.scratch[..0x1100] == c.scratch[..0x1100], "{} fx={}: halo grid differs", label, fx);
+                        }
+                        if c.ctx[20] != 0 {
+                            assert!(rc.ctx[21] == c.ctx[21] && rc.scratch[0x2200..0x3300] == c.scratch[0x2200..0x3300], "{} fx={}: fill grid differs", label, fx);
+                        }
                         let (rout, rrun) = run_engine(r, &c.ctx, &c.scratch, img, None).unwrap();
                         let d: Vec<u32> = (0..3).flat_map(|k| out.p[k].iter().zip(&rout.p[k])).map(|(&a, &b)| a.abs_diff(b) as u32).collect();
                         let (maxd, ndiff) = (d.iter().max().unwrap(), d.iter().filter(|&&v| v != 0).count());

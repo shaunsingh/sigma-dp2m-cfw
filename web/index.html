@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DP2M</title>
+<style>
+  html, body {
+    margin: 0;
+    width: 100%;
+    height: 100%;
+    background: #000;
+    overflow: hidden;
+    display: grid;
+    place-items: center;
+    user-select: none;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  }
+  #lcd {
+    width: min(100vw, calc(100vh * 4 / 3));
+    height: min(100vh, calc(100vw * 3 / 4));
+    aspect-ratio: 4 / 3;
+    image-rendering: pixelated;
+    display: block;
+    outline: none;
+  }
+  #keys {
+    position: fixed;
+    right: 12px;
+    bottom: 12px;
+    z-index: 10;
+    background: rgba(12, 12, 14, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.11);
+    border-radius: 6px;
+    padding: 7px 9px;
+    color: #98989f;
+    font-size: 11px;
+    line-height: 1.45;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+  }
+  #keys.collapsed .rows { display: none; }
+  #keys-hdr {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    cursor: pointer;
+    color: #d1d1d6;
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  #keys:not(.collapsed) #keys-hdr {
+    margin-bottom: 5px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .rows {
+    display: grid;
+    grid-template-columns: auto auto;
+    column-gap: 10px;
+    row-gap: 2px;
+  }
+  .row {
+    display: contents;
+    cursor: pointer;
+  }
+  .row:hover kbd, .row:hover span { color: #fff; }
+  kbd {
+    font: inherit;
+    color: #e5e5ea;
+    text-align: right;
+    white-space: nowrap;
+  }
+  .sep {
+    grid-column: 1 / -1;
+    height: 1px;
+    margin: 3px 0;
+    background: rgba(255, 255, 255, 0.07);
+  }
+  .note {
+    grid-column: 1 / -1;
+    color: #6e6e75;
+    font-size: 10px;
+    margin-top: 2px;
+  }
+</style>
+</head>
+<body>
+<canvas id="lcd" width="640" height="480" tabindex="0"></canvas>
+<aside id="keys" aria-label="Controls">
+  <div id="keys-hdr" title="Toggle controls (?)">
+    <span>Controls</span><kbd>?</kbd>
+  </div>
+  <div class="rows">
+    <div class="row" data-code="0xFE"><kbd>Space</kbd><span>Shutter</span></div>
+    <div class="row" data-code="0x07"><kbd>I / V</kbd><span>DISP · View</span></div>
+    <div class="row" data-code="0x0C"><kbd>P</kbd><span>PLAY &#9654;</span></div>
+    <div class="row" data-code="0x09"><kbd>Q</kbd><span>QS Menu</span></div>
+    <div class="row" data-code="0x06"><kbd>M / Esc</kbd><span>MENU</span></div>
+    <div class="row" data-code="0x0A"><kbd>O</kbd><span>MODE</span></div>
+    <div class="row" data-code="0x08"><kbd>L</kbd><span>AEL</span></div>
+    <div class="row" data-code="0x01"><kbd>Enter</kbd><span>OK</span></div>
+    <div class="row"><kbd>&#8592;&#8593;&#8595;&#8594;</kbd><span>D-Pad / WASD</span></div>
+    <div class="row"><kbd>[ ]</kbd><span>Dial / Zoom</span></div>
+    <div class="row"><kbd>, . /</kbd><span>Level Tilt</span></div>
+    <div class="sep"></div>
+    <div class="note">Drop image, D2ML LUT, or .bin</div>
+  </div>
+</aside>
+<script>
+(() => {
+  const W = 640, H = 480, BYTES = W * H * 4;
+  const canvas = document.getElementById('lcd');
+  const keysEl = document.getElementById('keys');
+  const keysHdr = document.getElementById('keys-hdr');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  const imgData = ctx.createImageData(W, H);
+
+  const KEY_MAP = {
+    Enter: 0x01,
+    ArrowUp: 0x02, KeyW: 0x02,
+    ArrowDown: 0x03, KeyS: 0x03,
+    ArrowLeft: 0x04, KeyA: 0x04,
+    ArrowRight: 0x05, KeyD: 0x05,
+    KeyM: 0x06, Escape: 0x06,
+    KeyI: 0x07, KeyV: 0x07, Tab: 0x07,
+    KeyL: 0x08,
+    KeyQ: 0x09,
+    KeyO: 0x0A,
+    KeyP: 0x0C, Backspace: 0x0C,
+    BracketLeft: 0x20, Minus: 0x20,
+    BracketRight: 0x40, Equal: 0x40,
+    Space: 0xFE,
+  };
+
+  let ex = null;
+  let ready = false;
+  let tiltX = 0, tiltY = 64;
+
+  keysHdr.addEventListener('click', () => {
+    keysEl.classList.toggle('collapsed');
+    canvas.focus();
+  });
+  keysEl.addEventListener('click', (e) => {
+    const row = e.target.closest('[data-code]');
+    if (!row || !ready) return;
+    ex.cam_press(Number(row.dataset.code));
+    draw();
+    canvas.focus();
+  });
+
+  function draw() {
+    if (!ready) return;
+    const ptr = ex.cam_render();
+    if (!ptr) return;
+    const view = new Uint8ClampedArray(ex.memory.buffer, ptr, BYTES);
+    imgData.data.set(view);
+    ctx.putImageData(imgData, 0, 0);
+  }
+
+  function withBuf(bytes, fn) {
+    const ptr = ex.wasm_alloc(bytes.length);
+    if (!ptr) return 0;
+    try {
+      new Uint8Array(ex.memory.buffer, ptr, bytes.length).set(bytes);
+      return fn(ptr, bytes.length);
+    } finally {
+      ex.wasm_free(ptr, bytes.length);
+    }
+  }
+
+  async function loadImageFile(file) {
+    const bmp = await createImageBitmap(file);
+    const off = document.createElement('canvas');
+    off.width = W;
+    off.height = 424;
+    const octx = off.getContext('2d');
+    const sAspect = bmp.width / bmp.height;
+    const dAspect = W / 424;
+    let sx = 0, sy = 0, sw = bmp.width, sh = bmp.height;
+    if (sAspect > dAspect) {
+      sw = bmp.height * dAspect;
+      sx = (bmp.width - sw) * 0.5;
+    } else {
+      sh = bmp.width / dAspect;
+      sy = (bmp.height - sh) * 0.5;
+    }
+    octx.drawImage(bmp, sx, sy, sw, sh, 0, 0, W, 424);
+    bmp.close();
+    const rgba = octx.getImageData(0, 0, W, 424).data;
+    withBuf(rgba, (ptr) => ex.cam_set_scene(ptr, W, 424));
+    draw();
+  }
+
+  window.addEventListener('keydown', (e) => {
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if ((e.code === 'Slash' && e.shiftKey) || e.code === 'KeyH') {
+      e.preventDefault();
+      keysEl.classList.toggle('collapsed');
+      return;
+    }
+    if (!ready) return;
+    if (e.code === 'Comma') {
+      e.preventDefault();
+      tiltX = Math.max(-120, tiltX - 4);
+      ex.cam_tilt(tiltX, tiltY);
+      draw();
+      return;
+    }
+    if (e.code === 'Period') {
+      e.preventDefault();
+      tiltX = Math.min(120, tiltX + 4);
+      ex.cam_tilt(tiltX, tiltY);
+      draw();
+      return;
+    }
+    if (e.code === 'Slash') {
+      e.preventDefault();
+      tiltX = 0; tiltY = 64;
+      ex.cam_tilt(0, 64);
+      draw();
+      return;
+    }
+    const code = KEY_MAP[e.code];
+    if (code !== undefined) {
+      e.preventDefault();
+      ex.cam_press(code);
+      draw();
+    }
+  });
+
+  canvas.addEventListener('wheel', (e) => {
+    if (!ready || e.deltaY === 0) return;
+    e.preventDefault();
+    ex.cam_press(e.deltaY > 0 ? 0x40 : 0x20);
+    draw();
+  }, { passive: false });
+
+  window.addEventListener('dragover', (e) => e.preventDefault());
+  window.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    if (!ex || !e.dataTransfer || !e.dataTransfer.files.length) return;
+    const file = e.dataTransfer.files[0];
+    if (file.type.startsWith('image/')) {
+      await loadImageFile(file);
+      return;
+    }
+    const buf = new Uint8Array(await file.arrayBuffer());
+    const magic4 = String.fromCharCode(buf[0] || 0, buf[1] || 0, buf[2] || 0, buf[3] || 0);
+    if (magic4 === 'D2ML') {
+      const m = file.name.match(/([1-8])/);
+      const slot = m ? Number(m[1]) : 1;
+      withBuf(buf, (ptr, len) => ex.cam_set_sd_lut(slot, ptr, len));
+      draw();
+    } else if (buf.length > 0x1800000 && magic4 === 'SIGM') {
+      if (withBuf(buf, (ptr, len) => ex.cam_boot_pkg(ptr, len))) {
+        ready = true;
+        draw();
+      }
+    }
+  });
+
+  function loop() {
+    if (ready && ex.cam_tick()) draw();
+    requestAnimationFrame(loop);
+  }
+
+  async function boot() {
+    const { instance } = await WebAssembly.instantiateStreaming(fetch('dp2m_web.wasm'), {});
+    ex = instance.exports;
+
+    const [c78Res, firmRes] = await Promise.all([fetch('C78FRM.bin'), fetch('Firm.bin')]);
+    if (c78Res.ok && firmRes.ok) {
+      const [c78Buf, firmBuf] = await Promise.all([c78Res.arrayBuffer(), firmRes.arrayBuffer()]);
+      const c78 = new Uint8Array(c78Buf);
+      const firm = new Uint8Array(firmBuf);
+      const p1 = ex.wasm_alloc(c78.length);
+      const p2 = ex.wasm_alloc(firm.length);
+      new Uint8Array(ex.memory.buffer, p1, c78.length).set(c78);
+      new Uint8Array(ex.memory.buffer, p2, firm.length).set(firm);
+      ready = ex.cam_boot_split(p1, c78.length, p2, firm.length) === 1;
+      ex.wasm_free(p1, c78.length);
+      ex.wasm_free(p2, firm.length);
+    }
+
+    window.dp2m = {
+      press(code) { const n = ex.cam_press(code); draw(); return n; },
+      shoot() { const n = ex.cam_press(0xFE); draw(); return n; },
+      tilt(ax, ay = 64) { tiltX = ax; tiltY = ay; ex.cam_tilt(ax, ay); draw(); },
+      setColorMode(cm) { ex.cam_set_cm(cm); draw(); },
+      setGridMode(g) { ex.cam_set_grid(g); draw(); },
+      state() {
+        return {
+          ready,
+          screenId: ex.cam_screen_id(),
+          colorMode: ex.cam_color_mode(),
+          expoMode: ex.cam_expo_mode(),
+          gridMode: ex.cam_grid_mode(),
+          inPlayback: ex.cam_in_playback() === 1,
+          captures: ex.cam_capture_count(),
+          lastPackedCm: ex.cam_last_packed_cm(),
+          lastP1d: ex.cam_last_p1d(),
+        };
+      },
+      r8: (va) => ex.cam_r8(va >>> 0),
+      r32: (va) => ex.cam_r32(va >>> 0) >>> 0,
+      w8: (va, v) => { ex.cam_w8(va >>> 0, v & 0xFF); draw(); },
+    };
+
+    canvas.focus();
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  boot().catch(console.error);
+})();
+</script>
+</body>
+</html>

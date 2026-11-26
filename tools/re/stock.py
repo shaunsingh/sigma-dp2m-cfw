@@ -13,9 +13,14 @@ ICON_TBL, ICON_MAX = 0xA07DD784, 0x1A1  # 12 B per id: ARM getters of bits, w, h
 CLUT, CLUT_N = 0xA07DEC54, 0xDB  # [A, Y, Cb, Cr], loaded by 0xA00434EC
 ICON_HI = 0xC8  # enabled rows blit mode 1: index = hi + 1 - v (v 1 = white fill, 16 = black outline)
 OSD = 0xA2130000  # 640x480 8bpp index plane
+ARGB_FB = 0xA21D8C00  # 640x480 RGBA4444 overlay plane (LV uses rows 0..423)
 OSD_DIRTY = 0xA07DD760  # dirty rects merged by the OSD flush
 BLIT = 0xA0040DD8  # (src, x, y, w, [sp] h, hi, lo, transparent, mode)
 FILL_BOX = 0xA0041198
+DMA_2D_COPY_MODE = 0xA00B125C  # (mode, src, src_stride, dst_stride, [sp] dst, w_bytes, rows)
+DMA_2D_COPY = 0xA00B14A0  # (src, src_stride, dst_stride, dst, [sp] w_bytes, rows)
+DMA_RECT_FILL = 0xA00B1870  # (mode, fill, stride, dst, [sp] w_bytes, rows)
+DMA_MEM_COPY = 0xA00B23A8  # (dst, src, len)
 QS_STATE = 0xA07DF008  # +4 page, +6 strip scroll, +8 + 2 * page focused slot
 QS_SLOT_ROWS = 0xA00435D8  # (page, slot) -> rows
 QS_STRIP = 0xA0043E5C
@@ -39,6 +44,7 @@ UITRON = (0xA0070000, 0xA0076000)  # kernel service calls
 NV_BLOCK, NV_LEN, NV_PERSIST = 0xA0939684, 0x44C, 0x3C4
 NV_DEFAULTS = 0xA07F9E68
 NV_CM = 0xA09396C3
+NV_GRID = 0xA09396FB
 NV_BKT_ORD = 0xA09396DF
 NV_ISO_STEP = 0xA09396DD  # 1: 1/3 EV ISO menu
 MENU_ISO = 0x01
@@ -48,8 +54,39 @@ NV_LOAD = 0xA0040110  # (dst) boot load of NOR bank 0
 NV_FLUSH = 0xA004017A  # NVRAM -> NOR bank 0 record at 8 (stock block at 0x20)
 NV_RESET = 0xA0167574
 NOR_READ, NOR_WRITE = 0xA00206CC, 0xA00206FA  # (off, n, buf), bank 0
-MALLOC, FREE = 0xA003D9C0, 0xA003D9AC
+MALLOC, FREE, CALLOC, REALLOC = 0xA003D9C0, 0xA003D9AC, 0xA003D990, 0xA003D9D8
+
+# native AE solver & photometry
+AE_SENSOR_EV100 = 0xA000273C
+AE_ENABLE_LV_METER = 0xA0002CB2
+AE_SET_MODE = 0xA000D1A2
+AE_SET_AUTO_ISO_MIN, AE_SET_AUTO_ISO_MAX = 0xA000D2AA, 0xA000D2B2
+AE_SOLVE_CORE = 0xA000D6B6
+AE_AV_TO_Q16, AE_TV_TO_Q16 = 0xA000DDF6, 0xA000DE26
+AE_SOLVE_UI = 0xA003EABE
+AE_SYNC_EV, AE_SYNC_TV, AE_SYNC_AV, AE_SYNC_ISO = 0xA003EC88, 0xA003EDD0, 0xA003EECC, 0xA003F3A6
+AE_MAP_ISO_IDX = 0xA003F288
+AE_STATE = 0xA08008F8
+AE_OUT_AV_IDX, AE_OUT_TV_IDX = 0xA07DD6E0, 0xA07DD6E4
+GET_AUTO_ISO_MIN_UI, GET_AUTO_ISO_MAX_UI, GET_ISO_IDX = 0xA016F4FE, 0xA016F556, 0xA016F5AE
+
+# SCREEN_PB (0x19) & DCF
+PB_SCREEN = 0xA00575E2
+PB_STATE = 0xA07F21D8  # +0x34 current 1-based DCF index, +0x3C total count
+PB_SELECT_VBUF = 0xA000F222  # 1->0xA235E600, 2->0xA243F600, 4->0xA2520600, 8->0xA2601600
+PB_OSD_DISPATCH = 0xA005300E
+PB_STEP_OR_CUR = 0xA0053354
+PB_DECODE_RESAMPLE = 0xA0053F5C
+PB_ZOOM_CORE = 0xA00544A8
+PB_YCBCR_TO_RGB_PLANAR = 0xA0054AB2
+PB_IIP_HIST = 0xA004A7AC
+PB_HIST_BAR_DRAW = 0xA0048F7C
+DCF_DIR_COUNTS = 0xA0962758  # 999 x u32 (low u16 = count per DCF folder 100..999)
+DCF_GET_FILE_INFO = 0xA01151D0
+DCF_COUNT_IMAGES = 0xA0134234
+DCF_READ_JPEG_EXIF, DCF_READ_X3F_EXIF = 0xA01342EC, 0xA0134326
 GET_CM = 0xA0167926
+GET_GRID = 0xA0167F98
 GET_EXPO_MODE = 0xA0167892
 BKT_COUNT = 0xA0168100
 BKT_EV_Q16 = 0xA0002FE4  # (shot) -> EV offset q16
@@ -106,7 +143,43 @@ NAMES = {
     0xA01633CA: "get_lv_cc7",
     0xA016339A: "get_lv_ccn",
     0xA0044392: "qs_screen",
+    PB_SCREEN: "pb_screen",
     0xA00585C8: "menu_screen",
     0xA005F818: "updater_screen",
     0xA01657E4: "heap_bounds",
+    CALLOC: "calloc",
+    REALLOC: "realloc",
+    DMA_2D_COPY_MODE: "dma_2d_copy_mode",
+    DMA_2D_COPY: "dma_2d_copy",
+    DMA_RECT_FILL: "dma_rect_fill",
+    DMA_MEM_COPY: "dma_mem_copy",
+    AE_SENSOR_EV100: "ae_sensor_ev100",
+    AE_ENABLE_LV_METER: "ae_enable_lv_meter",
+    AE_SOLVE_CORE: "ae_solve_core",
+    AE_SOLVE_UI: "ae_solve_ui",
+    AE_AV_TO_Q16: "ae_av_to_q16",
+    AE_TV_TO_Q16: "ae_tv_to_q16",
+    PB_SELECT_VBUF: "pb_select_vbuf",
+    PB_OSD_DISPATCH: "pb_osd_dispatch",
+    PB_STEP_OR_CUR: "pb_step_or_cur",
+    PB_DECODE_RESAMPLE: "pb_decode_resample",
+    PB_ZOOM_CORE: "pb_zoom_core",
+    PB_YCBCR_TO_RGB_PLANAR: "pb_ycbcr_to_rgb_planar",
+    PB_IIP_HIST: "pb_iip_hist",
+    PB_HIST_BAR_DRAW: "pb_hist_bar_draw",
+    DCF_GET_FILE_INFO: "dcf_get_file_info",
+    DCF_COUNT_IMAGES: "dcf_count_images",
+    DCF_READ_JPEG_EXIF: "dcf_read_jpeg_exif",
+    DCF_READ_X3F_EXIF: "dcf_read_x3f_exif",
+    0xA0071830: "get_mpf",
+    0xA0071970: "pget_mpf",
+    0xA0071B00: "rel_mpf",
+    0xA0071C54: "tget_mpf",
+    0xA0071F30: "get_mpl",
+    0xA007212C: "pget_mpl",
+    0xA00722A0: "tget_mpl",
+    0xA0072388: "rel_mpl",
+    0xA0072C74: "ref_mbx",
+    0xA0073B70: "get_tid",
+    0xA00752D4: "ref_tsk",
 }

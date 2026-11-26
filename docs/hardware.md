@@ -121,13 +121,15 @@ Additional verified stock M5Slave addresses:
   - `0x0010` (4,131 B): `17×9×9×3` Q1 `i8` residual LUT, zero-padded to `0x1040`.
 - **Measured cost** in the FR80 emulator (`ycc_bench`) on synthetic frames: 256x128 (mostly smooth) and a 4704x8 strip (steep rows, hard edges, a noisy quarter, so most `4x2` tiles fall back to per-pair evaluation). L time assumes about 70 M effective FR80 instructions/s with uncached SDRAM; M ≈ 0.48 L, S ≈ 0.25 L. `cargo test --release --offline -p dp2m ycc_bench -- --ignored --nocapture` prints every fx × fill combination.
 
-| `fx` | Stages | insns / pair (256x128) | L | insns / pair (4704x8) | L |
+| Mode / `fx` | Stages | insns / pair (256x128) | L | insns / pair (4704x8) | L |
 | --- | --- | --- | --- | --- | --- |
-| `0` | stock HW path | 0 | 0 | 0 | 0 |
-| `1` | 3D LUT | 81.3 | ~8.6 s | 114.4 | ~12.1 s |
-| `3` | 3D LUT + grain | 140.1 | ~14.8 s | 187.3 | ~19.7 s |
-| `5` | 3D LUT + halation | 164.6 | ~17.3 s | 184.4 | ~19.4 s |
-| `7` | 3D LUT + grain + halation | 211.2 | ~22.3 s | 230.5 | ~24.3 s |
+| `fx=0` | stock HW path | 0 | 0 | 0 | 0 |
+| B&W `fx=0/1` | B&W toner (read-only Y) | 24.6 | ~2.6 s | 24.5 | ~2.6 s |
+| `fill=1..3 fx=0` | X3 Fill only (read-only Cb/Cr) | 39.5 | ~4.2 s | 39.3 | ~4.1 s |
+| `fx=1` | 3D LUT | 76.8 | ~8.1 s | 77.9 | ~8.2 s |
+| `fx=3` | 3D LUT + grain | 132.7 | ~14.0 s | 135.3 | ~14.3 s |
+| `fx=5` | 3D LUT + halation | 156.7 | ~16.5 s | 143.6 | ~15.1 s |
+| `fx=7` | 3D LUT + grain + halation | 202.3 | ~21.3 s | 188.2 | ~19.8 s |
 
 ---
 
@@ -145,7 +147,7 @@ S3 runs from SDRAM at `0xA0000000` (256 MB SDRAM), so code and tables in the ima
 | `0xA0A1F398..0xA1B1F398` | heap |
 | `0xA1B1F3A0..0xA1B5717C` | µITRON task stacks |
 | `0xA1B57180..0xA2130000` | no references; payload `.bss` at `0xA1C00000..0xA1E00000` |
-| `0xA2130000..` | OSD: 8 bpp index plane `0xA2130000` (icons, text), ARGB4444 overlay `0xA21D8C00` (640x480); LV and capture buffers |
+| `0xA2130000..` | OSD: 8 bpp index plane `0xA2130000` (icons, text), RGBA4444 overlay `0xA21D8C00` (`R:12..15, G:8..11, B:4..7, A:0..3`, 640x480); LV and capture buffers |
 
 See [research/m6m-memory.md](research/m6m-memory.md).
 
@@ -166,7 +168,7 @@ Never write NVRAM `0xA0939774..0xA0939783`: language is at `0xA0939776` and LCD 
 
 ### 3.3 Payload and hooks
 
-The M6M payload is C and assembly in `src/m6m/`, compiled with `clang --target=armeb-none-eabi -mcpu=arm926ej-s -mthumb -Os` and linked with `ld.lld --gc-sections` into dead regions of the stock image ([research/m6m-rom.md](research/m6m-rom.md)):
+The M6M payload is C and assembly in `src/m6m/`, compiled with `clang --target=armeb-none-eabi -mcpu=arm926ej-s -mthumb` (`-O2` on `rt.c`, `hud.c`, `lv.c`; `-Os` elsewhere, with ARM interworking for word-wide loops) and linked with `ld.lld --gc-sections` into dead regions of the stock image ([research/m6m-rom.md](research/m6m-rom.md)):
 
 | Region | Range | Size | Sections | Origin |
 | --- | --- | --- | --- | --- |
@@ -216,7 +218,7 @@ The 2 KB NOR record uses `0x00..0x3E3`; `0x3E4..0x7FF` has no accessor. F1/F2 li
 
 - `Get_Menu_Table` `0xA004CD08(id)`. Rows are 32 B: w0 row id (submenu id on page rows), w1 `0x01000000 | 110x70 QS icon`, w2 `(76x26 OSD icon << 16) | 54x42 strip icon`, w3 `sid << 16`, w4 value, w5 getter `| 1`, w6 setter `| 1`, w7 extra handler. Pages clip beyond 6 rows.
 - Strings: `0xA0044AAC(sid, lang)` = `*(0xA07DF144 + sid * 0x44 + lang * 4)`, 672 stock sids. dp2m serves sids from 672 (English).
-- Screens: handler `*(0xA07DEB28 + 4 * id)`, opened with `0xA0042AEC(1, id)`. LV 21, MODE 23, QS 26, Custom Mode Setting 31.
+- Screens: handler `*(0xA07DEB28 + 4 * id)`, opened with `0xA0042AEC(1, id)`. LV 21 (`0x15`), MODE 23 (`0x17`), PB 25 (`0x19`), QS 26 (`0x1A`), MENU 27 (`0x1B`), Custom Mode Setting 31 (`0x1F`). Native AE, µITRON, Milbeaut IIP/DMA and `SCREEN_PB` details are in [research/simulator-and-pb.md](research/simulator-and-pb.md).
 - QS commits the setter on every step and draws only icons (w1 low for the value, w2 low in the strip). The main menu commits on OK or right and shows the w2-low icon, or the sid text when it is 0.
 - Icons: `0xA0042AAC(id)` for ids 1..0x1A1 (table `0xA07DD784`); 8 bpp indices 0..16 (0 transparent, 1 white fill, 16 black outline), blitted by `0xA0040DD8` into the index plane `0xA2130000` (CLUT `0xA07DEC54`).
 - Text: `0xA0042684`, engine 0 ("BP4" outline fonts) only, line buffer `0xA093A514`, about 1 M instructions per label.
@@ -239,7 +241,7 @@ See [research/live-view.md](research/live-view.md).
 - **5-shot bracketing**: stock `0xA0168100` already returns 5 shots for bracket orders 4, 6 and 7 (stored at `0xA09396DF`). The hook in `Get_Bkt_EV_Q16` (`0xA0002FE4`) returns Q16 APEX offsets in steps of `((i32 *)0xA0176F14)[*(u16 *)0xA07FBE5A]`: order 4 `[0, +2, +1, -1, -2]`, 6 `[+2, +1, 0, -1, -2]`, 7 `[-2, -1, 0, +1, +2]`.
 - **ISO-auto min shutter**: A mode `0xA000D83E` (stock `0x0005AAAA`, about 1/50.8 s) uses the configured APEX Tv; P mode `0xA000D9A2` / `0xA000D9E8` (stock `0x00090000`) uses that Tv + 3 EV.
 - **Accelerometer**: MEMSIC MXC6226XC (I2C `0x15`), signed 8-bit X / Y getters `0xA001A38E` / `0xA001A3A2`.
-- **Overlay**: 640x480 ARGB4444 at `0xA21D8C00`, fill `0xA00419A6`, flush `0xA0041C7A`.
+- **Overlay**: 640x480 BE RGBA4444 (`R:12..15, G:8..11, B:4..7, A:0..3`) at `0xA21D8C00`, fill `0xA00419A6` (uses Milbeaut 2D DMA `0xA00B1870` when `rgba == 0`, `x & 7 == 0` and `w & 15 == 0`), flush `0xA0041C7A`.
 - **Imager Temp**: hidden screen at menu 0xA3 (`0xA07EDC0C`), linked from setup page 4.
 
 ### 3.8 Capture IPC (`cmd 0x20`)
@@ -265,16 +267,15 @@ The packed mode follows `packed_mode` in `crates/dp2m/src/catalog.rs` (film orde
 
 ## 4. Open work
 
-Verified so far in emulation only (`dp2m build` verifiers, `python -m tools.verify`); nothing below has been tested on a camera.
+Verified in emulation (`dp2m build`, `python -m tools.verify`, `dp2m-sim`); on-camera validation remains:
 
 - **On-camera checks**: full `DP2MV200.bin` install from 1.05 and reinstall of stock 1.05; runtime label icons (QS, OSD, MODE, LV status, playback info); film name in playback info for new JPG and X3F files, and how Sigma Photo Pro treats `"Film NN"` X3F files; Custom QS film items in each slot; F1/F2 slot persistence across power cycles; payload RAM window `0xA1C00000..0xA1E00000` under LV, capture, playback, movie and USB; M5 engine wall time per fx combination.
-- **Verifier coverage**: `.dp2m.hooks` application over every record, the 11-page menu list and `page_group`, HUD grid drawing.
 
 ### M5 performance notes
 
-- **Done (bit-exact)**: biased 3D LUT bytes (no `extsb`, 12 instructions per evaluation); the fast `4x2` tile adds the luma delta to 4 pixels per aligned 32-bit `ld`/`st` with a SWAR saturating add (`x - e = ~(~x + e)`), replacing 16 byte accesses and 8 clamp-table reads per tile; flag `b6` enables fast tiles only when `Y` and `y_stride` are word-aligned, else jobs run per pair. Together: 4704x8 `fx=1` 123.8 → 114.4 insns/pair, 17.7 → 16.5 SDRAM accesses/pair.
-- **Rejected**: `8x4` block coherence (one evaluation per coherent block, `4x2` fallback). 256x128 `fx=1` dropped 9 % but max |Δ| vs `4x2` reached 15 levels, and the 4704x8 strip got 9 % slower from the extra block test.
-- **Not worth it**: SWAR for chroma (2 bytes per row per plane costs more ALU work than it saves) and `mulh` (fewer cycles on paper, but unverified on this silicon).
-- **Remaining cost**: per-pair evaluation in edge tiles (`f3d_ed_ev`, about half of `fx=1` on the strip) and per-pair flag tests in the general path (`pair_loop`, `after_halo`).
-
-The halation row zero-skip (`OR(row0 | row1) < 2 -> skip bilerp_2d`) is already in `ycc_engine.fr80`.
+- **`ycc_engine.fr80` (`4,088 B`, fits inside the 4 KB FR80 I-Cache)**:
+  - Biased 3D LUT bytes (`s8 ^ 0x80`, 12 instructions per Sakamoto evaluation) and SWAR 4-byte saturating luma adds (`x - e = ~(~x + e)`).
+  - Universal `4x2` tile fast path (`tile_row`) active across all `fill = 0..3`, `fx = 0..7` whenever `Y`/`Cb`/`Cr` and strides are word/halfword-aligned and the tile's halation row check `(row0 | row1) < 2` passes, with signed `[X00 - 15, X00 + 16]` luma/chroma coherence (`94%..99%` smooth-tile rate on DP2M shots), `call.far` subroutines for X3 Fill / B&W toner / grain, and halfword `lduh`/`sth` chroma pairs.
+  - Dedicated word-strided Paths **T** (B&W toner `fx=0/1`, read-only `Y`, `24.5` insns/pair) and **F** (`fill=1..3 fx=0`, read-only `Cb/Cr`, `39.3` insns/pair).
+- **`spatial_driver.fr80` (`2,202 B`)**: specialized `pyr_halo_only`, `pyr_fill_only`, and `pyr_bx` box-downsample passes, register-history in-place `blur_5tap`, SWAR `hblend`, and word-copied SD LUT path (`4704x3136` pyramid: `1.17 M` instructions).
+- **Rejected**: `8x4` block coherence (max `|Δ|` reached 15 levels vs `4x2` and regressed steep strips) and unverified `mulh`.

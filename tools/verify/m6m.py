@@ -86,10 +86,51 @@ def lv_matrix(cmcm: tuple[int, ...], flags: int, cc: list[int]) -> tuple[int, ..
     return tuple(m)
 
 
+def elf_section(raw: bytes, want: bytes) -> bytes:
+    shoff = struct.unpack_from(">I", raw, 0x20)[0]
+    shentsize, shnum, shstrndx = struct.unpack_from(">3H", raw, 0x2E)
+    sh = [struct.unpack_from(">10I", raw, shoff + i * shentsize) for i in range(shnum)]
+    strtab = raw[sh[shstrndx][4] : sh[shstrndx][4] + sh[shstrndx][5]]
+    for name_off, _, _, _, off, size, *_ in sh:
+        if strtab[name_off : strtab.find(b"\0", name_off)] == want:
+            return raw[off : off + size]
+    raise KeyError(want)
+
+
 def check_invariants(b: Build, r: Report) -> None:
     r.check(b.img.c78[:IPL_LEN] == b.stock.c78[:IPL_LEN], "IPL is stock")
     r.check(b.img.rd(FPGA[0], FPGA[1] - FPGA[0]) == b.stock.rd(FPGA[0], FPGA[1] - FPGA[0]), "FPGA bitstream is stock")
     r.check(b.img.rd(BSS, END - BSS) == b.stock.rd(BSS, END - BSS), ".bss tail is stock")
+    r.eq(b.img.u32(0xA004D3D0), 0xA07EEFCC, "shared literal 0xA004D3D0 intact")
+    r.check(b.img.rd(0xA005D924, 0xA005F1A0 - 0xA005D924) == b.stock.rd(0xA005D924, 0xA005F1A0 - 0xA005D924), "live screens 50..55 intact")
+
+
+def check_hooks(b: Build, r: Report) -> None:
+    raw = elf_section((b.dir / "m6m/m6m.elf").read_bytes(), b".dp2m.hooks")
+    hooks = list(struct.iter_unpack(">4I", raw))
+    r.check(len(hooks) > 0 and len(raw) == 16 * len(hooks), f".dp2m.hooks has {len(hooks)} records")
+    bad_stock, bad_img = [], []
+    for kind, site, target, expect in hooks:
+        st_ok = (b.stock.bl_target(site) == (expect & ~1) if kind == 1 else
+                 b.stock.u32(site) == expect if kind in (2, 3) else
+                 kind == 4 and b.stock.u16(site) == expect)
+        im_ok = (b.img.bl_target(site) == (target & ~1) and (b.img.u16(site + 2) & 0xF800) == 0xF800 if kind in (1, 2) else
+                 b.img.u32(site) == target if kind == 3 else
+                 kind == 4 and b.img.u16(site) == (target & 0xFFFF))
+        if not st_ok:
+            bad_stock.append((kind, hex(site)))
+        if not im_ok:
+            bad_img.append((kind, hex(site)))
+    r.eq(bad_stock, [], f".dp2m.hooks expect values match stock across all {len(hooks)} sites")
+    r.eq(bad_img, [], f".dp2m.hooks patches applied in C78FRM.bin across all {len(hooks)} sites")
+    ret0 = b.sym("dp2m_ret0") | 1
+    dead = range(0xA07DEBAC, 0xA07DEBF0, 4)
+    r.check(all(0xA0059D50 <= (b.stock.u32(s) & ~1) < 0xA005D924 and b.img.u32(s) == ret0 for s in dead),
+            "retired factory screen vtable slots 33..49 -> dp2m_ret0")
+    r.check(b.img.rd(0xA07DEB28, 0x84) == b.stock.rd(0xA07DEB28, 0x84)
+            and b.img.rd(0xA07DEBF0, 0x1C) == b.stock.rd(0xA07DEBF0, 0x1C), "live screen vtable slots 0..32 & 50..55 intact")
+    m = Machine(b.img)
+    r.eq(m.call(b.sym("dp2m_ret0")), 0, "dp2m_ret0 returns 0")
 
 
 def check_menus(b: Build, r: Report) -> None:
@@ -109,9 +150,30 @@ def check_menus(b: Build, r: Report) -> None:
         r.check(bad is None, f"{name}: {len(exp)} rows = catalog.c" + (f" (row {bad} differs)" if bad is not None else ""))
     subs = {row.id: ui.menu_table(m, row.id) for row in ui.rows(m, gen[film_page])}
     r.check(all(subs.values()), f"Film page submenus resolve {[hex(k) for k in subs]}")
+    exp_pages = [0x0E, 0x0F, film_page, *range(0x10, 0x18)]
+    r.eq(list(struct.unpack(">11H", b.img.rd(0xA07F22E6, 22))), exp_pages, "menu page template (state + 0x14) = 11 pages")
+    r.eq(list(struct.unpack(">11H", b.img.rd(PAGE_LIST, 22))), exp_pages, "menu live page list (state + 0x3C) = 11 pages")
     m.wr(PAGE_LIST, bytes(22))
     m.call(PAGE_RESET)
-    r.eq(list(struct.unpack(">11H", m.rd(PAGE_LIST, 22))), [0x0E, 0x0F, film_page, *range(0x10, 0x18)], "menu page list after the entry reset 0xA0058A0A")
+    r.eq(list(struct.unpack(">11H", m.rd(PAGE_LIST, 22))), exp_pages, "menu page list after the entry reset 0xA0058A0A")
+    pg = b.sym("page_group")
+    pg_sites = (0xA005811C, 0xA0058144, 0xA0058204, 0xA00582C6, 0xA0058308, 0xA00584E8)
+    r.check(all(b.img.bl_target(s) == pg for s in pg_sites), "all 6 menu page_group call sites hooked")
+    r.eq([m.call(pg, p) for p in range(11)], [0] * 5 + [1] * 2 + [2] * 4, "page_group(0..10) -> shoot 0..4, playback 5..6, setup 7..10")
+    tab_geom = (b.img.u16(0xA005844A), b.img.u16(0xA0058454), *(b.img.u16(s) for s in (0xA005868A, 0xA00586A0, 0xA005871C, 0xA0058734)),
+                b.img.u16(0xA04F3100), b.img.u16(0xA04F3104), b.img.u16(0xA04F3110), b.img.u16(0xA04F3114),
+                b.img.u16(0xA04F3118), b.img.u16(0xA04F311C), b.img.u16(0xA04F3120), b.img.u16(0xA04F3124))
+    r.eq(tab_geom, (0x3034, 0x2D0B, 0x210A, 0x210A, 0x210A, 0x210A, 34, 48, 32, 260, 292, 104, 396, 208),
+         "11-tab strip stride 52 px, wrap 10, and 5/2/4 group spans")
+    pin_got = []
+    for expo, pages in ((8, (0, 4, 5, 6, 7, 10)), (1, (0, 2, 5, 6, 10))):
+        m.w8(stock.NV_EXPO, expo)
+        for p in pages:
+            m.w16(SCRATCH + 4, p)
+            m.run(0xA00587F8, 0xA005882E, r4=SCRATCH)
+            pin_got.append(m.u16(SCRATCH + 4))
+    r.eq(pin_got, [5, 5, 5, 6, 5, 5, 0, 2, 0, 0, 10], "playback pins menu to pages 5..6; shooting resets 5..6 -> 0")
+    m.load_nv_defaults()
 
     fl = films(b)
     for cls in range(4):
@@ -416,8 +478,147 @@ def check_makernote(b: Build, r: Report) -> None:
     r.eq(bad, [], f"maker note: stock modes keep their names, {len(fl)} films write 'Film NN' + name and parse back in JPG & X3F playback")
 
 
+def check_hud(b: Build, r: Report, peakcol_addr: int) -> None:
+    wget, gdraw = b.sym("grid_widget_get"), b.sym("grid_draw_hook")
+    r.eq(b.img.u32(0xA07FA4A4), wget | 1, "LV widget 0x14 getter -> grid_widget_get")
+    r.check(b.img.bl_target(0xA016C708) == gdraw and b.img.bl_target(0xA004C5AE) == gdraw, "both stock_grid_draw call sites -> grid_draw_hook")
+
+    m = Machine(b.img)
+    m.load_nv_defaults()
+    st = {"scr": 0x15, "lv": 1, "ax": 0, "ay": 64, "stock": []}
+    m.stub(b.sym("stock_ui_screen_id"), on=lambda _: st["scr"])
+    m.stub(b.sym("stock_lv_active"), on=lambda _: st["lv"])
+    m.stub(b.sym("stock_accel_x"), on=lambda _: st["ax"] & 0xFF)
+    m.stub(b.sym("stock_accel_y"), on=lambda _: st["ay"] & 0xFF)
+    m.stub(b.sym("stock_grid_draw"), on=lambda a: st["stock"].append(a[0]))
+
+    # Guard & stock delegation checks
+    m.w8(stock.NV_GRID, 3)
+    r.eq(m.call(wget), 3, "grid_widget_get passes stock grid 3 through")
+    m.call(gdraw, 0x1234)
+    r.eq(st["stock"], [0x1234], "grid_draw_hook delegates stock grids 0..6 to stock_grid_draw")
+
+    m.w8(stock.NV_GRID, 7)
+    for scr, lv in ((0x1B, 1), (0x15, 0)):
+        st["scr"], st["lv"] = scr, lv
+        with m.writes(STACK) as log:
+            k = m.call(wget)
+            m.call(gdraw, SCRATCH)
+        r.check(k == 7 and outside(log) == [], f"HUD inactive when screen={scr:#x} lv_active={lv}: key=m, zero ARGB writes")
+    st["scr"], st["lv"] = 0x15, 1
+
+    # Dirty-key semantics: tilt + deadband + portrait on level/mask, fcnt >> 1 on frame overlays
+    lp = b.sym("lv_planes")
+    k0 = m.call(wget)
+    st["ax"] = 1
+    k_dead = m.call(wget)
+    st["ax"] = 20
+    k_tilt = m.call(wget)
+    st["ax"], st["ay"] = 64, 0
+    k_port = m.call(wget)
+    r.check(k0 == k_dead and k_tilt != k0 and ((k_port >> 8) & 1) == 1, "grid_widget_get tilt: deadband |slope|<=1, landscape vs portrait")
+    st["ax"], st["ay"] = 0, 64
+    fkeys = []
+    for mode in (11, 12, 13, 14):
+        m.w8(stock.NV_GRID, mode)
+        for fc in (4, 5, 6):
+            m.w32(lp + 12, fc)
+            fkeys.append(m.call(wget))
+    r.eq(fkeys, [v for mode in (11, 12, 13, 14) for v in (mode << 16 | 2, mode << 16 | 2, mode << 16 | 3)],
+         "grid_widget_get modes 11..14 key on fcnt >> 1")
+
+    # Null/unaligned plane guard for per-frame modes
+    m.wr(lp, struct.pack(">4I", 0, 0, 0, 0))
+    m.w8(stock.NV_GRID, 11)
+    with m.writes(STACK) as log:
+        m.call(gdraw, SCRATCH)
+    r.check(len(outside(log, (b.sym("grid_draw_hook"), END))) <= 1 and all(a != stock.ARGB_FB for a, _ in log),
+            "grid_draw_hook skips peaking/zebras when lv_planes.y is unset")
+
+    # Seed synthetic 640x424 LV planes: vertical step edge at x=160, bright highlight at (40..80, 40..80)
+    yv, cbv, crv = 0xA2400000, 0xA2450000, 0xA2480000
+    y_plane = bytearray([80] * (640 * 424))
+    for y in range(424):
+        row = y * 640
+        for x in range(160, 200):
+            y_plane[row + x] = 200
+        if 40 <= y < 80:
+            for x in range(40, 80):
+                y_plane[row + x] = 252
+    m.wr(yv, bytes(y_plane))
+    m.wr(cbv, bytes([110]) * (320 * 424))
+    m.wr(crv, bytes([160]) * (320 * 424))
+    m.wr(lp, struct.pack(">4I", yv, cbv, crv, 4))
+
+    def px(x: int, y: int) -> int:
+        return m.u16(stock.ARGB_FB + (y * 640 + x) * 2)
+
+    def draw(mode: int) -> None:
+        m.w8(stock.NV_GRID, mode)
+        m.call(gdraw, SCRATCH)
+
+    # Mode 7: Electronic Level (level green -> tilted white -> portrait)
+    st["ax"], st["ay"] = 0, 64
+    draw(7)
+    r.check(px(212, 211) == 0x1F3E and px(319, 211) == 0x1F3E and px(10, 10) == 0, "grid 7 level: green horizon & center tick")
+    st["ax"], st["ay"] = 20, 64
+    draw(7)
+    r.eq(px(212, 211), 0xFFFE, "grid 7 tilted: white horizon")
+    st["ax"], st["ay"] = 64, 0
+    draw(7)
+    r.eq(px(319, 112), 0x1F3E, "grid 7 portrait: vertical end-cap")
+    st["ax"], st["ay"] = 0, 64
+
+    # Modes 8, 9, 10, 15, 16: Aspect Masks + clean transition between bar sizes
+    for mode, vert, alpha, s in ((8, 0, 10, 74), (9, 0, 10, 31), (10, 1, 10, 107), (15, 1, 9, 70), (16, 1, 9, 37)):
+        draw(mode)
+        ok = (px(s - 1, 10) == alpha and px(s, 10) == 0xFFFC and px(640 - s - 1, 10) == 0xFFFC and px(s + 4, 10) == 0
+              if vert else px(10, s - 1) == alpha and px(10, s) == 0xFFFC and px(10, 424 - s - 1) == 0xFFFC and px(10, s + 4) == 0)
+        r.check(ok, f"grid {mode} aspect mask ({'vert' if vert else 'horiz'} {s}px): matte, 1px white guide, clean interior")
+
+    # Modes 11 & 12: Focus Peaking (all 4 colors + 2px top/bottom clear) and Peaking + Level
+    m.w16(stock.ARGB_FB, 0xDEAD)
+    m.w16(stock.ARGB_FB + (423 * 640 + 10) * 2, 0xDEAD)
+    got_cols = []
+    for c in range(4):
+        m.w8(peakcol_addr, c)
+        draw(11)
+        got_cols.append(px(160, 120))
+    r.eq(got_cols, [0xF11E, 0xFE1E, 0xFFFE, 0x111E], "grid 11 focus peaking: edge detected across all 4 peaking colors")
+    r.check(px(0, 0) == 0 and px(10, 423) == 0 and px(300, 120) == 0, "grid 11 focus peaking: 2px border clear & flat background = 0")
+    m.w8(peakcol_addr, 0)
+    draw(12)
+    r.check(px(160, 120) == 0xF11E and px(319, 211) == 0x1F3E, "grid 12 peaking + level: combines edge overlay and level")
+
+    # Mode 13: Zebras (threshold & phase shift)
+    m.w32(lp + 12, 0)
+    draw(13)
+    z0 = px(48, 48)
+    m.w32(lp + 12, 2)
+    draw(13)
+    z2 = px(48, 48)
+    r.check(z0 in (0xF40E, 0x111A) and z2 in (0xF40E, 0x111A) and z0 != z2 and px(300, 200) == 0,
+            "grid 13 zebras: highlights >= ZEBRA_THRESH striped, phase shifts on fcnt, midtones = 0")
+
+    # Mode 14: RGB Histogram + clip indicator
+    draw(14)
+    hist_box = [px(x, y) for y in range(360, 408) for x in range(496, 624)]
+    r.check(px(492, 354) == 0xBBBC and any((p & 0xF) == 14 and p >> 4 != 0 for p in hist_box), "grid 14 RGB histogram: frame & bars drawn")
+    m.wr(yv, bytes([255]) * (640 * 424))
+    draw(14)
+    r.eq(px(625, 360), 0xF11F, "grid 14 RGB histogram: highlight clip bar")
+
+    # Mode transition cleanup: Hist/Peaking -> Level -> Stock Off (0)
+    draw(7)
+    r.check(px(48, 48) == 0 and px(160, 120) == 0 and px(500, 360) == 0 and px(319, 211) == 0x1F3E,
+            "HUD transition 14 -> 7 clears outer overlay plane before drawing level")
+    draw(0)
+    r.check(not any(m.rd(stock.ARGB_FB, 640 * 424 * 2)), "HUD transition 7 -> 0 clears entire 640x424 RGBA4444 plane")
+
+
 def run(b: Build, r: Report) -> None:
     check_invariants(b, r)
+    check_hooks(b, r)
     check_menus(b, r)
     check_strings(b, r)
     addrs = check_settings(b, r)
@@ -427,4 +628,5 @@ def run(b: Build, r: Report) -> None:
     check_makernote(b, r)
     check_lv(b, r)
     check_ycap(b, r)
+    check_hud(b, r, addrs["peakcol"])
     check_package(b, r, *check_updater(b, r))

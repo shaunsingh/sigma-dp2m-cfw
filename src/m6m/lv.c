@@ -10,21 +10,28 @@ static struct {
     uint32_t sz;
     uint32_t applied;  /* packed mode the B2Y gamma currently holds */
 } gamma;
-static uint8_t gamma_buf[1024];
+static uint8_t gamma_buf[1024] __attribute__((aligned(4)));
 
 static const struct lv_look *look_of(uint32_t packed) {
     return (packed - FILM_MODE0 <= PACKED_MAX - FILM_MODE0) ? &dp2m_lv_looks[packed - FILM_MODE0] : 0;
 }
 
-// knots at x = 0..128 step 16, 192..384 step 64, 512..1023 step 128
-static void expand_knots(const uint8_t *k, uint8_t *out) {
+// knots at x = 0..128 step 16, 192..384 step 64, 512..1023 step 128 -> 256 BE words
+__attribute__((noinline, target("arm")))
+static void expand_knots(const uint8_t *k, uint32_t *out) {
     static const uint8_t shift[3] = { 4, 6, 7 }, count[3] = { 8, 4, 5 };
-    uint32_t x = 0;
     for (uint32_t seg = 0; seg < 3; seg++) {
-        uint32_t sh = shift[seg], n = 1u << sh;
+        uint32_t sh = shift[seg], words = 1u << (sh - 2u);
         for (uint32_t i = 0; i < count[seg]; i++, k++) {
             int32_t y0 = k[0], dy = (int32_t)k[1] - y0;
-            for (uint32_t s = 0; s < n; s++) out[x++] = (uint8_t)(y0 + ((dy * (int32_t)s + (int32_t)(n >> 1)) >> sh));
+            int32_t acc = (y0 << sh) + (int32_t)(1u << (sh - 1u));
+            for (uint32_t w = 0; w < words; w++) {
+                uint32_t p0 = (uint8_t)(acc >> sh); acc += dy;
+                uint32_t p1 = (uint8_t)(acc >> sh); acc += dy;
+                uint32_t p2 = (uint8_t)(acc >> sh); acc += dy;
+                uint32_t p3 = (uint8_t)(acc >> sh); acc += dy;
+                *out++ = p0 << 24 | p1 << 16 | p2 << 8 | p3;
+            }
         }
     }
 }
@@ -32,7 +39,7 @@ static void expand_knots(const uint8_t *k, uint8_t *out) {
 static void gamma_apply(uint32_t packed) {
     const struct lv_look *l = look_of(packed);
     if (l && (l->flags & LV_KNOTS)) {
-        expand_knots(l->knots, gamma_buf);
+        expand_knots(l->knots, (uint32_t *)(void *)gamma_buf);
         stock_b2y_set_gamma(0, gamma_buf, sizeof gamma_buf);
     } else if (gamma.lut) {
         stock_b2y_set_gamma(0, gamma.lut, gamma.sz);
@@ -69,21 +76,25 @@ void lv_cmcm_hook(uint32_t lv_mode, uint32_t cm) {
     if (l->flags & LV_MONO_Q7) {
         for (int k = 0; k < 9; k++) m[k] = (uint16_t)l->cmcm[k] & 0x0FFFu;
     } else {
-        uint8_t raw[36];
+        uint8_t raw[36] __attribute__((aligned(2)));
         if (lv_mode == 7u) stock_get_lv_cc7(raw);
         else stock_get_lv_ccn(raw);
+        const uint16_t *rw = (const uint16_t *)(const void *)(raw + 10);
         int32_t cc[9];
         for (int k = 0; k < 9; k++) {
-            int32_t v = ((uint32_t)raw[10 + 2 * k] << 8 | raw[11 + 2 * k]) & 0x0FFF;
+            int32_t v = rw[k] & 0x0FFF;
             cc[k] = (v ^ 0x800) - 0x800;
         }
-        for (int i = 0; i < 3; i++)
+        const int16_t *r = l->cmcm;
+        uint16_t *out = m;
+        for (int i = 0; i < 3; i++, r += 3) {
+            int32_t r0 = r[0], r1 = r[1], r2 = r[2];
             for (int j = 0; j < 3; j++) {
-                const int16_t *r = &l->cmcm[i * 3];
-                int32_t v = (r[0] * cc[j] + r[1] * cc[3 + j] + r[2] * cc[6 + j] + 512) >> 10;
+                int32_t v = (r0 * cc[j] + r1 * cc[3 + j] + r2 * cc[6 + j] + 512) >> 10;
                 v = v > 2047 ? 2047 : v < -2047 ? -2047 : v;
-                m[i * 3 + j] = (uint16_t)v & 0x0FFFu;
+                *out++ = (uint16_t)v & 0x0FFFu;
             }
+        }
     }
     stock_b2y_set_mat(m);
 }

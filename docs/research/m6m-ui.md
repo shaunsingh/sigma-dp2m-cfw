@@ -12,7 +12,7 @@ Addresses are M6M S3 virtual addresses in the stock 1.05 image. "Thumb" function
 | --- | --- | --- | --- |
 | 21 | `0xA016A952` | | live view (`SCREEN_LV`) |
 | 23 | `0xA005243E` | `0xA0042C46` | MODE screen (exposure mode strip) |
-| 25 | `0xA00575E2` | | sets exposure mode 8 on entry (`0xA005742A`), likely playback |
+| 25 | `0xA00575E2` | `0xA0042C5E`, Play key `0x0C` | playback (`SCREEN_PB`, sets exposure mode 8 on entry at `0xA005742A`; see [simulator-and-pb.md](simulator-and-pb.md)) |
 | 26 | `0xA0044392` | | Quick Set (QS) |
 | 29 | `0xA00593E0` | menu 0x17 "Camera reset" | user |
 | 30 | `0xA0059758` | menu 0x0E "Auto Bracketing" | user |

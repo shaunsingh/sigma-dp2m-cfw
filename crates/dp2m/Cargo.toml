@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+dp2m-sim = { path = "../dp2m-sim" }
 fr80 = { path = "../fr80" }
 mlua = { version = "0.11", features = ["luajit", "vendored", "serde"] }
 serde = { version = "1", features = ["derive"] }

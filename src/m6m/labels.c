@@ -40,11 +40,11 @@ static const struct cls { uint8_t w, h, mx, my, hmax, ring, weight, flags; } cla
 /* payload .bss is not zeroed: labels_boot resets the cache, the magic covers lookups before it */
 static struct {
     uint32_t magic, top;
-    uint8_t *tile[N_CLASSES][1024];
+    uint8_t *tile[N_CLASSES][DP2M_N_STRINGS];
 } cache;
 static uint8_t arena[ARENA] __attribute__((aligned(4)));
-static uint8_t scratch[TILE_MAX]; /* first line of a 2-line label, then the outline mask */
-static uint8_t cols[LB_W];
+static uint8_t scratch[TILE_MAX] __attribute__((aligned(4))); /* first line of a 2-line label, then the outline mask */
+static uint8_t cols[LB_W] __attribute__((aligned(4)));
 
 struct box { uint32_t x0, y0, x1, y1; };
 
@@ -59,71 +59,94 @@ static uint32_t udiv(uint32_t n, uint32_t d) {
     return q;
 }
 
-// ink box of s[..n] drawn offscreen (rect y >= 480 leaves the OSD untouched); marks inked columns in occ
-static struct box draw(const struct cls *c, const char *s, int32_t n, uint32_t px, uint8_t *occ) {
-    static const uint16_t offscreen[4] = { 0, 600, LB_W, 100 };
-    stock_text(0, s, n, px, c->weight, 0, !(c->flags & BOLD), offscreen, 0x21, 0);
-    uint32_t rows = rows_of(px);
+__attribute__((noinline, target("arm")))
+static struct box scan_box(uint32_t rows, uint8_t *occ) {
     struct box b = { LB_W, 0, 0, 0 };
     for (uint32_t y = 0; y < rows; y++) {
-        const uint8_t *r = LINE_BUF + y * LB_W;
-        for (uint32_t x = 0; x < LB_W; x += 4) {
-            if (!*(const uint32_t *)(const void *)(r + x)) continue;
-            for (uint32_t k = x; k < x + 4; k++) {
-                if (!r[k]) continue;
-                if (!b.y1) b.y0 = y;
-                b.x0 = min(b.x0, k);
-                b.x1 = max(b.x1, k + 1);
-                b.y1 = y + 1;
-                if (occ) occ[k] = 1;
-            }
+        const uint32_t *rw = (const uint32_t *)(const void *)(LINE_BUF + y * LB_W);
+        for (uint32_t xw = 0; xw < LB_W / 4; xw++) {
+            uint32_t w = rw[xw];
+            if (!w) continue;
+            uint32_t x = xw << 2;
+            if (!b.y1) b.y0 = y;
+            b.y1 = y + 1;
+            if (w >> 24)           { if (x < b.x0) b.x0 = x;           if (x + 1 > b.x1) b.x1 = x + 1; if (occ) occ[x] = 1; }
+            if ((w >> 16) & 0xFFu) { if (x + 1 < b.x0) b.x0 = x + 1;   if (x + 2 > b.x1) b.x1 = x + 2; if (occ) occ[x + 1] = 1; }
+            if ((w >> 8) & 0xFFu)  { if (x + 2 < b.x0) b.x0 = x + 2;   if (x + 3 > b.x1) b.x1 = x + 3; if (occ) occ[x + 2] = 1; }
+            if (w & 0xFFu)         { if (x + 3 < b.x0) b.x0 = x + 3;   if (x + 4 > b.x1) b.x1 = x + 4; if (occ) occ[x + 3] = 1; }
         }
     }
     if (!b.y1) b.x0 = 0;
     return b;
 }
 
+// ink box of s[..n] drawn offscreen (rect y >= 480 leaves the OSD untouched); marks inked columns in occ
+static struct box draw(const struct cls *c, const char *s, int32_t n, uint32_t px, uint8_t *occ) {
+    static const uint16_t offscreen[4] = { 0, 600, LB_W, 100 };
+    stock_text(0, s, n, px, c->weight, 0, !(c->flags & BOLD), offscreen, 0x21, 0);
+    return scan_box(rows_of(px), occ);
+}
+
 static void put(uint8_t *t, const struct cls *c, int32_t x, int32_t y, const uint8_t *src, uint32_t w, uint32_t h, uint32_t stride) {
     for (uint32_t j = 0; j < h; j++) {
         uint32_t ty = (uint32_t)(y + (int32_t)j);
+        if (ty >= c->h) continue;
+        uint8_t *dst = t + ty * c->w;
+        const uint8_t *sr = src + j * stride;
         for (uint32_t i = 0; i < w; i++) {
             uint32_t tx = (uint32_t)(x + (int32_t)i);
-            if (ty < c->h && tx < c->w && src[j * stride + i]) t[ty * c->w + tx] = src[j * stride + i];
+            if (tx < c->w && sr[i]) dst[tx] = sr[i];
         }
     }
 }
 
-// MODE / widget tokens & mid-size text: strokes 1 px heavier
-static void embolden(uint8_t *t, uint32_t w, uint32_t h) {
-    for (uint32_t y = 0; y < h; y++)
-        for (uint32_t x = w - 1; x > 0; x--) {
-            uint8_t *p = &t[y * w + x], l = p[-1];
-            if (l && (!*p || l < *p)) *p = l;
-        }
-}
-
-// stock outline shapes: r = 1 plus, r = 2 the 5x5 square without corners; m gets the row dilations
-static void outline(uint8_t *t, uint32_t w, uint32_t h, uint32_t r, uint8_t *m) {
-    for (uint32_t y = 0; y < h; y++)
-        for (uint32_t x = 0; x < w; x++) {
-            uint32_t bits = 0;
-            for (uint32_t k = 0; k <= 2 * r; k++) {
-                uint32_t xx = x + k - r, v = xx < w ? t[y * w + xx] : 0;
-                if (v && v <= INK_MAX) bits |= (k == 0 || k == 2 * r) ? 2u : 3u;
-            }
-            m[y * w + x] = (uint8_t)bits;
-        }
-    for (uint32_t y = 0; y < h; y++)
-        for (uint32_t x = 0; x < w; x++) {
-            if (t[y * w + x]) continue;
-            for (uint32_t k = 0; k <= 2 * r; k++) {
-                uint32_t yy = y + k - r;
-                if (yy < h && (m[yy * w + x] & ((k == 0 || k == 2 * r) ? 1u : 2u))) {
-                    t[y * w + x] = OUTLINE;
-                    break;
-                }
+// MODE / widget tokens & mid-size text: strokes 1 px heavier; stock outline shapes: r = 1 plus, r = 2 5x5 without corners
+__attribute__((noinline, target("arm")))
+static void finish_tile(uint8_t *t, uint32_t w, uint32_t h, uint32_t bold, uint32_t r, uint8_t *m) {
+    if (bold) {
+        for (uint32_t y = 0; y < h; y++) {
+            uint8_t *row = t + y * w;
+            for (uint32_t x = w - 1; x > 0; x--) {
+                uint8_t l = row[x - 1];
+                if ((uint32_t)(l - 1u) < (uint32_t)(row[x] - 1u)) row[x] = l;
             }
         }
+    }
+    static const uint8_t z[112] = { 0 };
+    if (r == 1u) {
+        for (uint32_t y = 0; y < h; y++) {
+            uint8_t *tr = t + y * w;
+            const uint8_t *up = y ? tr - w : z, *dn = y + 1u < h ? tr + w : z;
+            for (uint32_t x = 0; x < w; x++) {
+                if (tr[x]) continue;
+                if (((uint32_t)(up[x] - 1u) < INK_MAX) || ((uint32_t)(dn[x] - 1u) < INK_MAX) ||
+                    (x && (uint32_t)(tr[x - 1u] - 1u) < INK_MAX) || (x + 1u < w && (uint32_t)(tr[x + 1u] - 1u) < INK_MAX))
+                    tr[x] = OUTLINE;
+            }
+        }
+        return;
+    }
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t *tr = t + y * w;
+        uint8_t *mr = m + y * w;
+        uint32_t win = (((uint32_t)(tr[0] - 1u) < INK_MAX) << 1) | ((uint32_t)(tr[1] - 1u) < INK_MAX);
+        for (uint32_t x = 0; x < w; x++) {
+            uint32_t nxt = (x + 2u < w) && ((uint32_t)(tr[x + 2u] - 1u) < INK_MAX);
+            win = ((win << 1) | nxt) & 0x1Fu;
+            mr[x] = (uint8_t)(win ? ((win & 0x0Eu) ? 3u : 2u) : 0u);
+        }
+    }
+    for (uint32_t y = 0; y < h; y++) {
+        uint8_t *tr = t + y * w;
+        const uint8_t *m0 = y >= 2u ? m + (y - 2u) * w : z;
+        const uint8_t *m1 = y >= 1u ? m + (y - 1u) * w : z;
+        const uint8_t *m2 = m + y * w;
+        const uint8_t *m3 = y + 1u < h ? m + (y + 1u) * w : z;
+        const uint8_t *m4 = y + 2u < h ? m + (y + 2u) * w : z;
+        for (uint32_t x = 0; x < w; x++)
+            if (!tr[x] && (((m0[x] | m4[x]) & 1u) | (m1[x] | m2[x] | m3[x])))
+                tr[x] = OUTLINE;
+    }
 }
 
 static void reset(void) {
@@ -209,8 +232,7 @@ static uint8_t *render(const struct cls *c, const char *src) {
         y += (int32_t)(h1 + r + 1u);
     }
     put(t, c, (c->flags & LEFT) ? x : ((int32_t)(c->w - (split ? w2 : w1)) - (int32_t)bold) / 2, y, last, split ? w2 : w1, split ? h2 : h1, LB_W);
-    if (bold) embolden(t, c->w, c->h);
-    outline(t, c->w, c->h, r, scratch);
+    finish_tile(t, c->w, c->h, bold, r, scratch);
     return t;
 }
 

@@ -305,6 +305,7 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
         ("ICON_LABEL_WIDGET", ICON_LABEL_WIDGET),
         ("ICON_LABEL_QS", ICON_LABEL_QS),
         ("PACKED_MAX", PACKED_MAX as u32),
+        ("DP2M_N_STRINGS", st.0.len() as u32),
         ("PEAKING_THRESH", cfg.m6m.peaking_threshold),
         ("ZEBRA_THRESH", cfg.m6m.zebra_threshold as u32),
     ] {
@@ -489,4 +490,44 @@ fn lv_looks(s3: &S3, pack: &FilmPack) -> Result<Vec<Look>, String> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn load_cfg(name: &str, src: &str) -> Config {
+        let dir = std::env::temp_dir().join(format!("dp2m-cg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(format!("{name}.fnl"));
+        std::fs::write(&p, src).unwrap();
+        let cfg = Config::load(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        cfg
+    }
+
+    #[test]
+    fn codegen_all_36_films_and_subset_grids() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fw = std::fs::read(root.join("data/DP2MV105.bin")).expect("stock DP2MV105.bin");
+        let s3 = &fw[super::super::C78_S3_OFF + super::super::S3_IN_C78..super::super::C78_S3_OFF + super::super::C78_LEN];
+        let pack = FilmPack::load(&root.join("data/film_pack.bin")).expect("film_pack.bin");
+
+        let cfg_all = load_cfg("all", "{:films (collect [_ f (ipairs dp2m.films)] (values f.slug true))}");
+        let gen_all = generate(s3, &pack, &cfg_all).expect("codegen all 36 films");
+        assert!(gen_all.stats.contains("films=36/36 grids=10/10"), "stats={}", gen_all.stats);
+        let work = std::env::temp_dir().join(format!("dp2m-m6m36-{}", std::process::id()));
+        let c78 = super::super::build_m6m(&fw, &pack, &root.join("src/m6m"), &work, &cfg_all)
+            .expect("link all 36 films + 10 grids within M6M payload regions");
+        assert_eq!(c78.len(), super::super::C78_LEN);
+        let _ = std::fs::remove_dir_all(&work);
+
+        let cfg_sub = load_cfg("sub", "{:m6m {:grids {:peaking false :zebras false}}}");
+        let gen_sub = generate(s3, &pack, &cfg_sub).expect("codegen subset grids");
+        assert!(gen_sub.stats.contains("grids=8/10"), "stats={}", gen_sub.stats);
+        let m37 = gen_sub.source.split("struct menu_row m_37[]").nth(1).unwrap().split("};").next().unwrap();
+        assert!(!m37.contains(", 11, ") && !m37.contains(", 13, "));
+        assert!(m37.contains(", 12, ") && m37.contains(", 14, "));
+    }
 }

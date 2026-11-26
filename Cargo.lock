@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "arm9"
+version = "0.1.0"
+
+[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -44,9 +48,25 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 name = "dp2m"
 version = "0.1.0"
 dependencies = [
+ "dp2m-sim",
  "fr80",
  "mlua",
  "serde",
+]
+
+[[package]]
+name = "dp2m-sim"
+version = "0.1.0"
+dependencies = [
+ "arm9",
+ "fr80",
+]
+
+[[package]]
+name = "dp2m-web"
+version = "0.1.0"
+dependencies = [
+ "dp2m-sim",
 ]
 
 [[package]]

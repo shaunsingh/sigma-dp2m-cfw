@@ -402,6 +402,7 @@ enum Item {
     Branch { loc: String, cc: u8, target: String },
     BranchFar { loc: String, cc: u8, target: String },
     JmpFar { loc: String, target: String },
+    CallFar { loc: String, target: String },
 }
 
 pub fn assemble_file(
@@ -512,7 +513,7 @@ fn assemble_lines(
             Item::Bytes(b) => pos += b.len() as u32,
             Item::Branch { .. } => pos += 2,
             Item::BranchFar { .. } => pos += 10,
-            Item::JmpFar { .. } => pos += 8,
+            Item::JmpFar { .. } | Item::CallFar { .. } => pos += 8,
         }
     }
 
@@ -561,6 +562,15 @@ fn assemble_lines(
                 out.extend_from_slice(&[0x97, 0x0C]);
                 cur += 8;
             }
+            Item::CallFar { loc, target } => {
+                let tgt = *labels
+                    .get(target)
+                    .ok_or_else(|| err(loc, format!("undefined label '{}'", target)))?;
+                out.extend_from_slice(&[0x9F, 0x8C]);
+                out.extend_from_slice(&tgt.to_be_bytes());
+                out.extend_from_slice(&[0x97, 0x1C]);
+                cur += 8;
+            }
         }
     }
     Ok((out, labels))
@@ -578,6 +588,12 @@ fn encode_stmt(loc: &str, line: &str, syms: &HashMap<String, i64>) -> Result<Ite
             return Err(e("expected 1 target label".into()));
         }
         return Ok(Item::JmpFar { loc: loc.to_string(), target: ops[0].clone() });
+    }
+    if mnem == "call.far" {
+        if ops.len() != 1 {
+            return Err(e("expected 1 target label".into()));
+        }
+        return Ok(Item::CallFar { loc: loc.to_string(), target: ops[0].clone() });
     }
     if let Some(base) = mnem.strip_suffix(".far")
         && let Some(cc) = cc_from_name(base)

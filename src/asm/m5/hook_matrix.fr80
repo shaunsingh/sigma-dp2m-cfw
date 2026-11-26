@@ -42,73 +42,45 @@ do_leftmul:
 
     addsp   #-24
     mov     r15, r10
-    ldi:20  #0x00200, r0
-    sth     r0, @r10
+    ldi:20  #0x00200, r5
+    sth     r5, @r10
+    mov     r10, r4
+    add     #2, r4
+    ldi:20  #0x007FF, r6
+    ldi:32  #0xFFFFF801, r7
+    ldi:8   #3, r1
 
-    ldi:8   #0, r6
 loop_i:
-    ldi:8   #0, r7
+    mov     r9, r12
+    ldi:8   #3, r0
 loop_j:
-    ldi:8   #0, r11
-    ldi:8   #0, r5
+    lduh    @r8, r2 ; extsh r2
+    lduh    @r12, r3 ; lsl2 #20, r3 ; asr2 #20, r3
+    mul     r2, r3 ; mov MDL, r11
 
-loop_k:
-    mov     r5, r13
-    lsl     #1, r13
-    add     r6, r13
-    lduh    @(r13, r8), r2
-    extsh   r2
+    ldi:8   #2, r13 ; lduh @(r13, r8), r2 ; extsh r2
+    ldi:8   #6, r13 ; lduh @(r13, r12), r3 ; lsl2 #20, r3 ; asr2 #20, r3
+    mul     r2, r3 ; mov MDL, r2 ; add r2, r11
 
-    mov     r5, r13
-    lsl     #2, r13
-    mov     r5, r0
-    lsl     #1, r0
-    add     r0, r13
-    add     r7, r13
-    lduh    @(r13, r9), r3
-    ldi:20  #0x00800, r0
-    and     r3, r0
-    beq     cc_pos
-    ldi:32  #0xFFFFF000, r0
-    or      r0, r3
-cc_pos:
-    mul     r2, r3
-    mov     MDL, r0
-    add     r0, r11
+    ldi:8   #4, r13 ; lduh @(r13, r8), r2 ; extsh r2
+    ldi:8   #12, r13 ; lduh @(r13, r12), r3 ; lsl2 #20, r3 ; asr2 #20, r3
+    mul     r2, r3 ; mov MDL, r2 ; add r2, r11
 
-    add     #1, r5
-    cmp     #3, r5
-    blt     loop_k
-
-    ldi:20  #0x00200, r0
-    add     r0, r11
+    add     r5, r11
     asr     #10, r11
 
-    ldi:20  #0x007FF, r0
-    cmp     r0, r11
-    ble     hi_ok
-    mov     r0, r11
+    cmp     r6, r11 ; ble hi_ok ; mov r6, r11
 hi_ok:
-    ldi:32  #0xFFFFF801, r0
-    cmp     r0, r11
-    bge     lo_ok
-    mov     r0, r11
+    cmp     r7, r11 ; bge lo_ok ; mov r7, r11
 lo_ok:
-    ldi:20  #0x00FFF, r0
-    and     r0, r11
-    mov     r6, r13
-    add     r7, r13
-    add     #2, r13
-    sth     r11, @(r13, r10)
+    ldi:20  #0x00FFF, r2 ; and r2, r11
+    sth     r11, @r4
+    add     #2, r4
+    add     #2, r12
+    add2    #-1, r0 ; cmp #0, r0 ; bgt loop_j
 
-    add     #2, r7
-    cmp     #6, r7
-    blt     loop_j
-
-    add     #6, r6
-    ldi:8   #18, r0
-    cmp     r0, r6
-    blt     loop_i
+    add     #6, r8
+    add2    #-1, r1 ; cmp #0, r1 ; bgt loop_i
 
     mov     r10, r4
     ldi:32  #SYM_COMMIT_CCMAT, r12

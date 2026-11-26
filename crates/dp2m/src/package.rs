@@ -41,12 +41,17 @@ pub fn build(stock: &[u8], firm: &[u8], c78: &[u8], cfg: &Config) -> Result<Vec<
     Ok(pkg)
 }
 
-/// `YYYYMMDD` from `SOURCE_DATE_EPOCH` (reproducible builds) or the clock.
+/// `YYYYMMDD` from `SOURCE_DATE_EPOCH` (>= 2000-01-01; ignores Nix's 1980 sentinel) or the clock.
 fn build_date() -> String {
     let secs = std::env::var("SOURCE_DATE_EPOCH")
         .ok()
         .and_then(|s| s.parse::<i64>().ok())
-        .unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64));
+        .filter(|&s| s >= 946_684_800)
+        .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(1_767_225_600, |d| d.as_secs() as i64)
+        });
     // days since 1970-01-01 -> civil date (Hinnant)
     let z = secs.div_euclid(86_400) + 719_468;
     let era = z.div_euclid(146_097);
@@ -67,6 +72,8 @@ mod tests {
         // SAFETY: tests in this module are the only readers of SOURCE_DATE_EPOCH
         unsafe { std::env::set_var("SOURCE_DATE_EPOCH", "1369353600") };
         assert_eq!(super::build_date(), "20130524");
+        unsafe { std::env::set_var("SOURCE_DATE_EPOCH", "315532800") };
+        assert!(super::build_date().starts_with("20"));
         unsafe { std::env::remove_var("SOURCE_DATE_EPOCH") };
     }
 }

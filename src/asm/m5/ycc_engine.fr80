@@ -11,186 +11,63 @@
     ld      @(r13, r12), \dst
 .endm
 
-// 4x2 tile coherence check (0xE0 top-3-bit mask on luma corners + diag chroma)
+// signed range coherence: Y/Cb/Cr in [X00-15, X00+16] (no 127->128 XOR boundary splits)
+// leaves Y00 in r4, Cb00 in r6, Cr00 in r7 for immediate sakamoto_eval call
 .macro check_4x2_coherence edge_lbl
-    ld      @(r14, #-64), r5 ; add r8, r5
-    ld      @(r14, #-68), r6 ; add r9, r6
-    ld      @(r14, #-68), r7 ; add r10, r7
+    ld      @(r14, #-64), r13
+    ld      @r8, r0
+    ld      @(r13, r8), r1
+    mov     r0, r4 ; lsr2 #24, r4
+    ldi:8   #16, r3 ; add r4, r3
+    lsr     #8, r0 ; extub r0
+    mov     r3, r2 ; sub r0, r2
+    mov     r1, r0 ; lsr2 #24, r0
+    mov     r3, r5 ; sub r0, r5 ; or r5, r2
+    lsr     #8, r1 ; extub r1
+    sub     r1, r3 ; or r3, r2
 
-    ldub    @r8, r0
-    ldi:8   #2, r13
-    ldub    @(r13, r8), r2 ; eor r0, r2
-    ldub    @r5, r1        ; eor r0, r1 ; or r1, r2
-    ldub    @(r13, r5), r1 ; eor r0, r1 ; or r1, r2
+    ld      @(r14, #-68), r13
+    lduh    @r9, r6 ; lsr #8, r6
+    lduh    @(r13, r9), r1 ; extub r1
+    ldi:8   #16, r3 ; add r6, r3 ; sub r1, r3 ; or r3, r2
 
-    ldi:8   #1, r13
-    ldub    @r9, r0
-    ldub    @(r13, r6), r1 ; eor r0, r1 ; or r1, r2
-    ldub    @r10, r0
-    ldub    @(r13, r7), r1 ; eor r0, r1 ; or r1, r2
+    lduh    @r10, r7 ; lsr #8, r7
+    lduh    @(r13, r10), r1 ; extub r1
+    ldi:8   #16, r3 ; add r7, r3 ; sub r1, r3 ; or r3, r2
 
-    ldi:8   #0xE0, r0
-    and     r0, r2
+    lsr     #5, r2
     cmp     #0, r2
     bne.far \edge_lbl
 .endm
 
-// register-pinned sakamoto tetra (p0..p3 in r3..r6, w0..w3 in r7,r11,r2,r12)
-.macro sakamoto_setup lut_fp, pfx
-    ldub    @r8, r4
-    ldub    @r9, r6
-    ldub    @r10, r7
-    ld      @(r14, #\lut_fp), r3
-
-    mov     r4, r0 ; lsr #4, r0 ; ldi:8 #243, r1 ; mul r1, r0 ; mov MDL, r0 ; add r0, r3
-    mov     r6, r0 ; lsr #5, r0 ; ldi:8 #27, r1  ; mul r1, r0 ; mov MDL, r0 ; add r0, r3
-    mov     r7, r0 ; lsr #5, r0 ; mov r0, r1 ; lsl #1, r1 ; add r0, r1 ; add r1, r3
-
-    mov     r4, r0 ; ldi:8 #15, r12 ; and r12, r0 ; lsl #1, r0
-    mov     r6, r1 ; ldi:8 #31, r12 ; and r12, r1
-    mov     r7, r2 ; and r12, r2
-    ldi:20  #273, r6 ; add r3, r6
-
-    cmp     r1, r0 ; blt \pfx_lt
-    cmp     r2, r1 ; blt \pfx_01b
-    ldi:8   #243, r4 ; add r3, r4 ; ldi:8 #27, r5 ; add r4, r5
-    ldi:8   #32, r7  ; sub r0, r7 ; mov r0, r11 ; sub r1, r11
-    mov     r2, r12  ; sub r2, r1 ; mov r1, r2
-    bra     \pfx_ev
-
-\pfx_01b:
-    cmp     r2, r0 ; blt \pfx_c3
-    ldi:8   #243, r4 ; add r3, r4 ; mov r4, r5 ; add #3, r5
-    ldi:8   #32, r7  ; sub r0, r7 ; mov r0, r11 ; sub r2, r11
-    mov     r1, r12  ; sub r1, r2
-    bra     \pfx_ev
-
-\pfx_c3:
-    mov     r3, r4 ; add #3, r4 ; ldi:8 #243, r5 ; add r4, r5
-    ldi:8   #32, r7 ; sub r2, r7 ; mov r2, r11 ; sub r0, r11
-    mov     r1, r12 ; mov r0, r2 ; sub r1, r2
-    bra     \pfx_ev
-
-\pfx_lt:
-    cmp     r1, r2 ; blt \pfx_ltb
-    mov     r3, r4 ; add #3, r4 ; ldi:8 #27, r5 ; add r4, r5
-    ldi:8   #32, r7 ; sub r2, r7 ; mov r2, r11 ; sub r1, r11
-    mov     r0, r12 ; mov r1, r2 ; sub r0, r2
-    bra     \pfx_ev
-
-\pfx_ltb:
-    cmp     r0, r2 ; blt \pfx_c6
-    ldi:8   #27, r4 ; add r3, r4 ; mov r4, r5 ; add #3, r5
-    ldi:8   #32, r7 ; sub r1, r7 ; mov r1, r11 ; sub r2, r11
-    mov     r0, r12 ; sub r0, r2
-    bra     \pfx_ev
-
-\pfx_c6:
-    ldi:8   #27, r4 ; add r3, r4 ; ldi:8 #243, r5 ; add r4, r5
-    ldi:8   #32, r7 ; sub r1, r7 ; mov r1, r11 ; sub r0, r11
-    mov     r2, r12 ; sub r2, r0 ; mov r0, r2
-
-\pfx_ev:
-    ldi:8   #0, r13
+// 4 bytes += broadcast delta, saturating, in one word (r3 = 0x80808080, r4 = |d| x 0x01010101, r6 = sign mask)
+.macro swar_add_word reg
+    eor     r6, \reg
+    mov     \reg, r1 ; and r3, r1 ; eor r1, \reg ; add r4, \reg
+    mov     \reg, r2 ; and r1, r2 ; eor r1, \reg ; or r2, \reg
+    mov     r2, r1 ; lsr #7, r1 ; sub r1, r2 ; or r2, \reg
+    eor     r6, \reg
 .endm
 
-// lut bytes are stored biased (s8 ^ 0x80) & the weights sum to 32 -> fold -128 * 32 into the rounding term
-.macro sakamoto_dot
-    ldi:32  #32 - 4096, r0
-    ldub    @(r13, r3), r1 ; mul r7, r1  ; mov MDL, r1 ; add r1, r0
-    ldub    @(r13, r4), r1 ; mul r11, r1 ; mov MDL, r1 ; add r1, r0
-    ldub    @(r13, r5), r1 ; mul r2, r1  ; mov MDL, r1 ; add r1, r0
-    ldub    @(r13, r6), r1 ; mul r12, r1 ; mov MDL, r1 ; add r1, r0
-    asr     #6, r0
-.endm
-
-.macro sakamoto_fp_deltas lut_fp, pfx
-    sakamoto_setup \lut_fp, \pfx
-    sakamoto_dot ; st r0, @(r14, #-44)
-    add #1, r13
-    sakamoto_dot ; st r0, @(r14, #-48)
-    add #1, r13
-    sakamoto_dot ; st r0, @(r14, #-52)
-.endm
-
-.macro sakamoto_direct lut_fp, pfx
-    sakamoto_setup \lut_fp, \pfx
-    sakamoto_dot
-    ldi:32  #VA_CLAMP_CENTER, r13
-    ldub    @r8, r1 ; add r0, r1 ; ldub @(r13, r1), r1 ; stb r1, @r8
-    add     #1, r8
-    ldub    @r8, r1 ; add r0, r1 ; ldub @(r13, r1), r1 ; stb r1, @r8
-    add2    #-1, r8
-    ldi:8   #1, r13
-    sakamoto_dot
-    ldi:32  #VA_CLAMP_CENTER, r13
-    ldub    @r9, r1 ; add r0, r1 ; ldub @(r13, r1), r1 ; stb r1, @r9
-    ldi:8   #2, r13
-    sakamoto_dot
-    ldi:32  #VA_CLAMP_CENTER, r13
-    ldub    @r10, r1 ; add r0, r1 ; ldub @(r13, r1), r1 ; stb r1, @r10
-.endm
-
-// bilerp grid -> r0 (preserves r4..r11)
-.macro bilerp_2d row0_fp, row1_fp, tag
-    ld      @(r14, #-100), r1
-    mul     r11, r1 ; mov MDL, r13
-    mov     r13, r2 ; lsr #10, r2 ; ldi:8 #7, r12 ; and r12, r2
-    lsr     #13, r13
-
-    ld      @(r14, #-96), r1
-    cmp     r1, r13 ; ble \tag_gxok ; mov r1, r13
-\tag_gxok:
-    ld      @(r14, #\row0_fp), r3
-    ldub    @(r13, r3), r0
-    cmp     r1, r13 ; bge \tag_r0e
-    add     #1, r13 ; ldub @(r13, r3), r12 ; add2 #-1, r13
-    sub     r0, r12 ; mul r2, r12 ; mov MDL, r12 ; asr #3, r12 ; add r12, r0
-\tag_r0e:
-    ld      @(r14, #\row1_fp), r3
-    ld      @(r14, #-96), r12
-    ldub    @(r13, r3), r1
-    cmp     r12, r13 ; bge \tag_r1e
-    add     #1, r13 ; ldub @(r13, r3), r12
-    sub     r1, r12 ; mul r2, r12 ; mov MDL, r12 ; asr #3, r12 ; add r12, r1
-\tag_r1e:
-    ld      @(r14, #-40), r2
-    sub     r0, r1 ; mul r2, r1 ; mov MDL, r1 ; asr #3, r1 ; add r1, r0
-.endm
-
-// 4 luma bytes += broadcast delta, saturating, in one word (r3 = 0x80808080, r4 = |d| x 0x01010101,
-// r6 = sign mask: x - e = ~(~x + e)); carries never cross bytes as both addends are < 0x80 per byte
 .macro swar_luma ptr
-    ld      @\ptr, r0 ; eor r6, r0
-    mov     r0, r1 ; and r3, r1 ; eor r1, r0 ; add r4, r0
-    mov     r0, r2 ; and r1, r2 ; eor r1, r0 ; or r2, r0
-    mov     r2, r1 ; lsr #7, r1 ; sub r1, r2 ; or r2, r0
-    eor     r6, r0 ; st r0, @\ptr
+    ld      @\ptr, r0
+    swar_add_word r0
+    st      r0, @\ptr
 .endm
 
-// tile deltas (fp -44/-48/-52) onto the 4x2 tile at r8/r9/r10, advancing them; luma word-aligned (flag b6)
-.macro apply_4x2_deltas
-    ld      @(r14, #-44), r4
-    mov     r4, r6 ; asr2 #31, r6 ; eor r6, r4 ; sub r6, r4
-    ldi:32  #0x01010101, r0 ; mul r0, r4 ; mov MDL, r4
-    ldi:32  #0x80808080, r3
-    swar_luma r8
-    ld      @(r14, #-64), r5 ; add r8, r5
-    swar_luma r5
-    add     #4, r8
-    ldi:32  #VA_CLAMP_CENTER, r3
-    ld      @(r14, #-48), r4
-    ld      @(r14, #-68), r6 ; add r9, r6
-    .rept 2
-        ldub @r9, r13 ; add r4, r13 ; ldub @(r13, r3), r0 ; stb r0, @r9 ; add #1, r9
-        ldub @r6, r13 ; add r4, r13 ; ldub @(r13, r3), r0 ; stb r0, @r6 ; add #1, r6
-    .endr
-    ld      @(r14, #-52), r4
-    ld      @(r14, #-68), r7 ; add r10, r7
-    .rept 2
-        ldub @r10, r13 ; add r4, r13 ; ldub @(r13, r3), r0 ; stb r0, @r10 ; add #1, r10
-        ldub @r7, r13  ; add r4, r13 ; ldub @(r13, r3), r0 ; stb r0, @r7  ; add #1, r7
-    .endr
+// bilerp grid -> r0 using row0 ptr in r3, gx in r13, fx in r2 (gx < gw - 1 holds for all r11 < W/2)
+.macro bilerp_at row1_fp
+    ldub    @(r13, r3), r0
+    ld      @(r14, #\row1_fp), r1
+    ldub    @(r13, r1), r4
+    add     #1, r13
+    ldub    @(r13, r3), r12
+    ldub    @(r13, r1), r3
+    add2    #-1, r13
+    sub     r0, r12 ; mul r2, r12 ; mov MDL, r12 ; asr #3, r12 ; add r12, r0
+    sub     r4, r3  ; mul r2, r3  ; mov MDL, r3  ; asr #3, r3  ; add r4, r3
+    ld      @(r14, #-40), r1
+    sub     r0, r3  ; mul r1, r3  ; mov MDL, r3  ; asr #3, r3  ; add r3, r0
 .endm
 
     st      r8, @-r15
@@ -201,7 +78,6 @@
     enter   #152
     st      r4, @(r14, #-4)
     ldi:32  #0x13579BDF, r0 ; st r0, @(r14, #-16)
-    ldi:8   #0, r0          ; st r0, @(r14, #-20)
 
     ld_ctx  12, r0 ; ldi:8 #0xFC, r1 ; extsb r1 ; and r1, r0 ; st r0, @(r14, #-56)
     lsr     #1, r0 ; st r0, @(r14, #-112)
@@ -213,14 +89,13 @@
     ld_ctx  44, r0 ; st r0, @(r14, #-84)
     ld_ctx  48, r0 ; st r0, @(r14, #-88)
     ld_ctx  60, r0 ; st r0, @(r14, #-92)
-    ld_ctx  64, r0 ; add2 #-1, r0 ; st r0, @(r14, #-96)
     ld_ctx  84, r0 ; st r0, @(r14, #-108)
 
     // q13 bilerp steps
     ldi:8   #0, r0 ; st r0, @(r14, #-100) ; st r0, @(r14, #-116)
     ld_ctx  64, r0 ; cmp #2, r0 ; blt steps_done
 
-    ld_ctx  64, r0 ; add2 #-1, r0 ; lsl #13, r0
+    add2    #-1, r0 ; lsl #13, r0
     ld      @(r14, #-112), r1 ; lsl #15, r1
     ldi:8   #0, r2 ; ldi:20 #0x8000, r3
 div_dx:
@@ -246,7 +121,7 @@ steps_done:
 fg_set:
     st      r0, @(r14, #-104)
 
-    // flags: b0=lut3d b1=toner b2=fill b3=halo b4=grain b5=color_dye b6=lut3d fast tiles (word-aligned luma)
+    // flags: b0=lut3d b1=toner b2=fill b3=halo b4=grain b5=color_dye b6=aligned (word Y, halfword Cb/Cr)
     ldi:8   #0, r0
     ld      @(r14, #-76), r1 ; cmp #0, r1 ; beq fl0 ; ldi:8 #1, r2 ; or r2, r0
 fl0:
@@ -261,15 +136,18 @@ fl3:
 fl4_no:
     ld_ctx  52, r1 ; cmp #0, r1 ; beq fl5 ; ldi:8 #32, r2 ; or r2, r0
 fl5:
-    ldi:8   #1, r1 ; and r0, r1 ; beq fl6
     ld_ctx  0, r1 ; ld @(r14, #-64), r2 ; or r2, r1
     ldi:8   #3, r2 ; and r2, r1 ; bne fl6
+    ld_ctx  4, r1 ; ld_ctx 8, r2 ; or r2, r1
+    ld      @(r14, #-68), r2 ; or r2, r1
+    ldi:8   #1, r2 ; and r2, r1 ; bne fl6
     ldi:8   #64, r2 ; or r2, r0
 fl6:
     st      r0, @(r14, #-72)
 
-    // path A: pure 3d lut
-    ldi:8   #0x5E, r1 ; and r1, r0 ; ldi:8 #0x40, r1 ; cmp r1, r0 ; bne.far gen_entry
+    // path A: pure 3d lut (lut3d=1, aligned=1, no toner/fill/halo/grain)
+    ldi:8   #0x5F, r1 ; and r0, r1
+    ldi:8   #0x41, r2 ; cmp r2, r1 ; bne chk_path_toner
 
     ldi:8   #0, r0 ; st r0, @(r14, #-8)
 frow_loop:
@@ -284,44 +162,116 @@ frow_loop:
 
 fcol_loop:
     check_4x2_coherence f_edge_tile
-    sakamoto_fp_deltas -76, f3d_blk
-    apply_4x2_deltas
-    jmp.far f_next_tile
+    call.far sakamoto_eval
+    call.far apply_4x2_regs
+    ld      @(r14, #-12), r0
+    cmp     r0, r8 ; blo.far fcol_loop
+    bra     frow_next
 
 f_edge_tile:
-    st      r8, @(r14, #-24) ; st r9, @(r14, #-28) ; st r10, @(r14, #-32)
-    ldi:8   #0, r0 ; st r0, @(r14, #-36)
-f_edge_p:
-    sakamoto_direct -76, f3d_ed
-    ld      @(r14, #-36), r0 ; add #1, r0 ; st r0, @(r14, #-36)
-    cmp     #1, r0 ; beq f_ep_adv
-    cmp     #3, r0 ; beq f_ep_adv
-    cmp     #2, r0 ; bne f_ep_done
-    ld      @(r14, #-24), r8  ; ld @(r14, #-64), r1 ; add r1, r8
-    ld      @(r14, #-28), r9  ; ld @(r14, #-68), r1 ; add r1, r9
-    ld      @(r14, #-32), r10 ; add r1, r10
-    jmp.far f_edge_p
-f_ep_adv:
-    add     #2, r8 ; add #1, r9 ; add #1, r10
-    jmp.far f_edge_p
-f_ep_done:
-    ld      @(r14, #-24), r8  ; add #4, r8
-    ld      @(r14, #-28), r9  ; add #2, r9
-    ld      @(r14, #-32), r10 ; add #2, r10
-
-f_next_tile:
+    call.far edge_tile_2rows
     ld      @(r14, #-12), r0
     cmp     r0, r8 ; blo.far fcol_loop
 
+frow_next:
     ld      @(r14, #-8), r0 ; add #2, r0 ; st r0, @(r14, #-8)
     ld      @(r14, #-60), r1
     cmp     r1, r0 ; blt.far frow_loop
     jmp.far sub_ret
 
+    // path T: pure B&W toner (toner=1, aligned=1, no lut3d/fill/halo/grain) — luma Y is read-only!
+chk_path_toner:
+    ldi:8   #0x42, r2 ; cmp r2, r1 ; bne chk_path_fill
+
+    ld      @(r14, #-80), r4
+    ldi:32  #VA_CLAMP_CENTER, r3
+    ld_ctx  0, r8
+    ld_ctx  4, r9
+    ld_ctx  8, r10
+    ld      @(r14, #-60), r11
+trow_loop:
+    mov     r8, r5 ; ld @(r14, #-56), r0 ; add r8, r0
+    mov     r9, r6 ; mov r10, r7
+tcol_loop:
+    ld      @r5, r2 ; add #4, r5
+    mov     r2, r13 ; lsr2 #24, r13 ; lsl #1, r13 ; lduh @(r13, r4), r1
+    lsr     #8, r2  ; extub r2      ; lsl #1, r2  ; mov r2, r13 ; lduh @(r13, r4), r2
+
+    lduh    @r6, r12
+    mov     r1, r13 ; asr #8, r13 ; extsb r13
+    st      r0, @(r14, #-12)
+    mov     r12, r0 ; lsr #8, r0 ; add r0, r13 ; ldub @(r13, r3), r0 ; lsl #8, r0
+    extub   r12 ; mov r2, r13 ; asr #8, r13 ; extsb r13 ; add r12, r13 ; ldub @(r13, r3), r12 ; or r12, r0
+    sth     r0, @r6 ; add #2, r6
+
+    lduh    @r7, r12
+    extsb   r1 ; mov r12, r0 ; lsr #8, r0 ; add r1, r0 ; mov r0, r13 ; ldub @(r13, r3), r0 ; lsl #8, r0
+    extub   r12 ; extsb r2 ; add r2, r12 ; mov r12, r13 ; ldub @(r13, r3), r12 ; or r12, r0
+    sth     r0, @r7 ; add #2, r7
+
+    ld      @(r14, #-12), r0
+    cmp     r0, r5 ; blo tcol_loop
+
+    ld      @(r14, #-64), r0 ; add r0, r8
+    ld      @(r14, #-68), r0 ; add r0, r9 ; add r0, r10
+    add2    #-1, r11 ; cmp #0, r11 ; bgt trow_loop
+    jmp.far sub_ret
+
+    // path F: pure X3 Fill (fill=1, aligned=1, no lut3d/toner/halo/grain) — Cb/Cr untouched, grid rows in r9/r10
+chk_path_fill:
+    ldi:8   #0x44, r2 ; cmp r2, r1 ; bne.far gen_entry
+    ldi:8   #0, r0 ; st r0, @(r14, #-8)
+pf_row_loop:
+    ld      @(r14, #-64), r0 ; ld @(r14, #-8), r1 ; mul r1, r0 ; mov MDL, r8
+    ld      @(r14, #-4), r12 ; ld @r12, r0 ; add r0, r8
+    ld      @(r14, #-116), r0 ; mul r1, r0 ; mov MDL, r0
+    mov     r0, r2 ; lsr #10, r2 ; ldi:8 #7, r3 ; and r3, r2
+    lsr     #13, r0 ; st r2, @(r14, #-40)
+    ld_ctx  68, r2 ; add2 #-1, r2
+    cmp     r2, r0 ; ble pf_gy0 ; mov r2, r0
+pf_gy0:
+    mov     r0, r3 ; add #1, r3
+    cmp     r2, r3 ; ble pf_gy1 ; mov r2, r3
+pf_gy1:
+    ld_ctx  64, r1
+    ld_ctx  80, r9 ; mov r9, r10
+    mul     r1, r0 ; mov MDL, r0 ; add r0, r9
+    mul     r1, r3 ; mov MDL, r3 ; add r3, r10
+
+    ldi:8   #0, r11
+pf_col_loop:
+    ld      @(r14, #-100), r1 ; mul r11, r1 ; mov MDL, r13
+    mov     r13, r2 ; lsr #10, r2 ; ldi:8 #7, r12 ; and r12, r2
+    lsr     #13, r13
+    ldub    @(r13, r9), r0
+    ldub    @(r13, r10), r4
+    add     #1, r13
+    ldub    @(r13, r9), r12
+    ldub    @(r13, r10), r3
+    sub     r0, r12 ; mul r2, r12 ; mov MDL, r12 ; asr #3, r12 ; add r12, r0
+    sub     r4, r3  ; mul r2, r3  ; mov MDL, r3  ; asr #3, r3  ; add r4, r3
+    ld      @(r14, #-40), r1
+    sub     r0, r3  ; mul r1, r3  ; mov MDL, r3  ; asr #3, r3  ; add r3, r0
+    ld      @(r14, #-108), r5
+    cmp     r0, r5 ; beq pf_skip
+    sub     r0, r5
+    ld      @(r14, #-104), r0 ; mul r0, r5 ; mov MDL, r5
+    ldi:8   #0, r4
+    call.far af_r5
+pf_skip:
+    add     #4, r8 ; add #2, r11
+    ld      @(r14, #-112), r0
+    cmp     r0, r11 ; blt pf_col_loop
+
+    ld      @(r14, #-8), r0 ; add #2, r0 ; st r0, @(r14, #-8)
+    ld      @(r14, #-60), r1
+    cmp     r1, r0 ; blt.far pf_row_loop
+    jmp.far sub_ret
+
     // path B: general (toner / fill / halo / grain)
 gen_entry:
     ld      @(r14, #-72), r0 ; ldi:8 #16, r1 ; and r1, r0
-    cmp     #0, r0 ; beq g_pre_done
+    beq     g_pre_done
     ld      @(r14, #-84), r3
     ld      @(r14, #-88), r2
     ldi:32  #SCRATCH_GRAIN_SCALE, r5
@@ -347,7 +297,7 @@ row_loop:
     st      r0, @(r14, #-24) ; st r0, @(r14, #-28)
     st      r0, @(r14, #-32) ; st r0, @(r14, #-36)
     ld      @(r14, #-72), r0 ; ldi:8 #12, r1 ; and r1, r0
-    cmp     #0, r0 ; beq.far no_grid_row
+    beq.far no_grid_row
 
     ld      @(r14, #-8), r0 ; ld @(r14, #-116), r1 ; mul r1, r0 ; mov MDL, r0
     mov     r0, r2 ; lsr #10, r2 ; ldi:8 #7, r3 ; and r3, r2
@@ -375,150 +325,275 @@ hrow_chk:
     cmp     #2, r1 ; bge no_hr
     ldi:8   #0, r1 ; st r1, @(r14, #-24)
 no_hr:
-    ld_ctx  80, r2 ; cmp #0, r2 ; beq no_grid_row
+    ld_ctx  80, r2 ; cmp #0, r2 ; beq chk_strip_noop
     mov     r2, r0 ; add r4, r0 ; st r0, @(r14, #-32)
     add     r5, r2 ; st r2, @(r14, #-36)
+    bra     no_grid_row
+
+chk_strip_noop:
+    // if fill==0, halo strip==0, and no lut3d/toner/grain (fx=4 non-blooming strip), skip whole 2-row strip!
+    ld      @(r14, #-24), r0 ; cmp #0, r0 ; bne no_grid_row
+    ld      @(r14, #-72), r0 ; ldi:8 #0x13, r1 ; and r1, r0
+    beq.far strip_done
 no_grid_row:
 
     ldi:8   #0, r11
 col_loop:
-    st      r8, @(r14, #-120) ; st r9, @(r14, #-124) ; st r10, @(r14, #-128)
+    // shared (gx, fx) computation whenever either fill (r3) or halo (r7) row is active; halo_val stays in r6
+    ldi:8   #0, r6
+    ld      @(r14, #-32), r3 ; ld @(r14, #-24), r7
+    mov     r3, r0 ; or r7, r0 ; cmp #0, r0 ; beq grids_done
 
-    ld      @(r14, #-32), r0 ; cmp #0, r0 ; beq t_no_fill
-    bilerp_2d -32, -36, fb
+    ld      @(r14, #-100), r1 ; mul r11, r1 ; mov MDL, r13
+    mov     r13, r2 ; lsr #10, r2 ; ldi:8 #7, r12 ; and r12, r2
+    lsr     #13, r13
+
+    cmp     #0, r3 ; beq t_no_fill
+    bilerp_at -36
     ld      @(r14, #-108), r1 ; sub r0, r1
     ld      @(r14, #-104), r0 ; mul r0, r1 ; mov MDL, r1
     st      r1, @(r14, #-132)
 t_no_fill:
+    cmp     #0, r7 ; beq grids_done
+    mov     r7, r3
+    bilerp_at -28
+    mov     r0, r6
+grids_done:
 
-    ld      @(r14, #-24), r0 ; cmp #0, r0 ; beq t_no_halo
-    bilerp_2d -24, -28, hb
-    st      r0, @(r14, #-136)
-t_no_halo:
+    // fast 4x2 tile dispatch whenever aligned (b6=1) and halo (r6) < 2
+    ld      @(r14, #-72), r5
+    ldi:8   #64, r0 ; and r5, r0 ; beq.far slow_no_coh_h
+    cmp     #2, r6 ; bge.far slow_chk_coh_h
 
-    ldi:8   #0, r0 ; st r0, @(r14, #-140)
-    ld      @(r14, #-72), r0 ; ldi:8 #64, r1 ; and r1, r0
-    cmp     #0, r0 ; beq.far t_3d_done
-    check_4x2_coherence t_3d_done
+    ldi:8   #1, r0 ; and r5, r0 ; beq tile_no_3d
+    check_4x2_coherence tile_3d_edge
     st      r11, @(r14, #-12)
-    sakamoto_fp_deltas -76, g3d_t
+    call.far sakamoto_eval
+    ld      @(r14, #-72), r1
+    ldi:8   #0x14, r2 ; and r1, r2 ; bne tile_3d_fg
+    call.far apply_4x2_regs
     ld      @(r14, #-12), r11
-    ldi:8   #1, r0 ; st r0, @(r14, #-140)
-t_3d_done:
-
-    // fast 4x2 tile path: smooth 3d lut, no toner/fill, inactive halo
-    ld      @(r14, #-140), r0 ; cmp #0, r0 ; beq.far slow_pairs
-    ld      @(r14, #-72), r0  ; ldi:8 #6, r1 ; and r1, r0
-    cmp     #0, r0 ; bne.far slow_pairs
-    ld      @(r14, #-24), r0 ; cmp #0, r0 ; beq fast_tile_ok
-    ld      @(r14, #-136), r0 ; cmp #2, r0 ; bge.far slow_pairs
-fast_tile_ok:
-    ld      @(r14, #-72), r0 ; ldi:8 #16, r1 ; and r1, r0
-    cmp     #0, r0 ; bne fast_tile_grain
-
-    apply_4x2_deltas
     jmp.far gp_done_fast
 
-fast_tile_grain:
+tile_3d_fg:
+    ldi:8   #16, r2 ; and r1, r2 ; bne tile_3d_grain
+    st      r0, @(r14, #-52)
+    mov     r6, r0 ; extsh r0 ; st r0, @(r14, #-48)
+    asr2    #16, r6 ; mov r6, r4
+    call.far apply_fill_4x2
+    add     #4, r8
+    ld      @(r14, #-48), r5 ; ld @(r14, #-52), r7
+    call.far apply_chroma_4x2
+    ld      @(r14, #-12), r11
+    jmp.far gp_done_fast
+
+tile_3d_grain:
+    st      r0, @(r14, #-52)
+    mov     r6, r0 ; extsh r0 ; st r0, @(r14, #-48)
+    asr2    #16, r6
+    ldi:8   #4, r2 ; and r1, r2 ; beq t3g_nofill
+    mov     r6, r4
+    call.far apply_fill_4x2
+    ldi:8   #0, r6
+t3g_nofill:
+    st      r6, @(r14, #-44)
+    bra     ftg_no_toner
+
+tile_3d_edge:
+    ld      @(r14, #-72), r5 ; ldi:8 #0x16, r0 ; and r5, r0 ; bne.far slow_no_coh
     st      r11, @(r14, #-12)
+    call.far edge_tile_2rows
+    ld      @(r14, #-12), r11
+    jmp.far gp_done_fast
+
+tile_no_3d:
+    ldi:8   #0x16, r0 ; and r5, r0 ; bne tn3_work
+    add     #4, r8 ; add #2, r9 ; add #2, r10
+    jmp.far gp_done_fast
+
+tn3_work:
+    st      r11, @(r14, #-12)
+    ldi:8   #2, r0 ; and r5, r0 ; beq tn3_nof
+    call.far apply_toner_4x2
+    ld      @(r14, #-72), r5
+tn3_nof:
+    ldi:8   #4, r0 ; and r5, r0 ; beq tn3_nog
+    ldi:8   #0, r4
+    call.far apply_fill_4x2
+    ld      @(r14, #-72), r5
+tn3_nog:
+    ldi:8   #16, r0 ; and r5, r0 ; bne tn3_grain
+    add     #4, r8 ; add #2, r9 ; add #2, r10
+    ld      @(r14, #-12), r11
+    jmp.far gp_done_fast
+
+tn3_grain:
+    ldi:8   #0, r0
+    st      r0, @(r14, #-44) ; st r0, @(r14, #-48) ; st r0, @(r14, #-52)
+ftg_no_toner:
     ldi:32  #VA_CLAMP_CENTER, r3
     ld      @(r14, #-44), r4
     ldub    @r8, r13 ; add r4, r13 ; ldub @(r13, r3), r0
     ldi:32  #SCRATCH_GRAIN_SCALE, r1 ; mov r0, r13 ; ldub @(r13, r1), r11
-    ld      @(r14, #-64), r5 ; add r8, r5
-    ldi:8   #0, r0 ; st r0, @(r14, #-148)
-    mov     r8, r7
-    ldi:8   #2, r6
-ftg_row:
     ld      @(r14, #-16), r2
+    mov     r8, r7
+ftg_row:
     mov     r2, r1 ; lsl #13, r1 ; eor r1, r2
-    mov     r2, r1 ; lsr #15, r1 ; lsr #2, r1 ; eor r1, r2
+    mov     r2, r1 ; lsr2 #17, r1 ; eor r1, r2
     mov     r2, r1 ; lsl #5, r1  ; eor r1, r2
-    st      r2, @(r14, #-16)
 
+    ld      @r7, r5
     ldi:8   #15, r12
     mov     r2, r0 ; and r12, r0 ; lsr #4, r2
     mov     r2, r1 ; and r12, r1 ; lsr #4, r2
     add     r1, r0 ; sub r12, r0 ; mul r11, r0 ; mov MDL, r0 ; asr #5, r0
-    st      r0, @(r14, #-148)
-    ldub    @r7, r13 ; add r4, r13 ; add r0, r13 ; ldub @(r13, r3), r0 ; stb r0, @r7 ; add #1, r7
+    mov     r0, r6
+    mov     r5, r13 ; lsr2 #24, r13 ; add r4, r13 ; add r0, r13
+    ldub    @(r13, r3), r0 ; lsl #8, r5 ; or r0, r5
 
     .rept 2
-        ldi:8 #15, r12
         mov r2, r0 ; and r12, r0 ; lsr #4, r2
         mov r2, r1 ; and r12, r1 ; lsr #4, r2
         add r1, r0 ; sub r12, r0 ; mul r11, r0 ; mov MDL, r0 ; asr #5, r0
-        ldub @r7, r13 ; add r4, r13 ; add r0, r13 ; ldub @(r13, r3), r0 ; stb r0, @r7 ; add #1, r7
+        mov r5, r13 ; lsr2 #24, r13 ; add r4, r13 ; add r0, r13
+        ldub @(r13, r3), r0 ; lsl #8, r5 ; or r0, r5
     .endr
-    ldi:8   #15, r12
+
     mov     r2, r0 ; and r12, r0 ; lsr #4, r2
     mov     r2, r1 ; and r12, r1
     add     r1, r0 ; sub r12, r0 ; mul r11, r0 ; mov MDL, r0 ; asr #5, r0
-    ldub    @r7, r13 ; add r4, r13 ; add r0, r13 ; ldub @(r13, r3), r0 ; stb r0, @r7 ; add #1, r7
+    mov     r5, r13 ; lsr2 #24, r13 ; add r4, r13 ; add r0, r13
+    ldub    @(r13, r3), r0 ; lsl #8, r5 ; or r0, r5
+    st      r5, @r7
 
-    add2    #-1, r6 ; cmp #0, r6 ; beq ftg_c
-    mov     r7, r8
-    mov     r5, r7
+    cmp     r8, r7 ; bne ftg_luma_done
+    ld      @(r14, #-64), r0 ; add r0, r7
     bra     ftg_row
 
-ftg_c:
+ftg_luma_done:
+    st      r2, @(r14, #-16)
+    add     #4, r8
+
     ldi:8   #0, r2
-    ld      @(r14, #-72), r0 ; ldi:8 #32, r1 ; and r1, r0
-    cmp     #0, r0 ; beq ftg_noc41
-    ld      @(r14, #-148), r2 ; asr #2, r2
+    ld      @(r14, #-72), r0 ; ldi:8 #32, r1 ; and r0, r1 ; beq ftg_noc41
+    mov     r6, r2 ; asr #2, r2
 ftg_noc41:
-    ld      @(r14, #-48), r4 ; sub r2, r4
-    ld      @(r14, #-48), r5 ; add r2, r5
+    // skip chroma completely when dCb==0, dCr==0, and c41==0!
+    ld      @(r14, #-48), r4 ; ld @(r14, #-52), r5
+    mov     r4, r1 ; or r5, r1 ; or r2, r1
+    cmp     #0, r1 ; beq ftg_skip_c
+
+    mov     r4, r11 ; sub r2, r4 ; add r2, r11
     ld      @(r14, #-68), r6 ; add r9, r6
-    ldub    @r9, r13 ; add r4, r13 ; ldub @(r13, r3), r0 ; stb r0, @r9 ; add #1, r9
-    ldub    @r6, r13 ; add r5, r13 ; ldub @(r13, r3), r0 ; stb r0, @r6 ; add #1, r6
-    ldub    @r9, r13 ; add r5, r13 ; ldub @(r13, r3), r0 ; stb r0, @r9 ; add #1, r9
-    ldub    @r6, r13 ; add r4, r13 ; ldub @(r13, r3), r0 ; stb r0, @r6
-    ld      @(r14, #-52), r4 ; add r2, r4
-    ld      @(r14, #-52), r5 ; sub r2, r5
+    lduh    @r9, r1
+    mov     r1, r13 ; lsr #8, r13 ; add r4, r13 ; ldub @(r13, r3), r0 ; lsl #8, r0
+    extub   r1 ; add r11, r1 ; mov r1, r13 ; ldub @(r13, r3), r1 ; or r1, r0
+    sth     r0, @r9 ; add #2, r9
+    lduh    @r6, r1
+    mov     r1, r13 ; lsr #8, r13 ; add r11, r13 ; ldub @(r13, r3), r0 ; lsl #8, r0
+    extub   r1 ; add r4, r1 ; mov r1, r13 ; ldub @(r13, r3), r1 ; or r1, r0
+    sth     r0, @r6
+
+    mov     r5, r11 ; add r2, r5 ; sub r2, r11
     ld      @(r14, #-68), r7 ; add r10, r7
-    ldub    @r10, r13 ; add r4, r13 ; ldub @(r13, r3), r0 ; stb r0, @r10 ; add #1, r10
-    ldub    @r7, r13  ; add r5, r13 ; ldub @(r13, r3), r0 ; stb r0, @r7  ; add #1, r7
-    ldub    @r10, r13 ; add r5, r13 ; ldub @(r13, r3), r0 ; stb r0, @r10 ; add #1, r10
-    ldub    @r7, r13  ; add r4, r13 ; ldub @(r13, r3), r0 ; stb r0, @r7
+    lduh    @r10, r1
+    mov     r1, r13 ; lsr #8, r13 ; add r5, r13 ; ldub @(r13, r3), r0 ; lsl #8, r0
+    extub   r1 ; add r11, r1 ; mov r1, r13 ; ldub @(r13, r3), r1 ; or r1, r0
+    sth     r0, @r10 ; add #2, r10
+    lduh    @r7, r1
+    mov     r1, r13 ; lsr #8, r13 ; add r11, r13 ; ldub @(r13, r3), r0 ; lsl #8, r0
+    extub   r1 ; add r5, r1 ; mov r1, r13 ; ldub @(r13, r3), r1 ; or r1, r0
+    sth     r0, @r7
     ld      @(r14, #-12), r11
     jmp.far gp_done_fast
 
-slow_pairs:
-    ldi:8   #0, r0 ; st r0, @(r14, #-144)
-pair_loop:
-    ld      @(r14, #-72), r0 ; ldi:8 #1, r1 ; and r1, r0
-    cmp     #0, r0 ; beq.far g_load_plain
-    ld      @(r14, #-140), r0 ; cmp #0, r0 ; bne.far g_apply_3d
-    st      r11, @(r14, #-12)
-    sakamoto_fp_deltas -76, g3d
+ftg_skip_c:
+    add     #2, r9 ; add #2, r10
     ld      @(r14, #-12), r11
+    jmp.far gp_done_fast
+
+    // slow_pairs entry: spill halo_val (r6) only when entering pair_loop
+slow_no_coh_h:
+    st      r6, @(r14, #-136)
+    bra     slow_no_coh_go
+
+slow_chk_coh_h:
+    st      r6, @(r14, #-136)
+    ld      @(r14, #-72), r5
+    ldi:8   #0x41, r0 ; and r5, r0
+    ldi:8   #0x41, r1 ; cmp r1, r0 ; bne slow_no_coh_go
+    check_4x2_coherence slow_no_coh_go
+    st      r11, @(r14, #-12)
+    call.far sakamoto_eval
+    st      r0, @(r14, #-52)
+    mov     r6, r0 ; extsh r0 ; st r0, @(r14, #-48)
+    asr2    #16, r6 ; st r6, @(r14, #-44)
+    ld      @(r14, #-72), r11
+    ldi:8   #0x80, r0 ; or r0, r11
+    bra     slow_flags_rdy
+
+slow_no_coh:
+    ldi:8   #0, r0 ; st r0, @(r14, #-136)
+slow_no_coh_go:
+    st      r11, @(r14, #-12)
+    ld      @(r14, #-72), r11
+slow_flags_rdy:
+    // fold active_halo (halo >= 2) directly into b3 of r11 so pair_loop never reloads #-24/#-136 when < 2
+    ldi:8   #0xF7, r0 ; and r0, r11
+    ld      @(r14, #-136), r0 ; cmp #2, r0 ; blt pair_loop
+    ldi:8   #8, r0 ; or r0, r11
+
+    // r11[7:0] = {coh3d, aligned, c41, grain, active_halo, fill, toner, lut3d}, r11[9:8] = pair_idx (0..3)
+pair_loop:
+    ldi:8   #1, r0 ; and r11, r0 ; beq g_load_plain
+    ldi:8   #0x80, r0 ; and r11, r0 ; bne g_apply_3d
+    st      r11, @(r14, #-144)
+    ldub    @r8, r4 ; ldub @r9, r6 ; ldub @r10, r7
+    call.far sakamoto_eval
+    ld      @(r14, #-144), r11
+    mov     r0, r2
+    mov     r6, r1 ; extsh r1
+    asr2    #16, r6
+    ldi:32  #VA_CLAMP_CENTER, r3
+    lduh    @r8, r5
+    mov     r5, r13 ; lsr #8, r13 ; add r6, r13 ; ldub @(r13, r3), r4
+    extub   r5 ; add r6, r5
+    ldub    @r9, r6  ; add r1, r6
+    ldub    @r10, r7 ; add r2, r7
+    bra     after_3d
 
 g_apply_3d:
     ldi:32  #VA_CLAMP_CENTER, r3
     ld      @(r14, #-44), r0
-    ldub    @r8, r13 ; add r0, r13 ; ldub @(r13, r3), r4
-    ldi:8   #1, r13  ; ldub @(r13, r8), r5 ; add r0, r5
+    lduh    @r8, r5
+    mov     r5, r13 ; lsr #8, r13 ; add r0, r13 ; ldub @(r13, r3), r4
+    extub   r5 ; add r0, r5
     ldub    @r9, r6  ; ld @(r14, #-48), r0 ; add r0, r6
     ldub    @r10, r7 ; ld @(r14, #-52), r0 ; add r0, r7
     bra     after_3d
 
 g_load_plain:
+    ldi:8   #64, r0 ; and r11, r0 ; beq g_load_unaligned
+    lduh    @r8, r5 ; mov r5, r4 ; lsr #8, r4 ; extub r5
+    ldub    @r9, r6
+    ldub    @r10, r7
+    bra     after_3d
+g_load_unaligned:
     ldub    @r8, r4
     ldi:8   #1, r13 ; ldub @(r13, r8), r5
     ldub    @r9, r6
     ldub    @r10, r7
 after_3d:
 
+    ldi:8   #2, r0 ; and r11, r0 ; beq after_toner
     ld      @(r14, #-80), r3
-    cmp     #0, r3 ; beq after_toner
     mov     r4, r13 ; lsl #1, r13
-    ldub    @(r13, r3), r0 ; extsb r0 ; add r0, r6
-    add     #1, r13
-    ldub    @(r13, r3), r0 ; extsb r0 ; add r0, r7
+    lduh    @(r13, r3), r0
+    mov     r0, r1 ; asr #8, r1 ; extsb r1 ; add r1, r6
+    extsb   r0 ; add r0, r7
 after_toner:
 
-    ld      @(r14, #-32), r0 ; cmp #0, r0 ; beq after_fill
+    ldi:8   #4, r0 ; and r11, r0 ; beq after_fill
     ldi:8   #255, r2 ; sub r4, r2 ; mul r4, r2 ; mov MDL, r2
     lsr     #8, r2 ; add #8, r2
     ld      @(r14, #-132), r1 ; mul r2, r1 ; mov MDL, r1 ; asr #13, r1
@@ -527,9 +602,8 @@ after_toner:
     add     r1, r5
 after_fill:
 
-    ld      @(r14, #-24), r0 ; cmp #0, r0 ; beq after_halo
+    ldi:8   #8, r0 ; and r11, r0 ; beq after_halo
     ld      @(r14, #-136), r0
-    cmp     #2, r0 ; blt after_halo
     ldi:8   #255, r1 ; sub r4, r1
     mul     r1, r0 ; mov MDL, r0 ; lsr #8, r0
     mov     r0, r1 ; lsr #1, r1 ; add r1, r4 ; add r1, r5
@@ -543,12 +617,11 @@ halo_amber:
     mov     r0, r1 ; lsr #1, r1 ; sub r1, r6 ; add r1, r7
 after_halo:
 
-    ld      @(r14, #-72), r0 ; ldi:8 #16, r1 ; and r1, r0
-    cmp     #0, r0 ; beq.far store_pix
+    ldi:8   #16, r0 ; and r11, r0 ; beq store_pix
 
     ld      @(r14, #-16), r0
     mov     r0, r1 ; lsl #13, r1 ; eor r1, r0
-    mov     r0, r1 ; lsr #15, r1 ; lsr #2, r1 ; eor r1, r0
+    mov     r0, r1 ; lsr2 #17, r1 ; eor r1, r0
     mov     r0, r1 ; lsl #5, r1  ; eor r1, r0
     st      r0, @(r14, #-16)
 
@@ -562,8 +635,7 @@ after_halo:
     mul     r3, r1 ; mov MDL, r1 ; asr #5, r1
     add     r1, r4
 
-    ld      @(r14, #-72), r2 ; ldi:8 #32, r12 ; and r12, r2
-    cmp     #0, r2 ; beq no_c41
+    ldi:8   #32, r2 ; and r11, r2 ; beq no_c41
     asr     #2, r1 ; add r1, r7 ; sub r1, r6
 no_c41:
     lsr     #4, r0 ; mov r0, r1 ; and r13, r1
@@ -574,32 +646,40 @@ no_c41:
 
 store_pix:
     ldi:32  #VA_CLAMP_CENTER, r3
-    mov     r4, r13 ; ldub @(r13, r3), r4 ; stb r4, @r8
-    mov     r5, r13 ; ldub @(r13, r3), r5 ; ldi:8 #1, r13 ; stb r5, @(r13, r8)
+    mov     r4, r13 ; ldub @(r13, r3), r4
+    mov     r5, r13 ; ldub @(r13, r3), r5
     mov     r6, r13 ; ldub @(r13, r3), r6 ; stb r6, @r9
     mov     r7, r13 ; ldub @(r13, r3), r7 ; stb r7, @r10
+    ldi:8   #64, r0 ; and r11, r0 ; beq store_unaligned
+    lsl     #8, r4 ; or r5, r4 ; sth r4, @r8
+    bra     pair_step
+store_unaligned:
+    stb     r4, @r8 ; ldi:8 #1, r13 ; stb r5, @(r13, r8)
 
-    ld      @(r14, #-144), r0 ; add #1, r0 ; st r0, @(r14, #-144)
+pair_step:
+    ldi:20  #0x100, r0 ; add r0, r11
+    mov     r11, r0 ; lsr #8, r0
     cmp     #1, r0 ; beq gp_adv
     cmp     #3, r0 ; beq gp_adv
     cmp     #2, r0 ; bne gp_done
-    ld      @(r14, #-120), r8  ; ld @(r14, #-64), r1 ; add r1, r8
-    ld      @(r14, #-124), r9  ; ld @(r14, #-68), r1 ; add r1, r9
-    ld      @(r14, #-128), r10 ; add r1, r10
+    ld      @(r14, #-64), r1 ; add2 #-2, r1 ; add r1, r8
+    ld      @(r14, #-68), r1 ; add2 #-1, r1 ; add r1, r9 ; add r1, r10
     jmp.far pair_loop
 gp_adv:
     add     #2, r8 ; add #1, r9 ; add #1, r10
     jmp.far pair_loop
 
 gp_done:
-    ld      @(r14, #-120), r8  ; add #4, r8
-    ld      @(r14, #-124), r9  ; add #2, r9
-    ld      @(r14, #-128), r10 ; add #2, r10
+    ld      @(r14, #-64), r1 ; sub r1, r8 ; add #2, r8
+    ld      @(r14, #-68), r1 ; sub r1, r9 ; add #1, r9
+    sub     r1, r10 ; add #1, r10
+    ld      @(r14, #-12), r11
 gp_done_fast:
     add     #2, r11
     ld      @(r14, #-112), r0
     cmp     r0, r11 ; blt.far col_loop
 
+strip_done:
     ld      @(r14, #-8), r0 ; add #2, r0 ; st r0, @(r14, #-8)
     ld      @(r14, #-60), r1
     cmp     r1, r0 ; blt.far row_loop
@@ -611,4 +691,271 @@ sub_ret:
     ld      @r15+, r10
     ld      @r15+, r9
     ld      @r15+, r8
+    ret
+
+// --- shared register-pinned leaf subroutines ---
+
+// in: r4=Y, r6=Cb, r7=Cr, @(r14,#-76)=lut3d; preserves r8,r9,r10
+// out: r6[31:16]=dY (i16), r6[15:0]=dCb (i16), r0=dCr (i32)
+sakamoto_eval:
+    ld      @(r14, #-76), r3
+    mov     r4, r0 ; lsr #4, r0 ; ldi:8 #243, r1 ; mul r1, r0 ; mov MDL, r0 ; add r0, r3
+    mov     r6, r0 ; lsr #5, r0 ; ldi:8 #27, r1  ; mul r1, r0 ; mov MDL, r0 ; add r0, r3
+    mov     r7, r0 ; lsr #5, r0 ; mov r0, r1 ; lsl #1, r1 ; add r0, r1 ; add r1, r3
+
+    mov     r4, r0 ; ldi:8 #15, r12 ; and r12, r0 ; lsl #1, r0
+    mov     r6, r1 ; ldi:8 #31, r12 ; and r12, r1
+    mov     r7, r2 ; and r12, r2
+
+    cmp     r1, r0 ; blt sak_lt
+    cmp     r2, r1 ; blt sak_01b
+    ldi:8   #243, r4 ; add r3, r4 ; ldi:8 #27, r5 ; add r4, r5
+    ldi:8   #32, r7  ; sub r0, r7 ; mov r0, r11 ; sub r1, r11
+    mov     r2, r12  ; sub r2, r1 ; mov r1, r2
+    bra     sak_dot
+
+sak_01b:
+    cmp     r2, r0 ; blt sak_c3
+    ldi:8   #243, r4 ; add r3, r4 ; mov r4, r5 ; add #3, r5
+    ldi:8   #32, r7  ; sub r0, r7 ; mov r0, r11 ; sub r2, r11
+    mov     r1, r12  ; sub r1, r2
+    bra     sak_dot
+
+sak_c3:
+    mov     r3, r4 ; add #3, r4 ; ldi:8 #243, r5 ; add r4, r5
+    ldi:8   #32, r7 ; sub r2, r7 ; mov r2, r11 ; sub r0, r11
+    mov     r1, r12 ; mov r0, r2 ; sub r1, r2
+    bra     sak_dot
+
+sak_lt:
+    cmp     r1, r2 ; blt sak_ltb
+    mov     r3, r4 ; add #3, r4 ; ldi:8 #27, r5 ; add r4, r5
+    ldi:8   #32, r7 ; sub r2, r7 ; mov r2, r11 ; sub r1, r11
+    mov     r0, r12 ; mov r1, r2 ; sub r0, r2
+    bra     sak_dot
+
+sak_ltb:
+    cmp     r0, r2 ; blt sak_c6
+    ldi:8   #27, r4 ; add r3, r4 ; mov r4, r5 ; add #3, r5
+    ldi:8   #32, r7 ; sub r1, r7 ; mov r1, r11 ; sub r2, r11
+    mov     r0, r12 ; sub r0, r2
+    bra     sak_dot
+
+sak_c6:
+    ldi:8   #27, r4 ; add r3, r4 ; ldi:8 #243, r5 ; add r4, r5
+    ldi:8   #32, r7 ; sub r1, r7 ; mov r1, r11 ; sub r0, r11
+    mov     r2, r12 ; sub r2, r0 ; mov r0, r2
+
+sak_dot:
+    ldi:8   #0, r13
+    ldi:32  #32 - 4096, r0
+    ldub    @(r13, r3), r1 ; mul r7, r1  ; mov MDL, r1 ; add r1, r0
+    ldub    @(r13, r4), r1 ; mul r11, r1 ; mov MDL, r1 ; add r1, r0
+    ldub    @(r13, r5), r1 ; mul r2, r1  ; mov MDL, r1 ; add r1, r0
+    ldi:20  #273, r13
+    ldub    @(r13, r3), r1 ; mul r12, r1 ; mov MDL, r1 ; add r1, r0
+    asr     #6, r0
+    mov     r0, r6 ; lsl2 #16, r6
+
+    ldi:8   #1, r13
+    ldi:32  #32 - 4096, r0
+    ldub    @(r13, r3), r1 ; mul r7, r1  ; mov MDL, r1 ; add r1, r0
+    ldub    @(r13, r4), r1 ; mul r11, r1 ; mov MDL, r1 ; add r1, r0
+    ldub    @(r13, r5), r1 ; mul r2, r1  ; mov MDL, r1 ; add r1, r0
+    ldi:20  #274, r13
+    ldub    @(r13, r3), r1 ; mul r12, r1 ; mov MDL, r1 ; add r1, r0
+    asr     #6, r0
+    extuh   r0 ; or r0, r6
+
+    ldi:8   #2, r13
+    ldi:32  #32 - 4096, r0
+    ldub    @(r13, r3), r1 ; mul r7, r1  ; mov MDL, r1 ; add r1, r0
+    ldub    @(r13, r4), r1 ; mul r11, r1 ; mov MDL, r1 ; add r1, r0
+    ldub    @(r13, r5), r1 ; mul r2, r1  ; mov MDL, r1 ; add r1, r0
+    ldi:20  #275, r13
+    ldub    @(r13, r3), r1 ; mul r12, r1 ; mov MDL, r1 ; add r1, r0
+    asr     #6, r0
+    ret
+
+// in: r6[31:16]=dY, r6[15:0]=dCb, r0=dCr; updates 4x2 tile at r8/r9/r10 & advances them
+apply_4x2_regs:
+    mov     r0, r7
+    mov     r6, r5 ; extsh r5
+    asr2    #16, r6
+    ldi:32  #0x80808080, r3
+    ldi:32  #0x01010101, r12
+
+    cmp     #0, r6 ; beq a4_skip_y
+    mov     r6, r4 ; asr2 #31, r6 ; eor r6, r4 ; sub r6, r4 ; mul r12, r4 ; mov MDL, r4
+    swar_luma r8
+    ld      @(r14, #-64), r13 ; add r8, r13
+    swar_luma r13
+a4_skip_y:
+    add     #4, r8
+    bra     ac4_body
+
+// in: r5=dCb, r7=dCr; updates 4x2 Cb/Cr at r9/r10 & advances them
+apply_chroma_4x2:
+    ldi:32  #0x80808080, r3
+    ldi:32  #0x01010101, r12
+ac4_body:
+    ld      @(r14, #-68), r13
+    cmp     #0, r5 ; beq a4_skip_cb
+    mov     r5, r4 ; mov r5, r6 ; asr2 #31, r6 ; eor r6, r4 ; sub r6, r4 ; mul r12, r4 ; mov MDL, r4
+    lduh    @r9, r0 ; lsl2 #16, r0 ; lduh @(r13, r9), r1 ; or r1, r0
+    swar_add_word r0
+    sth     r0, @(r13, r9) ; lsr2 #16, r0 ; sth r0, @r9
+a4_skip_cb:
+    add     #2, r9
+
+    cmp     #0, r7 ; beq a4_skip_cr
+    mov     r7, r4 ; mov r7, r6 ; asr2 #31, r6 ; eor r6, r4 ; sub r6, r4 ; mul r12, r4 ; mov MDL, r4
+    lduh    @r10, r0 ; lsl2 #16, r0 ; lduh @(r13, r10), r1 ; or r1, r0
+    swar_add_word r0
+    sth     r0, @(r13, r10) ; lsr2 #16, r0 ; sth r0, @r10
+a4_skip_cr:
+    add     #2, r10
+    ret
+
+// in: r4=dY (signed), @(r14,#-132)=fill_delta (or r5 at af_r5); updates 4x2 Y at r8 (preserves r8..r11)
+apply_fill_4x2:
+    ld      @(r14, #-132), r5
+    mov     r5, r0 ; or r4, r0 ; cmp #0, r0 ; beq af_ret
+af_r5:
+    ldi:32  #VA_CLAMP_CENTER, r3
+    mov     r8, r7
+af_row:
+    ld      @r7, r6
+    mov     r6, r13 ; lsr2 #24, r13 ; add r4, r13 ; ldub @(r13, r3), r12
+    ldi:8   #255, r2 ; sub r12, r2 ; mul r12, r2 ; mov MDL, r2
+    lsr     #8, r2 ; add #8, r2 ; mul r5, r2 ; mov MDL, r2 ; asr #13, r2
+    add     r2, r12 ; mov r12, r13 ; ldub @(r13, r3), r0 ; lsl #8, r0
+    mov     r6, r13 ; lsr2 #16, r13 ; extub r13 ; add r4, r13 ; add r2, r13
+    ldub    @(r13, r3), r1 ; or r1, r0 ; lsl #8, r0
+
+    mov     r6, r13 ; lsr #8, r13 ; extub r13 ; add r4, r13 ; ldub @(r13, r3), r12
+    ldi:8   #255, r2 ; sub r12, r2 ; mul r12, r2 ; mov MDL, r2
+    lsr     #8, r2 ; add #8, r2 ; mul r5, r2 ; mov MDL, r2 ; asr #13, r2
+    add     r2, r12 ; mov r12, r13 ; ldub @(r13, r3), r1 ; or r1, r0 ; lsl #8, r0
+    extub   r6 ; add r4, r6 ; add r2, r6 ; mov r6, r13
+    ldub    @(r13, r3), r1 ; or r1, r0
+    st      r0, @r7
+
+    cmp     r8, r7 ; bne af_ret
+    ld      @(r14, #-64), r0 ; add r0, r7
+    bra     af_row
+af_ret:
+    ret
+
+// 2-row 4x2 edge tile w/ 1D row sub-coherence: horizontal edges do 1 eval/row instead of 2!
+edge_tile_2rows:
+    st      RP, @-r15
+    ldi:8   #0, r0 ; st r0, @(r14, #-36)
+ed_row_lp:
+    ld      @r8, r0
+    lduh    @r9, r6
+    lduh    @r10, r7
+    mov     r0, r4 ; lsr2 #24, r4
+    ldi:8   #16, r2 ; add r4, r2
+    lsr     #8, r0 ; extub r0 ; sub r0, r2
+    mov     r6, r1 ; lsr #8, r1 ; extub r6
+    ldi:8   #16, r3 ; add r1, r3 ; sub r6, r3 ; or r3, r2 ; mov r1, r6
+    mov     r7, r1 ; lsr #8, r1 ; extub r7
+    ldi:8   #16, r3 ; add r1, r3 ; sub r7, r3 ; or r3, r2 ; mov r1, r7
+    lsr     #5, r2 ; cmp #0, r2 ; bne ed_row_split
+
+    // coherent 4-pixel row!
+    call.far sakamoto_eval
+    mov     r0, r7
+    mov     r6, r5 ; extsh r5
+    asr2    #16, r6
+    cmp     #0, r6 ; beq ed_ry_done
+    ldi:32  #0x80808080, r3
+    ldi:32  #0x01010101, r0
+    mov     r6, r4 ; asr2 #31, r6 ; eor r6, r4 ; sub r6, r4 ; mul r0, r4 ; mov MDL, r4
+    swar_luma r8
+ed_ry_done:
+    ldi:32  #VA_CLAMP_CENTER, r3
+    cmp     #0, r5 ; beq ed_rcb_done
+    lduh    @r9, r1
+    mov     r1, r13 ; lsr #8, r13 ; add r5, r13 ; ldub @(r13, r3), r0 ; lsl #8, r0
+    extub   r1 ; add r5, r1 ; mov r1, r13 ; ldub @(r13, r3), r1 ; or r1, r0
+    sth     r0, @r9
+ed_rcb_done:
+    cmp     #0, r7 ; beq ed_row_next
+    lduh    @r10, r1
+    mov     r1, r13 ; lsr #8, r13 ; add r7, r13 ; ldub @(r13, r3), r0 ; lsl #8, r0
+    extub   r1 ; add r7, r1 ; mov r1, r13 ; ldub @(r13, r3), r1 ; or r1, r0
+    sth     r0, @r10
+    bra     ed_row_next
+
+ed_row_split:
+    call.far sakamoto_eval
+    ldi:32  #VA_CLAMP_CENTER, r3
+    mov     r0, r2
+    mov     r6, r5 ; extsh r5
+    asr2    #16, r6
+    lduh    @r8, r1
+    mov     r1, r13 ; lsr #8, r13 ; add r6, r13 ; ldub @(r13, r3), r0 ; lsl #8, r0
+    extub   r1 ; add r6, r1 ; mov r1, r13 ; ldub @(r13, r3), r1 ; or r1, r0
+    sth     r0, @r8
+    ldub    @r9, r13 ; add r5, r13 ; ldub @(r13, r3), r0 ; stb r0, @r9
+    ldub    @r10, r13 ; add r2, r13 ; ldub @(r13, r3), r0 ; stb r0, @r10
+
+    ldi:8   #2, r13 ; lduh @(r13, r8), r4 ; lsr #8, r4
+    ldi:8   #1, r13 ; ldub @(r13, r9), r6 ; ldub @(r13, r10), r7
+    call.far sakamoto_eval
+    ldi:32  #VA_CLAMP_CENTER, r3
+    mov     r0, r2
+    mov     r6, r5 ; extsh r5
+    asr2    #16, r6
+    ldi:8   #2, r13 ; lduh @(r13, r8), r1
+    mov     r1, r13 ; lsr #8, r13 ; add r6, r13 ; ldub @(r13, r3), r0 ; lsl #8, r0
+    extub   r1 ; add r6, r1 ; mov r1, r13 ; ldub @(r13, r3), r1 ; or r1, r0
+    ldi:8   #2, r13 ; sth r0, @(r13, r8)
+    ldi:8   #1, r13 ; ldub @(r13, r9), r1 ; add r5, r1 ; mov r1, r13 ; ldub @(r13, r3), r0
+    ldi:8   #1, r13 ; stb r0, @(r13, r9)
+    ldub    @(r13, r10), r1 ; add r2, r1 ; mov r1, r13 ; ldub @(r13, r3), r0
+    ldi:8   #1, r13 ; stb r0, @(r13, r10)
+
+ed_row_next:
+    ld      @(r14, #-36), r0 ; cmp #0, r0 ; bne ed_done
+    ldi:8   #1, r0 ; st r0, @(r14, #-36)
+    ld      @(r14, #-64), r1 ; add r1, r8
+    ld      @(r14, #-68), r1 ; add r1, r9 ; add r1, r10
+    jmp.far ed_row_lp
+ed_done:
+    ld      @(r14, #-64), r1 ; sub r1, r8 ; add #4, r8
+    ld      @(r14, #-68), r1 ; sub r1, r9 ; add #2, r9
+    sub     r1, r10 ; add #2, r10
+    ld      @r15+, RP
+    ret
+
+// apply B&W toner onto 4x2 tile Cb/Cr at r9/r10 from pre-grain luma at r8 (preserves r8/r9/r10)
+apply_toner_4x2:
+    ld      @(r14, #-80), r4
+    ldi:32  #VA_CLAMP_CENTER, r3
+    mov     r8, r5 ; mov r9, r6 ; mov r10, r7
+    ldi:8   #2, r11
+at_row:
+    ld      @r5, r2
+    mov     r2, r13 ; lsr2 #24, r13 ; lsl #1, r13 ; lduh @(r13, r4), r1
+    lsr     #8, r2  ; extub r2      ; lsl #1, r2  ; mov r2, r13 ; lduh @(r13, r4), r2
+
+    lduh    @r6, r12
+    mov     r1, r13 ; asr #8, r13 ; extsb r13
+    mov     r12, r0 ; lsr #8, r0 ; add r0, r13 ; ldub @(r13, r3), r0 ; lsl #8, r0
+    extub   r12 ; mov r2, r13 ; asr #8, r13 ; extsb r13 ; add r12, r13 ; ldub @(r13, r3), r12 ; or r12, r0
+    sth     r0, @r6
+
+    lduh    @r7, r12
+    extsb   r1 ; mov r12, r0 ; lsr #8, r0 ; add r1, r0 ; mov r0, r13 ; ldub @(r13, r3), r0 ; lsl #8, r0
+    extub   r12 ; extsb r2 ; add r2, r12 ; mov r12, r13 ; ldub @(r13, r3), r12 ; or r12, r0
+    sth     r0, @r7
+
+    add2    #-1, r11 ; cmp #0, r11 ; beq at_done
+    ld      @(r14, #-64), r0 ; add r0, r5
+    ld      @(r14, #-68), r0 ; add r0, r6 ; add r0, r7
+    bra     at_row
+at_done:
     ret

@@ -1,0 +1,11 @@
+[package]
+name = "dp2m-web"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+dp2m-sim = { path = "../dp2m-sim" }

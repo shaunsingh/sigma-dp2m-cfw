@@ -112,8 +112,10 @@ Run as `cargo run --release -- <command>`. Without `--config`, the builder uses 
 | `verify-m5 <Firm.bin>` | checksums, protected constants and emulated capture jobs |
 | `disasm-fr80 <Firm.bin> <va_start> <va_end>` | disassemble an FR80 address range (hex) |
 | `inspect <file>` | identify a package, `Firm.bin` or `C78FRM.bin`; print version or checksum |
+| `sim [--from dir] [--port p]` | serve the dual-CPU browser simulator on `127.0.0.1:p` (default `8080`) |
+| `sim-trace [pkg.bin] [--keys k1,k2,...] [--ppm f.ppm] [--watch-text]` | run headless dual-CPU key/capture steps, inspect AE/screen/OSD state, and export PPM frames |
 
-- `cargo test --release` runs the unit tests (config loader, catalog layout, package date).
+- `cargo test --release` runs the unit and integration tests (config, catalog, 36-film link, FR80/ARM9 ISA, dual-CPU `dp2m-sim` flow and Unicorn OSD parity).
 - `cargo test --release -p dp2m ycc_bench -- --ignored --nocapture` prints the M5 engine cost per stage.
 
 Scripts in `tools/`:
@@ -139,10 +141,13 @@ Cargo.toml               workspace
 dp2m.example.fnl         config template
 flake.nix                Nix dev shell
 crates/
+  arm9/                  ARM926EJ-S big-endian ARM/Thumb interpreter
   fr80/                  FR80 assembler, disassembler, emulator
+  dp2m-sim/              dual-CPU M6M + M5Slave camera simulator
+  dp2m-web/              wasm32 bindings for the browser simulator
   dp2m/                  builder
     lua/fennel.lua       Fennel compiler (embedded)
-    src/main.rs          CLI
+    src/main.rs          CLI (`build`, `stage`, `verify-m5`, `disasm-fr80`, `inspect`, `sim`)
     src/config.rs        Fennel config loader
     src/catalog.rs       films, papers, grids, packed mode ids
     src/pack.rs          film_pack.bin reader
@@ -151,6 +156,7 @@ crates/
     src/m6m/codegen.rs   generated C tables
     src/package.rs       DP2MVxxx.bin writer
     src/elf.rs           ELF reader
+web/                     minimal canvas frontend for `dp2m sim`
 src/
   asm/m5/                FR80 assembly: hooks, YCC engine, spatial driver
   m6m/                   M6M payload: C, assembly, linker script
@@ -172,4 +178,5 @@ docs/                    reference and research notes
 - [docs/research/m6m-rom.md](docs/research/m6m-rom.md): dead-code analysis and payload regions; [candidate list](docs/research/m6m-rom-candidates.tsv).
 - [docs/research/custom-modes.md](docs/research/custom-modes.md): exposure modes and custom slots.
 - [docs/research/live-view.md](docs/research/live-view.md): refresh path, B2Y gamma and matrix, overlays.
+- [docs/research/simulator-and-pb.md](docs/research/simulator-and-pb.md): dual-CPU simulator, native AE solver, µITRON syscalls, Milbeaut IIP/DMA, `SCREEN_PB` (`0x19`), DCF and `exif_main`.
 - [docs/research/reference-firmware.md](docs/research/reference-firmware.md): other Sigma firmware in `data/ref/`.

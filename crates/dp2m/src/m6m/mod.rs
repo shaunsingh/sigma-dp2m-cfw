@@ -112,10 +112,12 @@ impl Toolchain<'_> {
     }
 
     fn compile(&self, file: &Path) -> Result<std::path::PathBuf, String> {
+        let name = file.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let opt = if matches!(name, "rt" | "hud" | "lv") { "-O2" } else { "-Os" };
         let obj = self.work.join(file.file_name().unwrap()).with_extension("o");
         Self::run(
             Command::new("clang")
-                .args(["--target=armeb-none-eabi", "-mcpu=arm926ej-s", "-mthumb", "-Os", "-std=c11"])
+                .args(["--target=armeb-none-eabi", "-mcpu=arm926ej-s", "-mthumb", opt, "-std=c11"])
                 .args(["-ffreestanding", "-fno-builtin", "-fno-stack-protector", "-fno-common"])
                 .args(["-ffunction-sections", "-fdata-sections", "-Wall", "-Wextra", "-Werror"])
                 .arg("-I")
@@ -207,7 +209,7 @@ pub fn build_m6m(fw_raw: &[u8], pack: &FilmPack, src: &Path, work: &Path, cfg: &
 
     let hooks = elf.section(".dp2m.hooks").ok_or("payload has no .dp2m.hooks")?;
     let mut n_hooks = 0;
-    for h in hooks.data.chunks_exact(16) {
+    for h in hooks.data.as_chunks::<16>().0 {
         let [kind, site, target, expect] = std::array::from_fn(|i| u32::from_be_bytes(h[4 * i..4 * i + 4].try_into().unwrap()));
         let cur = be32(s3, site & !1);
         let ok = match kind {

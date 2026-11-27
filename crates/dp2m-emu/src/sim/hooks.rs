@@ -5,113 +5,31 @@ use crate::arm9::{Cpu, HookAction, SDRAM_BASE};
 
 use super::isp::{wb_q7_matrix, ycbcr_to_rgb};
 use super::{
+    CaptureFrame, HEAP_HI, HEAP_LO, HeapBlock, HwState, LCD_H, LCD_W, LV_H, PB_PLANE_C_LEN,
+    PB_PLANE_Y_LEN, SCRATCH_VA,
+};
+use crate::stock::{
     ACCEL_X, ACCEL_Y, AE_SENSOR_EV100, B2Y_SET_CHROMA, B2Y_SET_GAMMA, B2Y_SET_MAT, B2Y_SET_MONO,
-    B2Y_SET_SHARP_LUT, CALLOC, CaptureFrame, DCF_COUNT_IMAGES, DCF_DIR_COUNTS, DCF_GET_CUR,
-    DCF_GET_ENTRY, DCF_GET_FILE_INFO, DCF_GET_TOTAL, DCF_READ_JPEG_EXIF, DCF_READ_X3F_EXIF,
-    DCF_SCAN_READY, DCF_SET_CUR, DCF_STEP_NEXT, DCF_STEP_PREV, DCF_SYNC_CUR, FREE, GET_LANG,
-    GET_LV_CC7, GET_LV_CCN, HeapBlock, HwState, LCD_H, LCD_W, LIBC_AEABI_MEMCLR,
+    B2Y_SET_SHARP_LUT, CALLOC, DCF_COUNT_IMAGES, DCF_DIR_COUNTS, DCF_GET_CUR, DCF_GET_ENTRY,
+    DCF_GET_FILE_INFO, DCF_GET_TOTAL, DCF_READ_JPEG_EXIF, DCF_READ_X3F_EXIF, DCF_SCAN_READY,
+    DCF_SET_CUR, DCF_STEP_NEXT, DCF_STEP_PREV, DCF_SYNC_CUR, DIAG_LOG_A, DIAG_LOG_B, DMA_2D_COPY,
+    DMA_2D_COPY_MODE, DMA_MEM_COPY, DMA_RECT_FILL, FREE, GET_LV_CC7, GET_LV_CCN, LIBC_AEABI_MEMCLR,
     LIBC_AEABI_MEMCLR4, LIBC_AEABI_MEMMOVE, LIBC_AEABI_MEMSET, LIBC_MEMCPY, LIBC_MEMSET, LV_ACTIVE,
-    LV_H, MALLOC, NOR_READ, NOR_WRITE, PB_DEC_INIT, PB_DECODE_RESAMPLE, PB_HW_JPEG_DEC,
-    PB_IIP_HIST, PB_OPEN_IMAGE_A, PB_OPEN_IMAGE_B, PB_OPEN_JPEG_A, PB_OPEN_JPEG_B, PB_PLANE_C_LEN,
-    PB_PLANE_Y_LEN, PB_SELECT_VBUF, PB_STEP_OR_CUR, PB_VBUF_DEFAULT_VA, PB_YCBCR_TO_RGB_PLANAR,
-    REALLOC, SCRATCH_VA, SCREEN_POST_MBOX, SCREEN_POST_RET, SD_FREE_SPACE, SD_MOUNT_STATUS,
+    MALLOC, NOR_READ, NOR_WRITE, NV_BUSY, NV_SYNC, PB_DEC_INIT, PB_DECODE_RESAMPLE, PB_HW_JPEG_DEC,
+    PB_IIP_HIST, PB_OPEN_IMAGE_A, PB_OPEN_IMAGE_B, PB_OPEN_JPEG_A, PB_OPEN_JPEG_B, PB_SELECT_VBUF,
+    PB_STEP_OR_CUR, PB_VBUF_DEFAULT_VA, PB_VBUFS, PB_YCBCR_TO_RGB_PLANAR, REALLOC, REC_COUNTER_GET,
+    REC_COUNTER_SET, SCREEN_POST_MBOX, SCREEN_POST_RET, SD_FREE_SPACE, SD_MOUNT_STATUS, UITRON,
+    GET_MPF, GET_MPL, GET_PRI, GET_TID, PGET_MPF, PGET_MPL, POL_FLG, PRCV_MBX, RCV_MBX, REF_ALM, REF_CYC,
+    REF_FLG, REF_MBX, REF_MPF, REF_MPL, REF_SEM, REF_SYS, REF_TSK, REL_MPF, REL_MPL, STA_CYC,
+    STP_CYC, TGET_MPF, TRCV_MBX, WAI_FLG,
 };
 
-const DMA_2D_COPY_MODE: u32 = 0xA00B_125C;
-const DMA_2D_COPY: u32 = 0xA00B_14A0;
-const DMA_RECT_FILL: u32 = 0xA00B_1870;
-const DMA_MEM_COPY: u32 = 0xA00B_23A8;
-
 pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
-    // uITRON kernel + Milbeaut driver range stub; stops below ICON_TBL getters at 0xA00BD7FC..0xA00C0594
-    cpu.stub_range(0xA007_0000, 0xA00B_8000, Some(0));
-    // uITRON 4.0 memory pool, task-ID, and mailbox/dataqueue out-pointer syscalls
-    for &va in &[0xA007_1830, 0xA007_1970, 0xA007_1C54] {
-        let st = Rc::clone(hw);
-        cpu.add_hook(va, move |c| {
-            let p_blk = c.r[1];
-            let ptr = heap_alloc(&mut st.borrow_mut(), 256);
-            if ptr == 0 {
-                return HookAction::Return(Some((-33i32) as u32));
-            }
-            let off = (ptr - SDRAM_BASE) as usize;
-            c.sdram_mut()[off..off + 256].fill(0);
-            if p_blk >= SDRAM_BASE {
-                c.w32(p_blk, ptr);
-            }
-            HookAction::Return(Some(0))
-        });
-    }
-    for &va in &[0xA007_1F30, 0xA007_212C, 0xA007_22A0] {
-        let st = Rc::clone(hw);
-        cpu.add_hook(va, move |c| {
-            let Some(sz) = c.r[1].checked_add(15).map(|n| (n & !15).max(16)) else {
-                return HookAction::Return(Some((-33i32) as u32));
-            };
-            let p_blk = c.r[2];
-            let ptr = heap_alloc(&mut st.borrow_mut(), sz);
-            if ptr == 0 {
-                return HookAction::Return(Some((-33i32) as u32));
-            }
-            c.fill_bytes(ptr, 0, sz as usize);
-            if p_blk >= SDRAM_BASE {
-                c.w32(p_blk, ptr);
-            }
-            HookAction::Return(Some(0))
-        });
-    }
-    for &va in &[0xA007_1B00, 0xA007_2388] {
-        let st = Rc::clone(hw);
-        cpu.add_hook(va, move |c| {
-            let ptr = c.r[1];
-            if is_sim_heap_ptr(ptr) {
-                let mut s = st.borrow_mut();
-                if let Some(pos) = s.alloc_caps.iter().position(|&(va, _)| va == ptr) {
-                    let (va, cap) = s.alloc_caps.swap_remove(pos);
-                    s.free_list.push(HeapBlock { va, cap });
-                }
-            }
-            HookAction::Return(Some(0))
-        });
-    }
-    cpu.add_hook(0xA007_3B70, |c| {
-        let p_tskid = c.r[0];
-        if p_tskid >= SDRAM_BASE {
-            c.w16(p_tskid, 0);
-        }
-        HookAction::Return(Some(0))
-    });
-    // uITRON ref_tsk(tskid, pk_rtsk): background slideshow/movie/audio tasks are TTS_DMT (0x10)
-    cpu.add_hook(0xA007_52D4, |c| {
-        let pk_rtsk = c.r[1];
-        if pk_rtsk >= SDRAM_BASE {
-            let off = (pk_rtsk - SDRAM_BASE) as usize;
-            if off + 0x24 <= c.sdram().len() {
-                c.sdram_mut()[off..off + 0x24].fill(0);
-                c.w16(pk_rtsk, 0x10);
-            }
-        }
-        HookAction::Return(Some(0))
-    });
-    // uITRON ref_flg (0xA0072BCC) and ref_mbx (0xA0072C74): zero 8-byte status packet at r1
-    for &va in &[0xA007_2BCC, 0xA007_2C74] {
-        cpu.add_hook(va, |c| {
-            let pk_out = c.r[1];
-            if pk_out >= SDRAM_BASE {
-                c.w32(pk_out, 0);
-                c.w32(pk_out.wrapping_add(4), 0);
-            }
-            HookAction::Return(Some(0))
-        });
-    }
-    for &va in &[0xA007_29B8, 0xA007_3240, 0xA007_4808, 0xA007_4AC0, 0xA007_4C50] {
-        cpu.stub(va, Some((-50i32) as u32));
-    }
-    cpu.stub(0xA010_EF48, Some(0));
-    cpu.stub(0xA010_EF28, Some(0));
-    cpu.stub(GET_LANG, Some(0));
+    cpu.stub_range(UITRON.0, 0xA00B_8000, Some(0));
+    install_kernel_hooks(cpu, hw);
+    cpu.stub(DIAG_LOG_A, Some(0));
+    cpu.stub(DIAG_LOG_B, Some(0));
 
-    // ARM libc memory intrinsics (bit-exact with compiled ARM routines)
     for &(va, ret_r0) in &[(LIBC_MEMCPY, true), (LIBC_AEABI_MEMMOVE, false)] {
         cpu.add_hook(va, move |c| {
             let (dst, src, len) = (c.r[0], c.r[1], c.r[2] as usize);
@@ -188,11 +106,10 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
         HookAction::Return(Some(0))
     });
 
-    // NOR record counter & sync helpers
-    cpu.stub(0xA001_B020, None);
-    cpu.stub(0xA001_B026, Some(0));
-    cpu.stub(0xA014_3336, None);
-    cpu.stub(0xA014_5650, Some(0));
+    cpu.stub(REC_COUNTER_SET, None);
+    cpu.stub(REC_COUNTER_GET, Some(0));
+    cpu.stub(NV_SYNC, None);
+    cpu.stub(NV_BUSY, Some(0));
 
     {
         let st = Rc::clone(hw);
@@ -223,11 +140,10 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
         });
     }
 
-    // Recycling freelist + bump allocator in [0xA0A20000, 0xA1C00000) U [0xA3000000, 0xA7F00000)
     {
         let st = Rc::clone(hw);
         cpu.add_hook(MALLOC, move |c| {
-            let Some(sz) = c.r[0].checked_add(15).map(|n| (n & !15).max(16)) else {
+            let Some(sz) = heap_size(c.r[0]) else {
                 return HookAction::Return(Some(0));
             };
             HookAction::Return(Some(heap_alloc(&mut st.borrow_mut(), sz)))
@@ -236,11 +152,7 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
     {
         let st = Rc::clone(hw);
         cpu.add_hook(CALLOC, move |c| {
-            let Some(sz) = c.r[0]
-                .checked_mul(c.r[1])
-                .and_then(|t| t.checked_add(15))
-                .map(|n| (n & !15).max(16))
-            else {
+            let Some(sz) = c.r[0].checked_mul(c.r[1]).and_then(heap_size) else {
                 return HookAction::Return(Some(0));
             };
             let ptr = heap_alloc(&mut st.borrow_mut(), sz);
@@ -253,14 +165,7 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
     {
         let st = Rc::clone(hw);
         cpu.add_hook(FREE, move |c| {
-            let ptr = c.r[0];
-            if is_sim_heap_ptr(ptr) {
-                let mut s = st.borrow_mut();
-                if let Some(pos) = s.alloc_caps.iter().position(|&(va, _)| va == ptr) {
-                    let (va, cap) = s.alloc_caps.swap_remove(pos);
-                    s.free_list.push(HeapBlock { va, cap });
-                }
-            }
+            heap_free(&mut st.borrow_mut(), c.r[0]);
             HookAction::Return(Some(0))
         });
     }
@@ -270,20 +175,16 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
             let ptr = c.r[0];
             let new_sz = c.r[1];
             if ptr == 0 {
-                let Some(sz) = new_sz.checked_add(15).map(|n| (n & !15).max(16)) else {
+                let Some(sz) = heap_size(new_sz) else {
                     return HookAction::Return(Some(0));
                 };
                 return HookAction::Return(Some(heap_alloc(&mut st.borrow_mut(), sz)));
             }
             if new_sz == 0 {
-                let mut s = st.borrow_mut();
-                if let Some(pos) = s.alloc_caps.iter().position(|&(va, _)| va == ptr) {
-                    let (va, cap) = s.alloc_caps.swap_remove(pos);
-                    s.free_list.push(HeapBlock { va, cap });
-                }
+                heap_free(&mut st.borrow_mut(), ptr);
                 return HookAction::Return(Some(0));
             }
-            let Some(aligned) = new_sz.checked_add(15).map(|n| (n & !15).max(16)) else {
+            let Some(aligned) = heap_size(new_sz) else {
                 return HookAction::Return(Some(0));
             };
             let mut s = st.borrow_mut();
@@ -297,10 +198,7 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
                     let src_off = (ptr - SDRAM_BASE) as usize;
                     let dst_off = (new_ptr - SDRAM_BASE) as usize;
                     c.sdram_mut().copy_within(src_off..src_off + old_cap as usize, dst_off);
-                    if let Some(p2) = s.alloc_caps.iter().position(|&(va, _)| va == ptr) {
-                        let (va, cap) = s.alloc_caps.swap_remove(p2);
-                        s.free_list.push(HeapBlock { va, cap });
-                    }
+                    heap_free(&mut s, ptr);
                 }
                 return HookAction::Return(Some(new_ptr));
             }
@@ -308,7 +206,7 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
         });
     }
 
-    // Intercept SCREEN_POST mailbox send after stock deduplication/guards
+    // At 0xA0042B4E, r6/r5 are the event type/value and r7 is the return code.
     {
         let st = Rc::clone(hw);
         cpu.add_hook(SCREEN_POST_MBOX, move |c| {
@@ -337,7 +235,7 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
         cpu.add_hook(ACCEL_Y, move |_| HookAction::Return(Some((st.borrow().accel_y as u8) as u32)));
     }
 
-    // Sensor AWB/Preset CCMatrix getters: write active Q7 3x3 WB matrix at buf + 10..28
+    // Firmware reads signed Q7 coefficients at offsets +10..+27 of the returned CC packet.
     for &va in &[GET_LV_CC7, GET_LV_CCN] {
         cpu.add_hook(va, |c| {
             let dst = c.r[0];
@@ -352,7 +250,6 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
         });
     }
 
-    // Capture live B2Y ISP registers programmed by M6M firmware
     {
         let st = Rc::clone(hw);
         cpu.add_hook(B2Y_SET_MAT, move |c| {
@@ -389,13 +286,7 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
             HookAction::Return(Some(0))
         });
     }
-    {
-        let st = Rc::clone(hw);
-        cpu.add_hook(B2Y_SET_SHARP_LUT, move |c| {
-            st.borrow_mut().b2y_sharp_idx = (c.r[4] & 0xFF) as u8;
-            HookAction::Return(Some(0))
-        });
-    }
+    cpu.stub(B2Y_SET_SHARP_LUT, Some(0));
     {
         let st = Rc::clone(hw);
         cpu.add_hook(B2Y_SET_GAMMA, move |c| {
@@ -408,16 +299,14 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
         });
     }
 
-    // Native SCREEN_PB (0x19) video buffer selector + virtual DCF SD card & JPEG/EXIF pipeline
     {
         let st = Rc::clone(hw);
         cpu.add_hook(PB_SELECT_VBUF, move |c| {
-            let va = match c.r[0] {
-                1 => 0xA235_E600,
-                2 => 0xA243_F600,
-                4 => 0xA252_0600,
-                8 => 0xA260_1600,
-                _ => PB_VBUF_DEFAULT_VA,
+            let mask = c.r[0];
+            let va = if mask.is_power_of_two() && mask <= 8 {
+                PB_VBUFS[mask.trailing_zeros() as usize]
+            } else {
+                PB_VBUF_DEFAULT_VA
             };
             st.borrow_mut().pb_vbuf_va = va;
             HookAction::Return(Some(0))
@@ -445,17 +334,16 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
             HookAction::Return(Some(n))
         });
     }
-    {
+    for (va, mode) in [(PB_STEP_OR_CUR, None), (DCF_STEP_NEXT, Some(1)), (DCF_STEP_PREV, Some(2))] {
         let st = Rc::clone(hw);
-        cpu.add_hook(PB_STEP_OR_CUR, move |c| {
-            let mode = c.r[0];
+        cpu.add_hook(va, move |c| {
             let mut s = st.borrow_mut();
-            if s.captures.is_empty() {
+            let len = s.captures.len();
+            if len == 0 {
                 return HookAction::Return(Some(0));
             }
-            let len = s.captures.len();
             let cur = s.dcf_cur.min(len - 1);
-            s.dcf_cur = match mode {
+            s.dcf_cur = match mode.unwrap_or(c.r[0]) {
                 1 => (cur + 1) % len,
                 2 => if cur == 0 { len - 1 } else { cur - 1 },
                 _ => cur,
@@ -501,15 +389,12 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
             let idx = c.r[0] as usize;
             let exif_main = c.r[1];
             let exif_ext = c.r[2];
-            let cap = {
-                let s = st.borrow();
-                let Some(cap) = idx.checked_sub(1).and_then(|i| s.captures.get(i)) else {
-                    return HookAction::Return(Some((-1i32) as u32));
-                };
-                cap.clone()
+            let s = st.borrow();
+            let Some(cap) = idx.checked_sub(1).and_then(|i| s.captures.get(i)) else {
+                return HookAction::Return(Some((-1i32) as u32));
             };
             if exif_main >= SDRAM_BASE {
-                populate_exif_main(c, exif_main, idx as u16, &cap);
+                populate_exif_main(c, exif_main, idx as u16, cap);
             }
             if exif_ext >= SDRAM_BASE {
                 populate_exif_ext(c, exif_ext, idx);
@@ -544,28 +429,6 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
     }
     {
         let st = Rc::clone(hw);
-        cpu.add_hook(DCF_STEP_NEXT, move |_| {
-            let mut s = st.borrow_mut();
-            if s.captures.is_empty() {
-                return HookAction::Return(Some(0));
-            }
-            s.dcf_cur = (s.dcf_cur + 1) % s.captures.len();
-            HookAction::Return(Some((s.dcf_cur + 1) as u32))
-        });
-    }
-    {
-        let st = Rc::clone(hw);
-        cpu.add_hook(DCF_STEP_PREV, move |_| {
-            let mut s = st.borrow_mut();
-            if s.captures.is_empty() {
-                return HookAction::Return(Some(0));
-            }
-            s.dcf_cur = if s.dcf_cur == 0 { s.captures.len() - 1 } else { s.dcf_cur - 1 };
-            HookAction::Return(Some((s.dcf_cur + 1) as u32))
-        });
-    }
-    {
-        let st = Rc::clone(hw);
         cpu.add_hook(DCF_GET_ENTRY, move |c| {
             let idx = c.r[0] as usize;
             let out = c.r[1];
@@ -595,15 +458,13 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
             let exif_main = c.r32_be(sp.wrapping_add(4));
             let exif_ext = c.r32_be(sp.wrapping_add(8));
 
-            let cap = {
-                let mut s = st.borrow_mut();
-                if idx < 1 || idx > s.captures.len() {
-                    return HookAction::Return(Some(0));
-                }
-                s.dcf_cur = idx - 1;
-                s.pb_open_idx = Some(idx - 1);
-                s.captures[idx - 1].clone()
-            };
+            let mut s = st.borrow_mut();
+            if idx < 1 || idx > s.captures.len() {
+                return HookAction::Return(Some(0));
+            }
+            s.dcf_cur = idx - 1;
+            s.pb_open_idx = Some(idx - 1);
+            let cap = &s.captures[idx - 1];
 
             if dec_ctx >= SDRAM_BASE {
                 let d = (dec_ctx - SDRAM_BASE) as usize;
@@ -622,7 +483,7 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
                 c.w8(dec_ctx + 0x29, 1);
             }
             if exif_main >= SDRAM_BASE {
-                populate_exif_main(c, exif_main, idx as u16, &cap);
+                populate_exif_main(c, exif_main, idx as u16, cap);
             }
             if exif_ext >= SDRAM_BASE {
                 populate_exif_ext(c, exif_ext, idx);
@@ -641,19 +502,17 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
             let stride = c.r32_be(sp) as usize;
             let out_desc = c.r32_be(sp.wrapping_add(4));
 
-            let rgba = {
-                let s = st.borrow();
-                let idx = s.pb_open_idx.unwrap_or(s.dcf_cur);
-                s.captures.get(idx).map(|cap| cap.rgba.clone())
-            };
-            let Some(rgba) = rgba else {
+            let s = st.borrow();
+            let idx = s.pb_open_idx.unwrap_or(s.dcf_cur);
+            let Some(cap) = s.captures.get(idx) else {
                 return HookAction::Return(Some(1));
             };
+            let rgba = &cap.rgba;
             if dst_va < SDRAM_BASE || dst_w == 0 || dst_h == 0 || stride < dst_w {
                 return HookAction::Return(Some(1));
             }
 
-            // Match yuv_desc_init (0xA0127F9E) 4:2:0 plane spacing & 3:2 vertical centering inside 4:3
+            // Match yuv_desc_init (0xA0127F9E) 4:2:0 plane spacing; center the 424 scanlines in the 480-line buffer
             let h_plane = dst_h.max(LCD_H);
             let y_base = (dst_va - SDRAM_BASE) as usize;
             let cb_base = y_base + stride * h_plane;
@@ -814,6 +673,109 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
     });
 }
 
+const E_PAR: u32 = -17i32 as u32;
+const E_NOMEM: u32 = -33i32 as u32;
+const E_OBJ: u32 = -41i32 as u32;
+const E_RLWAI: u32 = -49i32 as u32;
+const E_TMOUT: u32 = -50i32 as u32;
+
+fn out_in_sdram(c: &Cpu, addr: u32, size: usize, align: u32) -> bool {
+    addr.is_multiple_of(align)
+        && addr.checked_sub(SDRAM_BASE).is_some_and(|off| off as usize <= c.sdram().len() - size)
+}
+
+fn install_kernel_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
+    const FIXED_BLOCK_SIZE: u32 = 256;
+    for (va, fixed) in [(GET_MPF, true), (PGET_MPF, true), (TGET_MPF, true), (GET_MPL, false), (PGET_MPL, false)] {
+        let st = Rc::clone(hw);
+        cpu.add_hook(va, move |c| {
+            let out = c.r[if fixed { 1 } else { 2 }];
+            if !out_in_sdram(c, out, 4, 4) {
+                return HookAction::Return(Some(E_PAR));
+            }
+            let Some(size) = (if fixed { Some(FIXED_BLOCK_SIZE) } else { heap_size(c.r[1]) }) else {
+                return HookAction::Return(Some(E_NOMEM));
+            };
+            let ptr = heap_alloc(&mut st.borrow_mut(), size);
+            if ptr == 0 {
+                return HookAction::Return(Some(E_NOMEM));
+            }
+            c.fill_bytes(ptr, 0, size as usize);
+            c.w32(out, ptr);
+            HookAction::Return(Some(0))
+        });
+    }
+    for va in [REL_MPF, REL_MPL] {
+        let st = Rc::clone(hw);
+        cpu.add_hook(va, move |c| {
+            heap_free(&mut st.borrow_mut(), c.r[1]);
+            HookAction::Return(Some(0))
+        });
+    }
+    // 0xA0071A3C and 0xA00722A0: no waiters; both report the simulator's shared heap.
+    for (va, fixed) in [(REF_MPF, true), (REF_MPL, false)] {
+        let st = Rc::clone(hw);
+        cpu.add_hook(va, move |c| {
+            let out = c.r[1];
+            if !out_in_sdram(c, out, if fixed { 8 } else { 12 }, 4) {
+                return HookAction::Return(Some(E_PAR));
+            }
+            let s = st.borrow();
+            let lo = HEAP_LO.end.saturating_sub(s.heap_bump);
+            let hi = HEAP_HI.end - s.heap_bump.max(HEAP_HI.start);
+            c.w16(out, 0);
+            if fixed {
+                let reusable = s.free_list.iter().filter(|b| (FIXED_BLOCK_SIZE..=FIXED_BLOCK_SIZE * 2).contains(&b.cap)).count() as u32;
+                c.w32(out + 4, lo / FIXED_BLOCK_SIZE + hi / FIXED_BLOCK_SIZE + reusable);
+            } else {
+                c.w32(out + 4, lo + hi + s.free_list.iter().map(|b| b.cap).sum::<u32>());
+                c.w32(out + 8, s.free_list.iter().map(|b| b.cap).fold(lo.max(hi), u32::max));
+            }
+            HookAction::Return(Some(0))
+        });
+    }
+    // 0xA0072Bxx..0xA00749xx status packets store a halfword and a word, not two words.
+    for va in [REF_FLG, REF_MBX, REF_SEM, REF_ALM, REF_CYC] {
+        cpu.add_hook(va, |c| {
+            let out = c.r[1];
+            if !out_in_sdram(c, out, 8, 4) {
+                return HookAction::Return(Some(E_PAR));
+            }
+            c.w16(out, 0);
+            c.w32(out + 4, 0);
+            HookAction::Return(Some(0))
+        });
+    }
+    for va in [GET_TID, REF_SYS] {
+        cpu.add_hook(va, |c| {
+            let out = c.r[0];
+            if !out_in_sdram(c, out, 2, 2) {
+                return HookAction::Return(Some(E_PAR));
+            }
+            c.w16(out, 0);
+            HookAction::Return(Some(0))
+        });
+    }
+    cpu.add_hook(REF_TSK, |c| {
+        let out = c.r[1];
+        if !out_in_sdram(c, out, 0x24, 4) {
+            return HookAction::Return(Some(E_PAR));
+        }
+        // T_RTSK starts with a 16-bit tskstat (0xA0075374).
+        c.fill_bytes(out, 0, 0x24);
+        c.w16(out, 0x10); // TTS_DMT
+        HookAction::Return(Some(0))
+    });
+    cpu.stub(GET_PRI, Some(E_OBJ)); // 0xA0075294 rejects dormant tasks.
+    // Without a scheduler, release indefinite waits instead of returning success without data.
+    for va in [WAI_FLG, RCV_MBX] {
+        cpu.stub(va, Some(E_RLWAI));
+    }
+    for va in [POL_FLG, PRCV_MBX, TRCV_MBX, STA_CYC, STP_CYC] {
+        cpu.stub(va, Some(E_TMOUT));
+    }
+}
+
 fn populate_exif_ext(c: &mut Cpu, exif_ext: u32, idx: usize) {
     let e = (exif_ext - SDRAM_BASE) as usize;
     c.sdram_mut()[e..e + 0x44].fill(0);
@@ -869,7 +831,6 @@ fn populate_exif_main(c: &mut Cpu, base: u32, fnum: u16, cap: &CaptureFrame) {
     write_f64_be(c, base + 0x160, 30.0); // 30mm focal length
     c.w32(base + 0x170, cap.ev_steps as u32);
     c.w32(base + 0x174, 3);
-    // Center AF box on thumbnail (scaled inside 640x424)
     c.w16(base + 0x17C, 292);
     c.w16(base + 0x17E, 193);
     c.w16(base + 0x180, 56);
@@ -918,9 +879,15 @@ fn dma_copy_2d(
     }
 }
 
-#[inline]
-fn is_sim_heap_ptr(ptr: u32) -> bool {
-    (0xA0A2_0000..0xA1C0_0000).contains(&ptr) || (0xA300_0000..0xA7F0_0000).contains(&ptr)
+fn heap_size(size: u32) -> Option<u32> {
+    size.checked_add(15).map(|n| (n & !15).max(16))
+}
+
+fn heap_free(st: &mut HwState, ptr: u32) {
+    if let Some(pos) = st.alloc_caps.iter().position(|&(va, _)| va == ptr) {
+        let (va, cap) = st.alloc_caps.swap_remove(pos);
+        st.free_list.push(HeapBlock { va, cap });
+    }
 }
 
 fn heap_alloc(st: &mut HwState, sz: u32) -> u32 {
@@ -934,14 +901,14 @@ fn heap_alloc(st: &mut HwState, sz: u32) -> u32 {
         return blk.va;
     }
     let mut base = st.heap_bump;
-    if base < 0xA1C0_0000 && base.checked_add(sz).is_none_or(|end| end > 0xA1C0_0000) {
+    if base < HEAP_LO.end && base.checked_add(sz).is_none_or(|end| end > HEAP_LO.end) {
         // Skip payload .bss (0xA1C00000..0xA1E00000) and LCD/PB/LV planes (0xA2130000..0xA2B00000)
-        base = 0xA300_0000;
+        base = HEAP_HI.start;
     }
     let Some(next) = base.checked_add(sz) else {
         return 0;
     };
-    if next > 0xA7F0_0000 {
+    if next > HEAP_HI.end {
         return 0;
     }
     st.heap_bump = next;
@@ -949,3 +916,68 @@ fn heap_alloc(st: &mut HwState, sz: u32) -> u32 {
     base
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sim::CALL_SP;
+
+    #[test]
+    fn kernel_hooks_write_stock_out_parameters() {
+        let mut c = Cpu::new();
+        let hw = Rc::new(RefCell::new(HwState::new([0; 1024])));
+        install_kernel_hooks(&mut c, &hw);
+        let out = SCRATCH_VA;
+        let call = |c: &mut Cpu, va, args: &[u32]| {
+            c.fill_bytes(out, 0xA5, 0x28);
+            c.call(va, args, &[], CALL_SP, 16).unwrap().0
+        };
+        for (va, args, block_size) in [
+            (GET_MPF, [1, out, 0, 0], 256),
+            (PGET_MPF, [1, out, 0, 0], 256),
+            (TGET_MPF, [1, out, 1, 0], 256),
+            (GET_MPL, [1, 31, out, 0], 32),
+            (PGET_MPL, [1, 31, out, 0], 32),
+        ] {
+            let base = hw.borrow().heap_bump;
+            c.fill_bytes(base, 0xA5, block_size + 1);
+            assert_eq!(call(&mut c, va, &args), 0, "{va:#x}");
+            assert_eq!(c.r32_be(out), base);
+            assert_eq!(c.r32_be(out + 4), 0xA5A5_A5A5);
+            let offset = (base - SDRAM_BASE) as usize;
+            assert!(c.sdram()[offset..offset + block_size].iter().all(|&v| v == 0));
+            assert_eq!(c.r8(base + block_size as u32), 0xA5);
+        }
+        let bump = hw.borrow().heap_bump;
+        for (va, words) in [
+            (REF_MPF, [(HEAP_LO.end - bump + HEAP_HI.end - HEAP_HI.start) / 256, 0xA5A5_A5A5]),
+            (REF_MPL, [HEAP_LO.end - bump + HEAP_HI.end - HEAP_HI.start, HEAP_HI.end - HEAP_HI.start]),
+            (REF_FLG, [0, 0xA5A5_A5A5]),
+            (REF_MBX, [0, 0xA5A5_A5A5]),
+            (REF_SEM, [0, 0xA5A5_A5A5]),
+            (REF_ALM, [0, 0xA5A5_A5A5]),
+            (REF_CYC, [0, 0xA5A5_A5A5]),
+        ] {
+            assert_eq!(call(&mut c, va, &[1, out, 0x1234]), 0, "{va:#x}");
+            assert_eq!(c.r32_be(out), 0x0000_A5A5);
+            assert_eq!([c.r32_be(out + 4), c.r32_be(out + 8)], words);
+        }
+        for va in [GET_TID, REF_SYS] {
+            assert_eq!(call(&mut c, va, &[out]), 0, "{va:#x}");
+            assert_eq!(c.r32_be(out), 0x0000_A5A5);
+        }
+        assert_eq!(call(&mut c, REF_TSK, &[1, out]), 0);
+        assert_eq!(c.r32_be(out), 0x0010_0000);
+        for off in (4..0x24).step_by(4) {
+            assert_eq!(c.r32_be(out + off), 0);
+        }
+        assert_eq!(c.r32_be(out + 0x24), 0xA5A5_A5A5);
+        let ram_end = SDRAM_BASE + c.sdram().len() as u32;
+        assert_eq!(call(&mut c, GET_MPF, &[1, ram_end]), E_PAR);
+        assert_eq!(call(&mut c, REF_TSK, &[1, ram_end - 4]), E_PAR);
+        assert_eq!(hw.borrow().heap_bump, bump);
+        for (va, error) in [(GET_PRI, E_OBJ), (PRCV_MBX, E_TMOUT), (RCV_MBX, E_RLWAI), (TRCV_MBX, E_TMOUT), (POL_FLG, E_TMOUT), (WAI_FLG, E_RLWAI)] {
+            assert_eq!(call(&mut c, va, &[1, out, 0, out]), error);
+            assert_eq!(c.r32_be(out), 0xA5A5_A5A5);
+        }
+    }
+}

@@ -1,11 +1,11 @@
 use crate::arm9::Cpu;
+use crate::stock::{NV_AUTO_ISO_MAX, NV_WB};
 
 use super::{LCD_W, LV_H};
 
-/// Returns a signed 12-bit Q7 (`128 == 1.0`) 3x3 white-balance matrix from M6M NVRAM WB settings.
-/// WB == 1 (Auto) returns exact identity `[128, 0, 0, 0, 128, 0, 0, 0, 128]`.
+// Synthetic diagonal WB coefficients in signed 12-bit Q7 (128 = unity).
 pub(crate) fn wb_q7_matrix(c: &Cpu) -> [i32; 9] {
-    let wb = c.r8(0xA093_96C4);
+    let wb = c.r8(NV_WB);
     let (rg, gg, bg) = match wb {
         2 => (134, 128, 122), // Daylight (~5400K)
         3 => (154, 128, 100), // Shade (~7500K)
@@ -15,8 +15,8 @@ pub(crate) fn wb_q7_matrix(c: &Cpu) -> [i32; 9] {
         7 => (138, 128, 116), // Flash (~5800K)
         8..=10 => (130, 128, 126),
         11 => {
-            // Color Temp: 0xA09396DC steps (~2500K..10000K)
-            let step = c.r8(0xA093_96DC).min(75) as i32;
+            // The host approximation uses 0xA09396DC, also the stock Auto-ISO maximum field.
+            let step = c.r8(NV_AUTO_ISO_MAX).min(75) as i32;
             let r = (86 + step * 80 / 75).clamp(72, 180);
             let b = (184 - step * 92 / 75).clamp(80, 196);
             (r, 128, b)
@@ -57,11 +57,12 @@ pub(crate) fn apply_contrast_u8(v: i32, slope_q8: i32) -> i32 {
     (((v - 128) * slope_q8 + 128) >> 8).clamp(-128, 127) + 128
 }
 
-pub(crate) fn apply_luma_sharpness(y_plane: &mut [u8], w: usize, h: usize, delta_steps: i32) {
+pub(crate) fn apply_luma_sharpness(y_plane: &mut [u8], w: usize, h: usize, delta_steps: i32, src: &mut Vec<u8>) {
     if delta_steps == 0 || y_plane.len() < w * h {
         return;
     }
-    let src = y_plane[..w * h].to_vec();
+    src.clear();
+    src.extend_from_slice(&y_plane[..w * h]);
     let amt = delta_steps * 28; // Q8 unsharp / soften weight
     for y in 1..h - 1 {
         let row = y * w;

@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::fr80::Emulator as Fr80Emu;
@@ -38,11 +38,10 @@ const M5_SCRATCH_BASE: u32 = 0x8010_0000;
 const M5_SCRATCH_LEN: usize = 0xC800;
 const M5_IMG_VA: [u32; 3] = [0x8200_0000, 0x8300_0000, 0x8380_0000];
 
-
 impl Camera {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn run_m5_capture(
-        &self,
+        &mut self,
         cmd_va_m6m: u32,
         packed_cm: u8,
         p1d: u8,
@@ -56,7 +55,7 @@ impl Camera {
         let mut m5_insns = 0u64;
         let has_m5_hooks = emu.r16(M5_MATRIX_HOOK) != 0;
 
-        // 1. Unpack M6M IPC cmd 0x20 into M5 job slot (`+0x150` = cm, `+0x14C` = p1d)
+        // M5 job slot: +0x150 is color mode, +0x14C is p1d.
         let ipc_va: u32 = 0x8008_1000;
         let slot_va: u32 = 0x8008_1200;
         for i in 0..32u32 {
@@ -84,7 +83,6 @@ impl Camera {
         let job_p1d = emu.r32(slot_va + 0x14C);
         let cs_val = (job_p1d & 3).max(1);
 
-        // 2. Run M5 CCMatrix hook (`0x005D0000`) against active White Balance matrix in M5_RAM_CC_ACTIVE
         emu.w32(M5_RAM_CS_FLAG, cs_val);
         for (k, &v) in wb_mat.iter().enumerate() {
             emu.w16(M5_RAM_CC_ACTIVE + (k as u32) * 2, (v as u16) & 0x0FFF);
@@ -112,7 +110,6 @@ impl Camera {
             }
         }
 
-        // 3. Run M5 4096-byte 1D LUT selector hook (`0x005D0180`), or stock selector on unpatched FW
         let lut_va = if has_m5_hooks {
             emu.set_handler(M5_SYM_ORIG_LUT, |e| {
                 e.r[4] = if e.r[5] == 2 { M5_MONO_LUT_VA } else { M5_STD_LUT_VA };
@@ -130,7 +127,6 @@ impl Camera {
             M5_STD_LUT_VA
         };
 
-        // 4. Run M5 12-sector MCAS hook (`0x005D0200`)
         let mcas_buf_va = Rc::new(RefCell::new(0u32));
         if has_m5_hooks {
             emu.set_handler(M5_SYM_ORIG_MCAS, |e| e.rp);
@@ -180,7 +176,6 @@ impl Camera {
             None
         };
 
-        // Stock M5 monochrome/sepia/chroma flags + user Picture Settings
         let is_stock_sepia = packed_cm == 1;
         let is_stock_mono = packed_cm == 2;
         let stock_chroma = match packed_cm {
@@ -193,7 +188,6 @@ impl Camera {
         let contrast_q8 = 256 + ((contrast as i32) - 5) * 26;
         let chroma_q8 = ((stock_chroma * (256 + ((sat as i32) - 5) * 32)) >> 8).clamp(0, 640);
 
-        // 5. Develop 640x424 scene through M5 B2Y (Exposure + CCMatrix + MCAS + 4096B 1D LUT) into 4:2:2 Y/Cb/Cr
         let mut y_plane = vec![0u8; LCD_W * LV_H];
         let mut cb_plane = vec![0u8; (LCD_W / 2) * LV_H];
         let mut cr_plane = vec![0u8; (LCD_W / 2) * LV_H];
@@ -274,10 +268,9 @@ impl Camera {
             }
         }
         if sharp != 5 {
-            apply_luma_sharpness(&mut y_plane, LCD_W, LV_H, (sharp as i32) - 5);
+            apply_luma_sharpness(&mut y_plane, LCD_W, LV_H, (sharp as i32) - 5, &mut self.luma_src);
         }
 
-        // 6. Run FR80 spatial_driver (`0x005D1600`) + ycc_engine (`0x005D03C0`) across all 3 planes
         let mut drv = Fr80Emu::new(&self.m5_flash, M5_DELTA);
         let p_y = drv.map_sdram(M5_IMG_VA[0], y_plane.len());
         let p_cb = drv.map_sdram(M5_IMG_VA[1], cb_plane.len());
@@ -317,20 +310,19 @@ impl Camera {
         });
         drv.set_handler(M5_SYM_HW_JPEG_ENCODE, |e| e.rp);
 
-        // Virtual SD card handler for D:\LUT1.BIN .. D:\LUT8.BIN
         let sd_files = self.sd_luts.clone();
-        let open_slot: Rc<RefCell<Option<usize>>> = Rc::new(RefCell::new(None));
+        let open_slot = Rc::new(Cell::new(None));
         {
             let os = Rc::clone(&open_slot);
-            let files = sd_files.clone();
+            let mounted = sd_files.each_ref().map(Option::is_some);
             drv.set_handler(M5_SYM_MDF_OPEN, move |e| {
                 let digit = e.r8(e.r[4] + 6);
                 let idx = digit.wrapping_sub(b'1') as usize;
-                if idx < 8 && files[idx].is_some() {
-                    *os.borrow_mut() = Some(idx);
+                if idx < 8 && mounted[idx] {
+                    os.set(Some(idx));
                     e.r[4] = 3;
                 } else {
-                    *os.borrow_mut() = None;
+                    os.set(None);
                     e.r[4] = u32::MAX;
                 }
                 e.rp
@@ -339,7 +331,7 @@ impl Camera {
         {
             let os = Rc::clone(&open_slot);
             drv.set_handler(M5_SYM_MDF_READ, move |e| {
-                if let Some(idx) = *os.borrow()
+                if let Some(idx) = os.get()
                     && let Some(ref data) = sd_files[idx]
                 {
                     let n = (e.r[6] as usize).min(data.len());

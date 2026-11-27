@@ -19,22 +19,24 @@ Default config (`dp2m.example.fnl`: `24/36` films, `11/11` grids, DOOM enabled):
 - **`ycc_bench` (FR80 emulator)**: see [../hardware.md](../hardware.md#25-color-pipeline--d2ml-sd-card-3d-lut-format) for per-stage insns/pair (`B&W toner fx=0/1`: `23.0` insns/pair on `4704×8`; `fill=1 fx=0`: `29.7`; `fx=1`: `65.2`; `fx=7 fill=1`: `146.3`).
 
 ### M6M ARM946E-S BE (`C78FRM.bin`)
-- **Payload**: `126` hooks, `118` strings, `42` menus, `431` rows (`codegen_all_36_films_and_subset_grids` also verifies `36/36` films + `11/11` grids link within budget).
+- **Payload**: `127` hooks, `118` strings, `42` menus, `431` rows (`codegen_all_36_films_and_subset_grids` also verifies `36/36` films + `11/11` grids link within budget).
 - **Region usage**:
-  - `CODE`: `12,920 / 15,316 B` | `DATA`: `12,436 / 12,800 B` | `LOOKS`: `7,476 / 8,756 B` | `MENU`: `4,148 / 4,672 B`
+  - `CODE`: `13,300 / 15,316 B` | `DATA`: `12,436 / 12,800 B` | `LOOKS`: `7,476 / 8,756 B` | `MENU`: `4,148 / 4,672 B`
   - `DOOM_A`: `4,752 / 4,876 B` | `DOOM_B`: `4,092 / 4,668 B` | `DOOM_C`: `2,180 / 2,492 B` | `DOOM_D`: `1,104 / 2,304 B` | `DOOM_E`: `2,820 / 3,500 B`
 - **Live-view overlays (`m6m_bench`, `draw only` emulated ARM9 insns; host DMA fills/flushes excluded)**:
 
 | Grid | Mode | `default` | `checker` | `white` | `black` | `fine-detail` |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| `7` | Electronic Level | `10,832` | `10,832` | `10,832` | `10,832` | `10,832` |
-| `8` | 21:9 XPan + Level | `29,794` | `29,794` | `29,794` | `29,794` | `29,794` |
-| `10` | 1:1 Square + Level | `63,287` | `63,287` | `63,287` | `63,287` | `63,287` |
-| `11` | Focus Peaking | `615,558` | `368,620` | `368,620` | `368,620` | `1,148,350` |
-| `12` | Peaking + Level | `626,134` | `379,196` | `379,196` | `379,196` | `1,158,926` |
-| `13` | Zebras | `150,310` | `411,112` | `241,724` | `148,444` | `204,719` |
-| `14` | RGB Hist + Level | `154,952` | `150,076` | `150,076` | `150,306` | `160,668` |
-| `17` | False Color (IRE) | `266,756` | `287,772` | `287,772` | `287,772` | `287,354` |
+| `7` | Electronic Level | `10,831` | `10,831` | `10,831` | `10,831` | `10,831` |
+| `8` | 21:9 XPan + Level | `29,793` | `29,793` | `29,793` | `29,793` | `29,793` |
+| `10` | 1:1 Square + Level | `63,286` | `63,286` | `63,286` | `63,286` | `63,286` |
+| `11` | Focus Peaking | `615,557` | `368,619` | `368,619` | `368,619` | `1,148,349` |
+| `12` | Peaking + Level | `626,133` | `379,195` | `379,195` | `379,195` | `1,158,925` |
+| `13` | Zebras | `140,421` | `380,163` | `227,735` | `138,695` | `190,424` |
+| `14` | RGB Hist + Level | `134,428` | `73,409` | `73,409` | `112,153` | `81,691` |
+| `17` | False Color (IRE) | `266,755` | `287,771` | `287,771` | `287,771` | `287,353` |
+| — | Single Hi zebra (direct draw) | `140,177` | `379,919` | `227,491` | `138,451` | `190,180` |
+| — | RGB Histogram (direct draw) | `123,507` | `62,488` | `62,488` | `101,232` | `70,770` |
 
 - **Focus peaking, direct draw (`m6m_bench`)**: independent lane order now reuses adjacent samples, eliminating the writer's stack spill (`360 -> 344 B`, `16 B` less `CODE`). Full-frame scalar oracles cover a dense PRNG frame and threshold 24/72 boundaries; output is byte-exact. Flat scenes are unchanged. The adaptive dense-scene bypass was not included.
 
@@ -47,12 +49,13 @@ Default config (`dp2m.example.fnl`: `24/36` films, `11/11` grids, DOOM enabled):
 
 | Scene | Before low store | Current | Change |
 | --- | ---: | ---: | ---: |
-| `default` | `221,030` | `221,122` | `+0.04%` |
-| `checker` | `852,888` | `869,848` | `+2.0%` |
-| `white` | `318,860` | `318,860` | `0%` |
-| `black` | `852,888` | `429,100` | `-49.7%` |
+| `default` | `221,030` | `217,588` | `-1.6%` |
+| `checker` | `852,888` | `613,334` | `-28.1%` |
+| `white` | `318,860` | `308,266` | `-3.3%` |
+| `black` | `852,888` | `410,026` | `-51.9%` |
+| `fine-detail` | — | `435,718` | — |
 
-  The uniform-shadow path adds `88 B` of `CODE`: two instructions to each non-uniform block containing highlights, and thirteen to each non-uniform block with shadows but no highlights (the all-low probe ahead of the scalar fallback). These are emulator instruction counts, not measured hardware frame times. The dual threshold is the compile-time `ZEBRA_THRESH=242`, not a runtime argument. Two additional full-frame oracles cover all `65,536` ordered adjacent-luma pairs, including every shadow/highlight boundary and SWAR lane carry/borrow combination. Camera A/B remains pending.
+  These are emulator instruction counts, not measured hardware frame times. The dual threshold is the compile-time `ZEBRA_THRESH=242`, not a runtime argument. Two additional full-frame oracles cover all `65,536` ordered adjacent-luma pairs, including every shadow/highlight boundary and SWAR lane carry/borrow combination. Camera A/B remains pending.
 
 - **False Color, direct draw (`m6m_bench`)**: nonzero blocks now use four 16-byte burst stores (two per FB row) instead of eight compare/conditional-store pairs. The all-zero LUT block skip is unchanged; writes of zero-valued words are exact because the caller DMA-zeroes the framebuffer. Independent poisoned full-frame oracles cover all 256 luma values, same-zone/nonuniform-luma blocks, adversarial mixed patterns, one-nonzero-sample blocks, and all-midtone preservation.
 
@@ -68,8 +71,8 @@ Default config (`dp2m.example.fnl`: `24/36` films, `11/11` grids, DOOM enabled):
 
 ## 3. Emulator & verification commands
 
-- `crates/dp2m-emu/src/arm9.rs` uses a direct-fetch SDRAM loop with a 2 MB hook bitmap (`~231 MIPS` overlay / `~493 MIPS` label host rate; `m6m_bench` ~1.0 s wall time). `crates/dp2m-emu/src/fr80/emu.rs` uses direct ROM fetch with a 64 KB SDRAM TLB (`1024` pages) and handler bloom filter.
-- `dp2m verify out`: **601 / 601** checks (`m6m: 308`, `custom: 133`, `labels: 160`) in ~0.80 s; `--artifacts <dir>` writes `labels.png`.
+- `crates/dp2m-emu/src/arm9.rs` uses a direct-fetch SDRAM loop with a 2 MB hook bitmap (`~229 MIPS` overlay / `~481 MIPS` label host rate; `m6m_bench` ~1.0 s wall time). `crates/dp2m-emu/src/fr80/emu.rs` uses direct ROM fetch with a 64 KB SDRAM TLB (`1024` pages) and handler bloom filter.
+- `dp2m verify out`: **601 / 601** checks (`m6m: 308`, `custom: 133`, `labels: 160`) in ~0.60 s; `--artifacts <dir>` writes `labels.png`.
 - `camera_flow` verifies Film page OSD FNV-1a64 (`0x16a06c94433a64d3`), menus, AE, WB, native `SCREEN_PB`, dual-CPU capture, and DOOM gameplay.
 
 ```sh

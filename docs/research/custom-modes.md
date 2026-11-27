@@ -26,7 +26,7 @@ Stock code treats values above 8 as P in the resolver, so a camera downgraded wi
 
 - A slot is a `0x8C` B copy of the current shooting settings at `0xA09396C0` (NVRAM `+0x3C`).
 - C1..C3 slots: `0xA0939818 + i * 0x8C` (NVRAM `+0x194`, `+0x220`, `+0x2AC`). Backup slot: `0xA09399BC` (`+0x338`). All are inside the persisted block; the ROM default slots equal the default settings.
-- Save `0xA0167584(i)`: settings to slot. Recall `0xA016759C(i)` then `0xA016F962` (re-applies about 30 settings). Compare `0xA0167618(i)`: 1 when the slot equals the settings. None of them range-check `i`; `i = 3` would hit the backup slot.
+- Save `0xA0167584(i)`: settings to slot. Recall `0xA016759C(i)` then `0xA016F962` (re-applies about 30 settings). Compare `0xA0167618(i)`: 1 when the slot equals the settings. Save and Recall do not range-check `i` (`i = 3` would hit the backup slot); stock Compare `0xA0167618` checks `i < 3` (`cmp r0,#3; bhs` at `0xA016761C`), which dp2m replaces with `slot_ptr(i)`.
 - Backup `0xA01675B6` (settings to backup) and restore `0xA01675C8`.
 - Stock setter (`switch(new - 4)` at `0xA016FA2E`, table `0xA016FA34`): backup only when stepping P→C1 or Movie→C3, restore only when stepping C1→M/S/A/P or C3→Movie, and no slot reload when coming back from mode 8.
 - Boot `0xA01689BC → 0xA016F400` reloads the slot for modes 5..7, so edits made in a custom mode are lost at power-off.

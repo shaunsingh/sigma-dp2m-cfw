@@ -71,7 +71,7 @@ See [research/updater.md](research/updater.md).
 | --- | --- | --- |
 | `0x80000000..0x800F4C60` | ~979 KB | `.bss`, RTOS fixed pools (`0x8005AB50..0x800EDBE0`), system stack (`sp` init `0x800F4C60` @ `0x482B88`) |
 | `0x800F5000..0x8050DFFF` | ~4.1 MB | Unused after boot (`0x801A0000` @ `0x48311C` is an offline factory RAM test) |
-| `0x80100000..0x8010C800` | ~50.0 KB | **Custom scratch**: halation grids (`0x80100000`, `0x80101100`), fill grid (`0x80102200`), 1D vertically blended row (`0x80103300`), pre-scaled grain LUT (`0x80103400`), SD LUT load buffer (`0x80103500..0x80104560`), row-major `15×17×3` pyramid accumulator (`0x80105000..0x8010C560`) |
+| `0x80100000..0x8010C800` | 50.0 KB | **Custom scratch**: halation grids (`0x80100000` `SCRATCH_HALO_GRID`, `0x80101100` `SCRATCH_HALO_CORE`), fill grid (`0x80102200`), 256 B blur/LUT line (`0x80103300`: scaled halo LUT in driver, then 1D halo/fill rows in engine), pre-scaled grain LUT (`0x80103400`), SD LUT load buffer (`0x80103500..0x80104540`), SD read count / path (`0x80104540`, `0x80104550`), Sakamoto cache magic + cached `lut3d` VA (`0x801047F8`, `'SAK1'`), Sakamoto 3D LUT cache (`0x80104800..0x8010C800`, `4096 × 8 B = 32 KB`) |
 | `0x8050E000..0x80FB0580` | 10.63 MB | Hardware JPEG output buffer (`0x4D4DD6`) |
 | `0x80FB0580..0x81046580` | 600 KB | `PREVIEW_Y` (`0x80FB0580`), `PREVIEW_CB` (`0x80FFB580`), `PREVIEW_CR` (`0x81020D80`) (`0x4D71CC`, `0x4E9758`) |
 | `0x81046580..0x8105A580` | 80 KB | `THUMB_Y/CB/CR` (`0x4E9770..0x4E9780`) — **written concurrently by background EXIF/SD task `0x4E9714`** |
@@ -125,13 +125,13 @@ Additional verified stock M5Slave addresses:
 | --- | --- | --- | --- | --- | --- |
 | `fx=0` | stock HW path | 0 | 0 | 0 | 0 |
 | B&W `fx=0/1` | B&W toner (read-only Y, 2.50 SDRAM/pair) | 23.1 | ~2.4 s | 23.0 | ~2.4 s |
-| `fill=1 fx=0` | X3 Fill only (read-only Cb/Cr) | 30.9 | ~3.3 s | 29.9 | ~3.2 s |
-| `fx=1` | 3D LUT | 87.4 | ~9.2 s | 65.4 | ~6.9 s |
-| `fx=3` | 3D LUT + grain | 135.8 | ~14.3 s | 115.6 | ~12.2 s |
-| `fx=4` | halation | 57.5 | ~6.1 s | 50.9 | ~5.4 s |
-| `fx=5` | 3D LUT + halation | 123.4 | ~13.0 s | 105.1 | ~11.1 s |
-| `fx=7` | 3D LUT + grain + halation | 153.4 | ~16.2 s | 136.0 | ~14.3 s |
-| `fill=1 fx=7` | 3D LUT + grain + halation + X3 Fill | 165.3 | ~17.4 s | 147.6 | ~15.6 s |
+| `fill=1 fx=0` | X3 Fill only (read-only Cb/Cr) | 30.7 | ~3.2 s | 29.7 | ~3.1 s |
+| `fx=1` | 3D LUT | 87.3 | ~9.2 s | 65.2 | ~6.9 s |
+| `fx=3` | 3D LUT + grain | 134.4 | ~14.2 s | 114.5 | ~12.1 s |
+| `fx=4` | halation | 56.5 | ~6.0 s | 49.8 | ~5.2 s |
+| `fx=5` | 3D LUT + halation | 122.2 | ~12.9 s | 103.7 | ~10.9 s |
+| `fx=7` | 3D LUT + grain + halation | 151.7 | ~16.0 s | 134.5 | ~14.2 s |
+| `fill=1 fx=7` | 3D LUT + grain + halation + X3 Fill | 163.5 | ~17.2 s | 146.3 | ~15.4 s |
 
 ---
 

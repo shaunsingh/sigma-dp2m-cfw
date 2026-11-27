@@ -131,7 +131,7 @@ load_sd_lut:
 sd_cd:
     st_ctx  52, r1
     lsl     #8, r0 ; ldi:32 #VA_GRAIN_ENVS, r1 ; add r1, r0 ; st_ctx 44, r0
-    // clamp grain_amp <= 64 so ftg_enter (1024 - 15*scale) stays >= 0 and VA_CLAMP_CENTER stays in bounds
+    // clamp grain_amp <= 64 so ftg_enter (1024 - 15*scale) stays >= 0 and grain bytes stay <= 63 (no lane carry)
     ldi:8   #5, r13 ; ldub @(r13, r8), r0
     ldi:8   #64, r1 ; cmp r1, r0 ; bls sd_ga_ok ; mov r1, r0
 sd_ga_ok:

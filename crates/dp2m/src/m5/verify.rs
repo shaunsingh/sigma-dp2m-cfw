@@ -408,7 +408,7 @@ pub fn verify_m5(s2: &[u8]) -> Result<(), String> {
         .collect();
     let job_res = par_map(&jobs, |&(cm, cs, fill)| -> Result<usize, String> {
         let meta: [u8; 4] = match cm {
-            191.. => [sd[5], sd[6], sd[7], sd[8]],
+            191.. => [sd[5].min(64), sd[6], sd[7], sd[8]],
             9.. => s2[va_off(VA_MODE_META + (cm - 9) * 4)..][..4].try_into().unwrap(),
             _ => [28, 0, 64, 0],
         };

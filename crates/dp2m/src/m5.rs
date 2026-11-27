@@ -102,9 +102,8 @@ fn check_stock_instructions(buf: &[u8]) -> Result<(), String> {
 
 fn scale_meta(mut meta: [u8; 4], cfg: &Config) -> [u8; 4] {
     let (g, h) = (cfg.m5.grain_scale, cfg.m5.halo_scale);
-    if (g - 1.0).abs() > 1e-9 {
-        meta[0] = rint_even((meta[0] as f64) * g).clamp(0.0, 64.0) as u8;
-    }
+    // Unconditional: grain_amp > 64 breaks the engine's per-lane grain bias (1024 - 15 * scale >= 0).
+    meta[0] = rint_even((meta[0] as f64) * g).clamp(0.0, 64.0) as u8;
     if (h - 1.0).abs() > 1e-9 {
         meta[2] = rint_even((meta[2] as f64) * h).clamp(0.0, 255.0) as u8;
     }

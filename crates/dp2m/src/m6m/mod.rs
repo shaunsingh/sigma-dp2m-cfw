@@ -181,6 +181,14 @@ pub fn build_m6m(fw_raw: &[u8], pack: &FilmPack, src: &Path, work: &Path, cfg: &
         .map_err(|e| format!("{}: {e}", src.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("c" | "S")))
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if cfg.m6m.probe {
+                !matches!(name, "doom.c" | "doom_render.c")
+            } else {
+                name != "probe.c"
+            }
+        })
         .collect();
     sources.sort();
     sources.push(work.join("catalog.c"));

@@ -33,6 +33,7 @@
 
  :m6m {:iso50 true
        :bkt5  true
+       :doom  true
        :peaking-threshold 44  ;; sobel thresh (lower = more sensitive)
        :zebra-threshold   242 ;; ~95% ire
        ;; apex q16 min shutter: Auto(1/50.8), 1/15, 1/30, 1/60, 1/125, 1/250, 1/500

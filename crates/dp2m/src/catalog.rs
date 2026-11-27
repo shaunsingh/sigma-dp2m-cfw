@@ -151,6 +151,7 @@ pub const GRIDS: &[Grid] = &[
     Grid { slug: "rgb-hist", label: "RGB Hist + Level" },
     Grid { slug: "frame-7x6", label: "7:6 + Level" },
     Grid { slug: "frame-4x3", label: "4:3 + Level" },
+    Grid { slug: "false-color", label: "False Color (IRE)" },
 ];
 
 pub fn film(slug: &str) -> Option<(usize, &'static Film)> {

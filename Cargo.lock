@@ -3,10 +3,6 @@
 version = 4
 
 [[package]]
-name = "arm9"
-version = "0.1.0"
-
-[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -48,25 +44,20 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 name = "dp2m"
 version = "0.1.0"
 dependencies = [
- "dp2m-sim",
- "fr80",
+ "dp2m-emu",
  "mlua",
  "serde",
 ]
 
 [[package]]
-name = "dp2m-sim"
+name = "dp2m-emu"
 version = "0.1.0"
-dependencies = [
- "arm9",
- "fr80",
-]
 
 [[package]]
 name = "dp2m-web"
 version = "0.1.0"
 dependencies = [
- "dp2m-sim",
+ "dp2m-emu",
 ]
 
 [[package]]
@@ -91,10 +82,6 @@ name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
-
-[[package]]
-name = "fr80"
-version = "0.1.0"
 
 [[package]]
 name = "libc"

@@ -39,3 +39,9 @@ stock stock_pb_info_cm,    0xA0047735
 stock stock_text,          0xA0042685
 stock stock_font_scale,    0xA004226D
 stock stock_disp_init,     0xA0168D0D
+stock stock_screen_post,   0xA0042AED
+stock stock_screen_goto,   0xA0042B7B
+stock stock_osd_clear,     0xA00416A9
+stock stock_osd_commit,    0xA004190F
+stock stock_argb_clear,    0xA0041A61
+stock stock_argb_commit,   0xA0041B49

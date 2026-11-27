@@ -10,67 +10,6 @@
     ld      @(r14, #-144 + \off), \dst
 .endm
 
-// in-place 5-tap separable box blur using a 4-byte history shift register (zero scratch-line copies)
-.macro blur_5tap grid_va, passes, pfx
-    ldi:8   #\passes, r11
-    ldi:8   #51, r3
-\pfx_pass:
-    ldi:32  #\grid_va, r8
-    ld      @(r14, #-44), r6
-    ld      @(r14, #-40), r7
-\pfx_h_row:
-    ldi:8   #5, r0 ; cmp r0, r7 ; blt \pfx_h_next
-    mov     r8, r5
-    ldub    @r5, r4 ; mov r4, r2 ; add #1, r5
-    ldub    @r5, r0 ; add r0, r2 ; lsl #8, r4 ; or r0, r4 ; add #1, r5
-    mov     r5, r12
-    ldub    @r5, r0 ; add r0, r2 ; lsl #8, r4 ; or r0, r4 ; add #1, r5
-    ldub    @r5, r0 ; add r0, r2 ; lsl #8, r4 ; or r0, r4 ; add #1, r5
-    mov     r7, r10 ; add2 #-4, r10
-\pfx_h_x:
-    ldub    @r5, r0 ; add #1, r5
-    add     r0, r2
-    mov     r2, r1 ; mul r3, r1 ; mov MDL, r1 ; lsr #8, r1
-    stb     r1, @r12 ; add #1, r12
-    mov     r4, r13 ; lsr2 #24, r13 ; sub r13, r2
-    lsl     #8, r4 ; or r0, r4
-    add2    #-1, r10 ; cmp #0, r10 ; bgt \pfx_h_x
-    stb     r1, @r12 ; add #1, r12 ; stb r1, @r12
-    ldi:8   #2, r13 ; ldub @(r13, r8), r0
-    stb     r0, @r8 ; ldi:8 #1, r13 ; stb r0, @(r13, r8)
-\pfx_h_next:
-    add     r7, r8 ; add2 #-1, r6 ; cmp #0, r6 ; bgt \pfx_h_row
-
-    ldi:32  #\grid_va, r8
-    ld      @(r14, #-40), r6
-    mov     r6, r10
-    ld      @(r14, #-44), r9
-\pfx_v_col:
-    ldi:8   #5, r0 ; cmp r0, r9 ; blt \pfx_v_next
-    mov     r8, r5
-    ldub    @r5, r4 ; mov r4, r2 ; add r10, r5
-    ldub    @r5, r0 ; add r0, r2 ; lsl #8, r4 ; or r0, r4 ; add r10, r5
-    mov     r5, r12
-    ldub    @r5, r0 ; add r0, r2 ; lsl #8, r4 ; or r0, r4 ; add r10, r5
-    ldub    @r5, r0 ; add r0, r2 ; lsl #8, r4 ; or r0, r4 ; add r10, r5
-    mov     r9, r7 ; add2 #-4, r7
-\pfx_v_y:
-    ldub    @r5, r0 ; add r10, r5
-    add     r0, r2
-    mov     r2, r1 ; mul r3, r1 ; mov MDL, r1 ; lsr #8, r1
-    stb     r1, @r12 ; add r10, r12
-    mov     r4, r13 ; lsr2 #24, r13 ; sub r13, r2
-    lsl     #8, r4 ; or r0, r4
-    add2    #-1, r7 ; cmp #0, r7 ; bgt \pfx_v_y
-    stb     r1, @r12 ; add r10, r12 ; stb r1, @r12
-    mov     r8, r5 ; add r10, r5 ; mov r5, r12 ; add r10, r12
-    ldub    @r12, r0 ; stb r0, @r8 ; stb r0, @r5
-\pfx_v_next:
-    add     #1, r8 ; add2 #-1, r6 ; cmp #0, r6 ; bgt \pfx_v_col
-
-    add2    #-1, r11 ; cmp #0, r11 ; bgt.far \pfx_pass
-.endm
-
     st      r4, @-r15
     st      r5, @-r15
     st      r6, @-r15
@@ -183,10 +122,12 @@ load_sd_lut:
     mov     r4, r9
     mov     r8, r4 ; ldi:32 #SYM_MDF_CLOSE, r12 ; call @r12
     cmp     #0, r9 ; bne meta_done
+    ldi:32  #SCRATCH_SD_NREAD, r0 ; ld @r0, r0 ; ldi:20 #0x1040, r1 ; cmp r1, r0 ; bne meta_done
     ldi:32  #SCRATCH_SD_LUT, r8
     ld      @r8, r0 ; ldi:32 #0x44324D4C, r1 ; cmp r1, r0 ; bne meta_done
     ldi:8   #5, r13 ; ldub @(r13, r8), r0 ; st_ctx 48, r0
     ldi:8   #6, r13 ; ldub @(r13, r8), r0
+    cmp     #2, r0 ; bhi meta_done
     ldi:8   #1, r1 ; cmp #2, r0 ; bne sd_cd ; ldi:8 #0, r1
 sd_cd:
     st_ctx  52, r1
@@ -285,8 +226,13 @@ div_pdy_d:
     bra     pyr_dispatch
 
 pyr_small:
-    ld_ctx  12, r0 ; lsr #4, r0 ; st r0, @(r14, #-40) ; st_ctx 64, r0
-    ld_ctx  16, r0 ; lsr #4, r0 ; st r0, @(r14, #-44) ; st_ctx 68, r0
+    ldi:8   #63, r1
+    ld_ctx  12, r0 ; lsr #4, r0 ; cmp r1, r0 ; ble ps_w_ok ; mov r1, r0
+ps_w_ok:
+    st      r0, @(r14, #-40) ; st_ctx 64, r0
+    ld_ctx  16, r0 ; lsr #4, r0 ; cmp r1, r0 ; ble ps_h_ok ; mov r1, r0
+ps_h_ok:
+    st      r0, @(r14, #-44) ; st_ctx 68, r0
     ldi:8   #4, r0 ; st_ctx 72, r0
     ld_ctx  0, r9
     ld_ctx  20, r10 ; lsl #4, r10
@@ -295,61 +241,76 @@ pyr_small:
 
 pyr_dispatch:
     ld      @(r14, #-44), r6
+    mov     r3, r12 ; lsr #1, r12 ; st r12, @(r14, #-48)
     ld      @(r14, #-32), r0 ; cmp #0, r0 ; beq pyr_fill_only
+
+    // precompute scaled halo optical LUT into SCRATCH_BLUR_LINE (eliminates mul + stack load per grid cell!)
+    ldi:32  #VA_HALO_OPT_LUT, r5
+    ldi:32  #SCRATCH_BLUR_LINE, r12
+    ldi:20  #256, r13
+ph_lut_lp:
+    add2    #-1, r13
+    ldub    @(r13, r5), r1 ; mul r0, r1 ; mov MDL, r1 ; lsr #8, r1
+    stb     r1, @(r13, r12)
+    cmp     #0, r13 ; bgt ph_lut_lp
+
     ld      @(r14, #-28), r0 ; cmp #0, r0 ; beq pyr_halo_only
 
-    // both halation & fill active: r8 = HALO_GRID, +0x1100 = HALO_CORE, +0x2200 = FILL_GRID, r4 = y_mean sum
+    // both halation & fill active: r12=scaled halo LUT, r6=pdx/2, r10=r11+pdx/2, r9=0x01100 hoisted!
+    st      r6, @(r14, #-148)
+    st      r9, @(r14, #-152)
+    st      r10, @(r14, #-156)
+    ld      @(r14, #-48), r6
+    mov     r11, r10 ; add r6, r10
+    ldi:20  #0x01100, r9
     ldi:32  #SCRATCH_HALO_GRID, r8
     ldi:8   #0, r4
 pyr_by:
     ld      @(r14, #-40), r7
-    mov     r9, r5
+    ld      @(r14, #-152), r5
 pyr_bx:
     ldub    @r5, r0 ; mov r0, r2
-    mov     r3, r13 ; lsr #1, r13
-    ldub    @(r13, r5), r1 ; add r1, r2
+    mov     r6, r13 ; ldub @(r13, r5), r1 ; add r1, r2
     cmp     r0, r1 ; ble pbm1 ; mov r1, r0
 pbm1:
-    mov     r11, r13 ; ldub @(r13, r5), r1 ; add r1, r2
+    mov     r10, r13 ; ldub @(r13, r5), r1 ; add r1, r2
     cmp     r0, r1 ; ble pbm2 ; mov r1, r0
 pbm2:
-    mov     r3, r12 ; lsr #1, r12 ; add r12, r13
-    ldub    @(r13, r5), r1 ; add r1, r2
+    mov     r11, r13 ; ldub @(r13, r5), r1 ; add r1, r2
     cmp     r0, r1 ; ble pbm3 ; mov r1, r0
 pbm3:
     lsr     #2, r2
     ldi:20  #0x02200, r13 ; stb r2, @(r13, r8)
     add     r2, r4
 
-    ldi:32  #VA_HALO_OPT_LUT, r12 ; mov r0, r13 ; ldub @(r13, r12), r0
-    ld      @(r14, #-32), r1 ; mul r1, r0 ; mov MDL, r0 ; lsr #8, r0
+    mov     r0, r13 ; ldub @(r13, r12), r0
     stb     r0, @r8
-    ldi:20  #0x01100, r13 ; stb r0, @(r13, r8)
+    mov     r9, r13 ; stb r0, @(r13, r8)
 
     add     #1, r8
     add     r3, r5
     add2    #-1, r7 ; cmp #0, r7 ; bgt pyr_bx
-    add     r10, r9 ; add2 #-1, r6 ; cmp #0, r6 ; bgt pyr_by
+    ld      @(r14, #-152), r0 ; ld @(r14, #-156), r1 ; add r1, r0 ; st r0, @(r14, #-152)
+    ld      @(r14, #-148), r0 ; add2 #-1, r0 ; st r0, @(r14, #-148) ; cmp #0, r0 ; bgt pyr_by
     jmp.far finish_ym
 
 pyr_halo_only:
+    // r12=scaled halo LUT, r2=pdx/2, r4=r11+pdx/2 hoisted — zero stack loads or muls in pyr_hx!
     ldi:32  #SCRATCH_HALO_GRID, r8
-    ld      @(r14, #-32), r4
+    ld      @(r14, #-48), r2
+    mov     r11, r4 ; add r2, r4
 pyr_hy:
     ld      @(r14, #-40), r7
     mov     r9, r5
 pyr_hx:
     ldub    @r5, r0
-    mov     r3, r13 ; lsr #1, r13
-    ldub    @(r13, r5), r1 ; cmp r0, r1 ; ble phm1 ; mov r1, r0
+    mov     r2, r13 ; ldub @(r13, r5), r1 ; cmp r0, r1 ; ble phm1 ; mov r1, r0
 phm1:
-    mov     r11, r13 ; ldub @(r13, r5), r1 ; cmp r0, r1 ; ble phm2 ; mov r1, r0
+    mov     r4, r13 ; ldub @(r13, r5), r1 ; cmp r0, r1 ; ble phm2 ; mov r1, r0
 phm2:
-    mov     r3, r12 ; lsr #1, r12 ; add r12, r13
-    ldub    @(r13, r5), r1 ; cmp r0, r1 ; ble phm3 ; mov r1, r0
+    mov     r11, r13 ; ldub @(r13, r5), r1 ; cmp r0, r1 ; ble phm3 ; mov r1, r0
 phm3:
-    ldi:32  #VA_HALO_OPT_LUT, r12 ; mov r0, r13 ; ldub @(r13, r12), r0
-    mul     r4, r0 ; mov MDL, r0 ; lsr #8, r0
+    mov     r0, r13 ; ldub @(r13, r12), r0
     stb     r0, @r8
     ldi:20  #0x01100, r13 ; stb r0, @(r13, r8)
     add     #1, r8
@@ -361,7 +322,6 @@ phm3:
 pyr_fill_only:
     ldi:32  #SCRATCH_FILL_GRID, r8
     ldi:8   #0, r4
-    mov     r3, r12 ; lsr #1, r12
 pyr_fy:
     ld      @(r14, #-40), r7
     mov     r9, r5
@@ -389,12 +349,12 @@ div_skip:
     lsr     #1, r4 ; lsr #1, r5 ; cmp #0, r5 ; bgt div_ym
     ldi:8   #128, r0 ; add r0, r2 ; lsr #1, r2 ; st_ctx 84, r2
 
-    ld      @(r14, #-32), r0 ; cmp #0, r0 ; beq.far chk_fill_blur
+    ld      @(r14, #-32), r0 ; cmp #0, r0 ; beq chk_fill_blur
 
 do_halo_blur:
     // two-scale halo psf: 1-pass core + 3-pass tail, 50/50 SWAR blend
-    blur_5tap SCRATCH_HALO_CORE, 1, hcore
-    blur_5tap SCRATCH_HALO_GRID, 3, hwide
+    ldi:32  #SCRATCH_HALO_CORE, r0 ; ldi:8 #1, r11 ; call blur_5tap_sub
+    ldi:32  #SCRATCH_HALO_GRID, r0 ; ldi:8 #3, r11 ; call blur_5tap_sub
     ld      @(r14, #-40), r0 ; ld @(r14, #-44), r1 ; mul r1, r0 ; mov MDL, r6
     ldi:32  #SCRATCH_HALO_GRID, r8 ; ldi:32 #SCRATCH_HALO_CORE, r9
     ldi:32  #0xFEFEFEFE, r3
@@ -415,11 +375,193 @@ hblend_d:
     ldi:32  #SCRATCH_HALO_GRID, r0 ; st_ctx 76, r0
 
 chk_fill_blur:
-    ld      @(r14, #-28), r0 ; cmp #0, r0 ; beq.far run_passes
-    blur_5tap SCRATCH_FILL_GRID, 3, x3f
+    ld      @(r14, #-28), r0 ; cmp #0, r0 ; beq run_passes
+    ldi:32  #SCRATCH_FILL_GRID, r0 ; ldi:8 #3, r11 ; call blur_5tap_sub
     ldi:32  #SCRATCH_FILL_GRID, r0 ; st_ctx 80, r0
 
 run_passes:
+    ld_ctx  36, r0 ; cmp #0, r0 ; beq rp_call
+    ldi:32  #SCRATCH_SAK_MAGIC, r8
+    ldi:32  #0x53414B31, r1
+    ld      @r8, r2 ; cmp r1, r2 ; bne sak_cache_clear
+    cmp     #0, r0 ; blt sak_cache_clear
+    ldi:8   #4, r13 ; ld @(r13, r8), r2 ; cmp r0, r2 ; beq rp_call
+sak_cache_clear:
+    ldi:8   #0, r2
+    ldi:32  #SCRATCH_SAK_CACHE, r9
+    ldi:20  #1024, r10
+    ldi:8   #8, r13
+    ldi:8   #16, r3
+sak_clr_lp:
+    st      r2, @r9 ; st r2, @(r13, r9) ; add r3, r9
+    st      r2, @r9 ; st r2, @(r13, r9) ; add r3, r9
+    add2    #-1, r10 ; cmp #0, r10 ; bgt sak_clr_lp
+    st      r1, @r8
+    ldi:8   #4, r13 ; st r0, @(r13, r8)
+rp_call:
     mov     r14, r4 ; ldi:8 #144, r0 ; sub r0, r4
     ldi:32  #VA_YCC_SUB, r12 ; call @r12
     jmp.far done_exit
+
+// 2-row SWAR horizontal step (max sum*51 = 1275*51 = 65025 < 65536 -> 0 carry across 16-bit lanes!)
+.macro b5_h2_step ring
+    ldub    @r5, r0 ; lsl2 #16, r0
+    ldub    @(r13, r5), r1 ; or r1, r0 ; add #1, r5
+    add     r0, r2
+    mov     r2, r1 ; mul r3, r1 ; mov MDL, r1
+    mov     r1, r10 ; lsr2 #24, r10 ; stb r10, @r12
+    lsr     #8, r1 ; stb r1, @(r13, r12) ; add #1, r12
+    sub     \ring, r2 ; mov r0, \ring
+.endm
+
+// 2-column SWAR vertical preload & step (lduh/sth on 2-byte aligned even-width grids)
+.macro b5_v2_load dst
+    lduh    @r5, \dst ; add r10, r5
+    mov     \dst, r1 ; lsr #8, r1 ; lsl2 #16, r1
+    extub   \dst ; or r1, \dst
+.endm
+
+.macro b5_v2_step ring
+    lduh    @r5, r0 ; add r10, r5
+    mov     r0, r1 ; lsr #8, r1 ; lsl2 #16, r1
+    extub   r0 ; or r1, r0
+    add     r0, r2
+    mov     r2, r1 ; mul r3, r1 ; mov MDL, r1
+    mov     r1, r13 ; lsr2 #24, r13 ; lsl #8, r13
+    lsr     #8, r1 ; extub r1 ; or r13, r1
+    sth     r1, @r12 ; add r10, r12
+    sub     \ring, r2 ; mov r0, \ring
+.endm
+
+// in-place 5-tap separable box blur: r0 = grid VA, r11 = passes; @(r14,#-40)=gw, @(r14,#-44)=gh
+blur_5tap_sub:
+    st      r0, @(r14, #-52)
+    st      r11, @(r14, #-56)
+    ldi:8   #51, r3
+b5_pass:
+    ld      @(r14, #-52), r8
+    ld      @(r14, #-44), r6
+    ld      @(r14, #-40), r7
+    ldi:8   #5, r0 ; cmp r0, r7 ; blt.far b5_v_start
+    cmp     #2, r6 ; blt.far b5_h_row
+    st      r8, @(r14, #-148)
+    st      r6, @(r14, #-152)
+    mov     r7, r13
+b5_h2_lp:
+    ld      @(r14, #-148), r5
+    ldub    @r5, r4 ; lsl2 #16, r4 ; ldub @(r13, r5), r0 ; or r0, r4 ; mov r4, r2 ; add #1, r5
+    ldub    @r5, r6 ; lsl2 #16, r6 ; ldub @(r13, r5), r0 ; or r0, r6 ; add r6, r2 ; add #1, r5
+    mov     r5, r12
+    ldub    @r5, r8 ; lsl2 #16, r8 ; ldub @(r13, r5), r0 ; or r0, r8 ; add r8, r2 ; add #1, r5
+    ldub    @r5, r9 ; lsl2 #16, r9 ; ldub @(r13, r5), r0 ; or r0, r9 ; add r9, r2 ; add #1, r5
+    mov     r13, r7 ; add2 #-4, r7
+b5_h2_x4:
+    cmp     #4, r7 ; blt b5_h2_t0
+    b5_h2_step r4
+    b5_h2_step r6
+    b5_h2_step r8
+    b5_h2_step r9
+    add2    #-4, r7 ; bra b5_h2_x4
+b5_h2_t0:
+    cmp     #0, r7 ; ble b5_h2_edge
+    b5_h2_step r4
+    mov     r6, r4 ; mov r8, r6 ; mov r9, r8
+    add2    #-1, r7 ; bra b5_h2_t0
+b5_h2_edge:
+    stb     r10, @r12 ; stb r1, @(r13, r12) ; add #1, r12
+    stb     r10, @r12 ; stb r1, @(r13, r12)
+    ld      @(r14, #-148), r8
+    mov     r8, r5 ; add #2, r5
+    ldub    @r5, r0 ; stb r0, @r8 ; add #1, r8 ; stb r0, @r8 ; add2 #-1, r8
+    ldub    @(r13, r5), r0 ; stb r0, @(r13, r8) ; add #1, r8 ; stb r0, @(r13, r8) ; add2 #-1, r8
+    add     r13, r8 ; add r13, r8 ; st r8, @(r14, #-148)
+    ld      @(r14, #-152), r6 ; add2 #-2, r6 ; st r6, @(r14, #-152)
+    cmp     #2, r6 ; bge.far b5_h2_lp
+    mov     r13, r7
+    cmp     #0, r6 ; ble b5_v_start
+
+b5_h_row:
+    mov     r8, r5
+    ldub    @r5, r4 ; mov r4, r2 ; add #1, r5
+    ldub    @r5, r0 ; add r0, r2 ; lsl #8, r4 ; or r0, r4 ; add #1, r5
+    mov     r5, r12
+    ldub    @r5, r0 ; add r0, r2 ; lsl #8, r4 ; or r0, r4 ; add #1, r5
+    ldub    @r5, r0 ; add r0, r2 ; lsl #8, r4 ; or r0, r4 ; add #1, r5
+    mov     r7, r10 ; add2 #-4, r10
+b5_h_x:
+    ldub    @r5, r0 ; add #1, r5
+    add     r0, r2
+    mov     r2, r1 ; mul r3, r1 ; mov MDL, r1 ; lsr #8, r1
+    stb     r1, @r12 ; add #1, r12
+    mov     r4, r13 ; lsr2 #24, r13 ; sub r13, r2
+    lsl     #8, r4 ; or r0, r4
+    add2    #-1, r10 ; cmp #0, r10 ; bgt b5_h_x
+    stb     r1, @r12 ; add #1, r12 ; stb r1, @r12
+    ldi:8   #2, r13 ; ldub @(r13, r8), r0
+    stb     r0, @r8 ; ldi:8 #1, r13 ; stb r0, @(r13, r8)
+    add     r7, r8 ; add2 #-1, r6 ; cmp #0, r6 ; bgt b5_h_row
+
+b5_v_start:
+    ld      @(r14, #-44), r9
+    ldi:8   #5, r0 ; cmp r0, r9 ; blt.far b5_pass_next
+    ld      @(r14, #-52), r8
+    ld      @(r14, #-40), r6
+    mov     r6, r10
+    ldi:8   #1, r0 ; and r10, r0 ; bne.far b5_v_col
+    st      r8, @(r14, #-148)
+    st      r6, @(r14, #-152)
+b5_v2_lp:
+    ld      @(r14, #-148), r5
+    b5_v2_load r4 ; mov r4, r2
+    b5_v2_load r6 ; add r6, r2
+    mov     r5, r12
+    b5_v2_load r8 ; add r8, r2
+    b5_v2_load r9 ; add r9, r2
+    ld      @(r14, #-44), r7 ; add2 #-4, r7
+b5_v2_y4:
+    cmp     #4, r7 ; blt b5_v2_t0
+    b5_v2_step r4
+    b5_v2_step r6
+    b5_v2_step r8
+    b5_v2_step r9
+    add2    #-4, r7 ; bra b5_v2_y4
+b5_v2_t0:
+    cmp     #0, r7 ; ble b5_v2_edge
+    b5_v2_step r4
+    mov     r6, r4 ; mov r8, r6 ; mov r9, r8
+    add2    #-1, r7 ; bra b5_v2_t0
+b5_v2_edge:
+    sth     r1, @r12 ; add r10, r12 ; sth r1, @r12
+    ld      @(r14, #-148), r8
+    mov     r8, r5 ; add r10, r5 ; mov r5, r12 ; add r10, r12
+    lduh    @r12, r0 ; sth r0, @r8 ; sth r0, @r5
+    add     #2, r8 ; st r8, @(r14, #-148)
+    ld      @(r14, #-152), r6 ; add2 #-2, r6 ; st r6, @(r14, #-152)
+    cmp     #2, r6 ; bge.far b5_v2_lp
+    bra     b5_pass_next
+
+b5_v_col:
+    mov     r8, r5
+    ldub    @r5, r4 ; mov r4, r2 ; add r10, r5
+    ldub    @r5, r0 ; add r0, r2 ; lsl #8, r4 ; or r0, r4 ; add r10, r5
+    mov     r5, r12
+    ldub    @r5, r0 ; add r0, r2 ; lsl #8, r4 ; or r0, r4 ; add r10, r5
+    ldub    @r5, r0 ; add r0, r2 ; lsl #8, r4 ; or r0, r4 ; add r10, r5
+    mov     r9, r7 ; add2 #-4, r7
+b5_v_y:
+    ldub    @r5, r0 ; add r10, r5
+    add     r0, r2
+    mov     r2, r1 ; mul r3, r1 ; mov MDL, r1 ; lsr #8, r1
+    stb     r1, @r12 ; add r10, r12
+    mov     r4, r13 ; lsr2 #24, r13 ; sub r13, r2
+    lsl     #8, r4 ; or r0, r4
+    add2    #-1, r7 ; cmp #0, r7 ; bgt b5_v_y
+    stb     r1, @r12 ; add r10, r12 ; stb r1, @r12
+    mov     r8, r5 ; add r10, r5 ; mov r5, r12 ; add r10, r12
+    ldub    @r12, r0 ; stb r0, @r8 ; stb r0, @r5
+    add     #1, r8 ; add2 #-1, r6 ; cmp #0, r6 ; bgt b5_v_col
+
+b5_pass_next:
+    ld      @(r14, #-56), r11 ; add2 #-1, r11 ; st r11, @(r14, #-56)
+    cmp     #0, r11 ; bgt.far b5_pass
+    ret

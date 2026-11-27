@@ -5,7 +5,10 @@
 struct lv_planes { uint32_t y, cb, cr, fcnt; };
 volatile struct lv_planes lv_planes; /* written by lv_ycap_hook */
 
+#define GAMMA_MAGIC 0x474D4131u
+
 static struct {
+    uint32_t magic;
     const void *lut;   /* stock gamma for the current LV mode */
     uint32_t sz;
     uint32_t applied;  /* packed mode the B2Y gamma currently holds */
@@ -41,7 +44,7 @@ static void gamma_apply(uint32_t packed) {
     if (l && (l->flags & LV_KNOTS)) {
         expand_knots(l->knots, (uint32_t *)(void *)gamma_buf);
         stock_b2y_set_gamma(0, gamma_buf, sizeof gamma_buf);
-    } else if (gamma.lut) {
+    } else if (gamma.magic == GAMMA_MAGIC && gamma.lut) {
         stock_b2y_set_gamma(0, gamma.lut, gamma.sz);
     }
     gamma.applied = packed;
@@ -50,6 +53,7 @@ static void gamma_apply(uint32_t packed) {
 // 0xA0039890: stock programs gamma only on LV mode change (ch 0; GMACTL bit 0 stays clear)
 void lv_gamma_hook(uint32_t ch, const void *lut, uint32_t sz) {
     (void)ch;
+    gamma.magic = GAMMA_MAGIC;
     gamma.lut = lut;
     gamma.sz = sz;
     gamma_apply(packed_cm(stock_get_cm()));
@@ -61,7 +65,7 @@ void lv_mono_hook(uint32_t lv_mode, uint32_t cm) {
     uint32_t packed = packed_cm(cm);
     if (cm >= FILM_MODE0) cm = dp2m_films[cm - FILM_MODE0].mono ? 2u : 3u;
     stock_lv_mono(lv_mode, cm);
-    if (packed != gamma.applied) gamma_apply(packed);
+    if (gamma.magic != GAMMA_MAGIC || packed != gamma.applied) gamma_apply(packed);
 }
 HOOK_CALL(0xA003A1E6, lv_mono_hook, 0xA003989C);
 

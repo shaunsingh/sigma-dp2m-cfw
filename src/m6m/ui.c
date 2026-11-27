@@ -60,6 +60,8 @@ NV_SETTING(halation, NV_HALATION, 1u, (void)0)
 NV_SETTING(fill, NV_FILL, 3u, (void)0)
 NV_SETTING(minshutter, NV_MINSHUTTER, 6u, (void)0)
 NV_SETTING(peakcol, NV_PEAKCOL, 3u, (void)0)
+NV_SETTING(peaksens, NV_PEAKSENS, 3u, (void)0)
+NV_SETTING(zebralvl, NV_ZEBRALVL, 3u, (void)0)
 
 uint32_t nv_get_none(void) { return 0; }
 void nv_set_none(uint32_t v) { (void)v; }

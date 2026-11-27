@@ -1,0 +1,1113 @@
+//! m6m suite (226 checks): invariants, hooks, menus, strings, NVRAM settings, bracketing,
+//! auto-ISO min shutter, IPC packing, makernotes, Live View B2Y, Y-cap, HUD overlays, updater & package.
+
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs;
+use std::rc::Rc;
+use std::cell::RefCell;
+
+use crate::image::{BSS, END, FPGA, IPL_LEN, elf_section};
+use crate::machine::{Machine, Nor, SCRATCH, STACK, outside};
+use crate::stock;
+
+use super::{Build, FilmEntry, Report, menu_tables, read_rows_img, read_rows_mach};
+
+const FILM_MODE0: u32 = 9;
+const NV_RESERVED: (u32, u32) = (stock::NV_BLOCK + 0x04, stock::NV_BLOCK + 0x14);
+const LV_DIRTY: (u32, u32) = (0xA07B_1398, 0xA07B_139C);
+const LV_CMCM: u32 = 1;
+const LV_MONO_Q7: u32 = 2;
+const LV_KNOTS: u32 = 4;
+const PAGE_RESET: u32 = 0xA005_8A0A;
+const PAGE_LIST: u32 = 0xA07F_230E;
+const SID0: u32 = 672;
+const MN_SWITCH_SETUP: u32 = 0xA014_8CE4;
+const MN_SWITCH_DONE: u32 = 0xA014_8D2E;
+const MN_TAG_3D: u32 = 0xA07F_7D78;
+const MN_TAG_59: u32 = 0xA07F_8320;
+
+fn paper_nv(cls: u32) -> &'static str {
+    match cls {
+        1 => "color_paper",
+        2 => "bw_paper",
+        3 => "lut_slot",
+        _ => "",
+    }
+}
+
+fn qs_slot_of(getter_va: u32) -> Option<(u32, u32)> {
+    match getter_va {
+        0xA016_84FE => Some((0, 0)),
+        0xA016_8504 => Some((0, 1)),
+        0xA016_850A => Some((0, 2)),
+        0xA016_8510 => Some((0, 3)),
+        0xA016_8516 => Some((1, 0)),
+        0xA016_851C => Some((1, 1)),
+        0xA016_8522 => Some((1, 2)),
+        0xA016_8528 => Some((1, 3)),
+        _ => None,
+    }
+}
+
+fn menu_map(b: &Build) -> BTreeMap<u32, u32> {
+    let mut out = BTreeMap::new();
+    for name in b.catalog.menus.keys() {
+        if let Some(hex) = name.strip_prefix("m_")
+            && !hex.is_empty()
+            && hex.bytes().all(|c| c.is_ascii_hexdigit())
+            && let Ok(id) = u32::from_str_radix(hex, 16)
+        {
+            out.insert(id, b.sym(name));
+        }
+    }
+    out
+}
+
+fn packed_of(f: &FilmEntry, nv: &HashMap<&str, u32>) -> u32 {
+    if f.paper_cls == 0 {
+        return f.packed;
+    }
+    let p = nv.get(paper_nv(f.paper_cls)).copied().unwrap_or(0);
+    f.packed + if (1..=8).contains(&p) { p - 1 } else { f.auto_paper }
+}
+
+fn expand_knots(k: &[u8; 18]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1024);
+    let mut i = 0;
+    for (sh, cnt) in [(4u32, 8usize), (6, 4), (7, 5)] {
+        for _ in 0..cnt {
+            let y0 = k[i] as i32;
+            let dy = k[i + 1] as i32 - y0;
+            for s in 0..(1i32 << sh) {
+                let v = y0 + ((dy * s + (1 << (sh - 1))) >> sh);
+                out.push((v & 0xFF) as u8);
+            }
+            i += 1;
+        }
+    }
+    out
+}
+
+fn lv_matrix(cmcm: &[i32; 9], flags: u32, cc: &[i32; 9]) -> [u16; 14] {
+    let mut m = [0u16; 14];
+    m[9] = 0x004D;
+    m[10] = 0x0096;
+    m[11] = 0x001D;
+    m[12] = 0x0200;
+    for i in 0..3 {
+        for j in 0..3 {
+            let v = if flags & LV_MONO_Q7 != 0 {
+                cmcm[i * 3 + j]
+            } else {
+                let s = (cmcm[i * 3] * cc[j] + cmcm[i * 3 + 1] * cc[3 + j] + cmcm[i * 3 + 2] * cc[6 + j] + 512) >> 10;
+                s.clamp(-2047, 2047)
+            };
+            m[i * 3 + j] = (v as u16) & 0x0FFF;
+        }
+    }
+    m
+}
+
+fn check_invariants(b: &Build, r: &mut Report) {
+    r.check(b.img.c78[..IPL_LEN] == b.stock.c78[..IPL_LEN], "IPL is stock");
+    r.check(
+        b.img.rd(FPGA.0, (FPGA.1 - FPGA.0) as usize) == b.stock.rd(FPGA.0, (FPGA.1 - FPGA.0) as usize),
+        "FPGA bitstream is stock",
+    );
+    r.check(
+        b.img.rd(BSS, (END - BSS) as usize) == b.stock.rd(BSS, (END - BSS) as usize),
+        ".bss tail is stock",
+    );
+    r.eq(b.img.u32(0xA004_D3D0), 0xA07E_EFCC, "shared literal 0xA004D3D0 intact");
+    r.check(
+        b.img.rd(0xA005_D924, 0xA005_F1A0 - 0xA005_D924) == b.stock.rd(0xA005_D924, 0xA005_F1A0 - 0xA005_D924),
+        "live screens 50..55 intact",
+    );
+}
+
+fn check_hooks(b: &Build, r: &mut Report) -> Result<(), String> {
+    let elf_raw = fs::read(b.dir.join("m6m/m6m.elf")).map_err(|e| format!("read m6m.elf: {e}"))?;
+    let sec = elf_section(&elf_raw, b".dp2m.hooks")?;
+    let n = sec.len() / 16;
+    r.check(n > 0 && sec.len() == n * 16, format!(".dp2m.hooks has {n} records"));
+    let (mut bad_stock, mut bad_img) = (Vec::new(), Vec::new());
+    for chunk in sec.as_chunks::<16>().0 {
+        let kind = u32::from_be_bytes(chunk[0..4].try_into().unwrap());
+        let site = u32::from_be_bytes(chunk[4..8].try_into().unwrap());
+        let target = u32::from_be_bytes(chunk[8..12].try_into().unwrap());
+        let expect = u32::from_be_bytes(chunk[12..16].try_into().unwrap());
+        let st_ok = match kind {
+            1 => b.stock.bl_target(site) == Some(expect & !1),
+            2 | 3 => b.stock.u32(site) == expect,
+            4 => b.stock.u16(site) as u32 == expect,
+            _ => false,
+        };
+        let im_ok = match kind {
+            1 | 2 => b.img.bl_target(site) == Some(target & !1) && (b.img.u16(site + 2) & 0xF800) == 0xF800,
+            3 => b.img.u32(site) == target,
+            4 => b.img.u16(site) == (target as u16),
+            _ => false,
+        };
+        if !st_ok {
+            bad_stock.push((kind, site));
+        }
+        if !im_ok {
+            bad_img.push((kind, site));
+        }
+    }
+    r.eq(bad_stock, vec![], format!(".dp2m.hooks expect values match stock across all {n} sites"));
+    r.eq(bad_img, vec![], format!(".dp2m.hooks patches applied in C78FRM.bin across all {n} sites"));
+
+    let ret0 = b.sym("dp2m_ret0") | 1;
+    let doom_scr = b.syms.get("doom_screen").map(|s| s.va() | 1);
+    let dead_ok = (0xA07D_EBAC..0xA07D_EBF0).step_by(4).all(|s| {
+        let st = b.stock.u32(s) & !1;
+        let exp = if s == 0xA07D_EBAC { doom_scr.unwrap_or(ret0) } else { ret0 };
+        (0xA005_9D50..0xA005_D924).contains(&st) && b.img.u32(s) == exp
+    });
+    r.check(dead_ok, "retired factory screen vtable slots 33..49 -> doom_screen / dp2m_ret0");
+    r.check(
+        b.img.rd(0xA07D_EB28, 0x84) == b.stock.rd(0xA07D_EB28, 0x84)
+            && b.img.rd(0xA07D_EBF0, 0x1C) == b.stock.rd(0xA07D_EBF0, 0x1C),
+        "live screen vtable slots 0..32 & 50..55 intact",
+    );
+    let mut m = Machine::new(&b.img, 0);
+    r.eq(m.call(b.sym("dp2m_ret0"), &[])?, 0, "dp2m_ret0 returns 0");
+    Ok(())
+}
+
+fn check_menus(b: &Build, r: &mut Report) -> Result<(), String> {
+    let mut m = Machine::new(&b.img, 0);
+    let mut ms = Machine::new(&b.stock, 0);
+    m.load_nv_defaults();
+    ms.load_nv_defaults();
+
+    let gmap = menu_map(b);
+    let (film_page, paper, paper0, qs) = (
+        b.cat("MENU_FILM_PAGE"),
+        b.cat("MENU_PAPER"),
+        b.cat("MENU_PAPER_CLS0"),
+        b.cat("MENU_QS_COPY"),
+    );
+    r.check(gmap.contains_key(&film_page), format!("Film page {film_page:#x} in the generated menu map"));
+    let names: HashMap<u32, &str> = b.syms.iter().map(|(n, s)| (s.va(), n.as_str())).collect();
+    for (&mid, &rows) in &gmap {
+        let label = names.get(&rows).map_or_else(|| format!("{rows:#x}"), |s| (*s).to_owned());
+        r.eq(m.menu_table(mid)?, rows, format!("Get_Menu_Table({mid:#x}) -> {label}"));
+    }
+    for (name, rows) in &b.catalog.menus {
+        let got: Vec<[u32; 8]> = read_rows_img(&b.img, b.sym(name), 128).into_iter().map(|x| x.w).collect();
+        let exp: Vec<[u32; 8]> = rows
+            .iter()
+            .map(|row| core::array::from_fn(|k| b.value(&row[k])))
+            .collect();
+        let bad = (0..got.len().max(exp.len())).find(|&k| got.get(k) != exp.get(k));
+        let msg = match bad {
+            None => format!("{name}: {} rows = catalog.c", exp.len()),
+            Some(k) => format!("{name}: {} rows = catalog.c (row {k} differs)", exp.len()),
+        };
+        r.check(bad.is_none(), msg);
+    }
+    let fp_rows = read_rows_mach(&m, gmap[&film_page], 128);
+    let mut subs = Vec::new();
+    let mut subs_ok = true;
+    for row in &fp_rows {
+        let t = m.menu_table(row.id())?;
+        subs.push(format!("{:#x}", row.id()));
+        if t == 0 {
+            subs_ok = false;
+        }
+    }
+    r.check(subs_ok, format!("Film page submenus resolve [{}]", subs.join(", ")));
+
+    let mut exp_pages = vec![0x0Eu16, 0x0F, film_page as u16];
+    exp_pages.extend(0x10u16..0x18);
+    let rd_pages = |raw: &[u8]| -> Vec<u16> { raw.as_chunks::<2>().0.iter().map(|&c| u16::from_be_bytes(c)).collect() };
+    r.eq(rd_pages(b.img.rd(0xA07F_22E6, 22)), exp_pages.clone(), "menu page template (state + 0x14) = 11 pages");
+    r.eq(rd_pages(b.img.rd(PAGE_LIST, 22)), exp_pages.clone(), "menu live page list (state + 0x3C) = 11 pages");
+    m.wr(PAGE_LIST, &[0u8; 22]);
+    m.call(PAGE_RESET, &[])?;
+    r.eq(rd_pages(&m.rd(PAGE_LIST, 22)), exp_pages, "menu page list after the entry reset 0xA0058A0A");
+
+    let pg = b.sym("page_group");
+    let pg_sites = [0xA005_811Cu32, 0xA005_8144, 0xA005_8204, 0xA005_82C6, 0xA005_8308, 0xA005_84E8];
+    r.check(pg_sites.iter().all(|&s| b.img.bl_target(s) == Some(pg)), "all 6 menu page_group call sites hooked");
+    let mut pg_got = Vec::new();
+    for p in 0..11u32 {
+        pg_got.push(m.call(pg, &[p])?);
+    }
+    r.eq(pg_got, vec![0, 0, 0, 0, 0, 1, 1, 2, 2, 2, 2], "page_group(0..10) -> shoot 0..4, playback 5..6, setup 7..10");
+
+    let tab_geom = [
+        b.img.u16(0xA005_844A), b.img.u16(0xA005_8454),
+        b.img.u16(0xA005_868A), b.img.u16(0xA005_86A0), b.img.u16(0xA005_871C), b.img.u16(0xA005_8734),
+        b.img.u16(0xA04F_3100), b.img.u16(0xA04F_3104), b.img.u16(0xA04F_3110), b.img.u16(0xA04F_3114),
+        b.img.u16(0xA04F_3118), b.img.u16(0xA04F_311C), b.img.u16(0xA04F_3120), b.img.u16(0xA04F_3124),
+    ];
+    r.eq(
+        tab_geom,
+        [0x3034, 0x2D0B, 0x210A, 0x210A, 0x210A, 0x210A, 34, 48, 32, 260, 292, 104, 396, 208],
+        "11-tab strip stride 52 px, wrap 10, and 5/2/4 group spans",
+    );
+
+    let mut pin_got = Vec::new();
+    for (expo, pages) in [(8u8, &[0u16, 4, 5, 6, 7, 10][..]), (1, &[0, 2, 5, 6, 10][..])] {
+        m.w8(stock::NV_EXPO, expo);
+        for &p in pages {
+            m.w16(SCRATCH + 4, p);
+            m.run_slice(0xA005_87F8, 0xA005_882E, 1_000_000, STACK.1, &[(4, SCRATCH)])?;
+            pin_got.push(m.u16(SCRATCH + 4));
+        }
+    }
+    r.eq(pin_got, vec![5, 5, 5, 6, 5, 5, 0, 2, 0, 0, 10], "playback pins menu to pages 5..6; shooting resets 5..6 -> 0");
+    m.load_nv_defaults();
+
+    for cls in 0..4u32 {
+        let cm = b.catalog.films.iter().find(|f| f.paper_cls == cls).map_or(0, |f| f.cm);
+        m.w8(stock::NV_CM, cm as u8);
+        r.eq(m.menu_table(paper)?, gmap[&(paper0 + cls)], format!("Get_Menu_Table({paper:#x}) for cm {cm} -> paper class {cls}"));
+        r.eq(
+            m.menu_table(paper | qs)?,
+            gmap[&((paper0 + cls) | qs)],
+            format!("Get_Menu_Table({:#x}) for cm {cm} -> QS paper class {cls}", paper | qs),
+        );
+    }
+    m.load_nv_defaults();
+
+    let (lbl_l, lbl_s) = (b.cat("ICON_LABEL_L"), b.cat("ICON_LABEL_S"));
+    for (&mid, &t) in gmap.iter().filter(|&(&mid, _)| mid & qs != 0) {
+        let mut bad = Vec::new();
+        for row in read_rows_mach(&m, t, 128) {
+            let k = (row.qs_icon() & 0x3FF) as usize;
+            let text = if row.sid() < SID0 {
+                m.ui_string(row.sid(), 0)?.unwrap_or_default()
+            } else {
+                b.catalog.strings[(row.sid() - SID0) as usize].clone()
+            };
+            if row.qs_icon() != lbl_l + k as u32 || row.strip_icon() != lbl_s + k as u32 || b.catalog.strings.get(k) != Some(&text) {
+                bad.push(row.sid());
+            }
+        }
+        r.eq(bad, vec![], format!("QS copy {mid:#x}: value label icons match their text"));
+    }
+
+    for mid in 0xE5u32..0xED {
+        let items: Vec<_> = read_rows_mach(&m, gmap[&mid], 128).into_iter().filter(|row| row.value() & qs != 0).collect();
+        let (page, slot) = qs_slot_of(items[0].get() & !1).ok_or("unknown QS slot getter")?;
+        let mut ok = items.len() == 5;
+        for row in &items {
+            m.call(row.set() & !1, &[row.value()])?;
+            let got_slot = m.call(stock::QS_SLOT_ROWS, &[page, slot])?;
+            let got_tbl = m.menu_table(row.value())?;
+            let exp = gmap.get(&row.value()).copied().unwrap_or_else(|| gmap[&(paper0 | qs)]);
+            if got_slot != got_tbl || got_tbl != exp {
+                ok = false;
+            }
+        }
+        r.check(ok, format!("QS slot menu {mid:#x} (page {page} slot {slot}): {} film items open their QS copies", items.len()));
+    }
+    m.load_nv_defaults();
+
+    let mut iso_vas = BTreeSet::new();
+    for (step, name) in [(0u8, "m_iso_1ev"), (1u8, "m_iso_3ev")] {
+        if let Some(sym) = b.syms.get(name) {
+            iso_vas.insert(sym.va());
+            m.w8(stock::NV_ISO_STEP, step);
+            r.eq(
+                m.menu_table(stock::MENU_ISO)?,
+                sym.va(),
+                format!("Get_Menu_Table({:#x}) with ISO step {step} -> {name}", stock::MENU_ISO),
+            );
+        }
+    }
+    m.load_nv_defaults();
+
+    let st = menu_tables(&mut ms, 0..0x200);
+    let bt = menu_tables(&mut m, 0..0x200);
+    let all_ids: BTreeSet<u32> = st.keys().chain(bt.keys()).copied().collect();
+    let changed: Vec<u32> = all_ids
+        .into_iter()
+        .filter(|i| {
+            !gmap.contains_key(i)
+                && *i != paper
+                && !bt.get(i).is_some_and(|v| iso_vas.contains(v))
+                && st.get(i) != bt.get(i)
+        })
+        .collect();
+    r.eq(changed, vec![], format!("other menu ids resolve as stock ({} stock ids)", st.len()));
+    Ok(())
+}
+
+fn check_strings(b: &Build, r: &mut Report) -> Result<(), String> {
+    let mut m = Machine::new(&b.img, 0);
+    let mut ms = Machine::new(&b.stock, 0);
+    m.load_nv_defaults();
+    ms.load_nv_defaults();
+
+    let strs = &b.catalog.strings;
+    r.eq(b.img.u32(b.sym("dp2m_string_count")), strs.len() as u32, "dp2m_string_count = catalog.c");
+    let (sid0, title) = (stock::STOCK_SIDS, b.cat("SID_PAPER_TITLE"));
+    let mut bad = Vec::new();
+    for (i, s) in strs.iter().enumerate() {
+        let sid = sid0 + i as u32;
+        let exp = if sid == title { &strs[i + 1] } else { s };
+        for lang in [0u32, 1, 16] {
+            if m.ui_string(sid, lang)?.as_deref() != Some(exp.as_str()) {
+                bad.push((sid, lang));
+            }
+        }
+    }
+    r.eq(bad, vec![], format!("UI string lookup of all {} dp2m strings (languages 0, 1, 16)", strs.len()));
+
+    for cls in 0..4u32 {
+        let cm = b.catalog.films.iter().find(|f| f.paper_cls == cls).map_or(0, |f| f.cm);
+        m.w8(stock::NV_CM, cm as u8);
+        let exp = &strs[(title - sid0 + 1 + cls) as usize];
+        r.eq(m.ui_string(title, 0)?, Some(exp.clone()), format!("paper title for cm {cm} (class {cls})"));
+    }
+    m.load_nv_defaults();
+
+    let mut diff = Vec::new();
+    for sid in 0..sid0 {
+        for lang in [0u32, 1] {
+            let Ok(exp) = ms.ui_string(sid, lang) else { continue };
+            if m.ui_string(sid, lang)? != exp {
+                diff.push((sid, lang));
+            }
+        }
+    }
+    r.eq(diff, vec![], format!("stock sids 0..{} unchanged (languages 0, 1)", sid0 - 1));
+    Ok(())
+}
+
+fn check_settings(b: &Build, r: &mut Report) -> Result<HashMap<String, u32>, String> {
+    let mut m = Machine::new(&b.img, 0);
+    m.load_nv_defaults();
+    let mut values: HashMap<u32, BTreeSet<u32>> = HashMap::new();
+    for &rows in menu_map(b).values() {
+        for row in read_rows_img(&b.img, rows, 128) {
+            values.entry(row.get() & !1).or_default().insert(row.value());
+        }
+    }
+    let mut names: Vec<String> = b
+        .syms
+        .keys()
+        .filter_map(|n| n.strip_prefix("nv_get_").filter(|&k| k != "none").map(str::to_owned))
+        .collect();
+    names.sort();
+
+    let (mut addrs, mut vals) = (HashMap::new(), BTreeMap::new());
+    for name in &names {
+        let get = b.sym(&format!("nv_get_{name}"));
+        let put = b.sym(&format!("nv_set_{name}"));
+        let vs: Vec<u32> = values.get(&get).map(|s| s.iter().copied().collect()).unwrap_or_default();
+        if !r.check(vs.len() > 1, format!("nv {name}: menu values {vs:?}")) {
+            continue;
+        }
+        let before = m.rd(stock::NV_BLOCK, stock::NV_LEN);
+        m.cpu.start_write_log(&[STACK, LV_DIRTY]);
+        m.call(put, &[*vs.last().unwrap()])?;
+        let log = m.cpu.stop_write_log();
+        let after = m.rd(stock::NV_BLOCK, stock::NV_LEN);
+        let changed: Vec<u32> = (0..stock::NV_LEN)
+            .filter(|&i| before[i] != after[i])
+            .map(|i| stock::NV_BLOCK + i as u32)
+            .collect();
+        let addr = (changed.len() == 1).then(|| changed[0]);
+        let ok = addr.is_some_and(|a| a >= NV_RESERVED.0 && a < NV_RESERVED.1 && outside(&log, &[(a, a + 1)]).is_empty());
+        r.check(
+            ok,
+            format!("nv_set_{name} writes only NVRAM {:?} (reserved +0x04..+0x13)", addr.map(|a| format!("{a:#x}"))),
+        );
+        let Some(a) = addr else { continue };
+        let mut rt = Vec::new();
+        for &v in &vs {
+            m.call(put, &[v])?;
+            if m.call(get, &[])? != v {
+                rt.push(v);
+            }
+        }
+        let oob = *vs.last().unwrap() + 1;
+        m.w8(a, oob as u8);
+        r.check(
+            rt.is_empty() && m.call(get, &[])? == 0,
+            format!("nv {name}: {}..{} round-trip, {oob} reads as 0", vs[0], vs.last().unwrap()),
+        );
+        addrs.insert(name.clone(), a);
+        vals.insert(name.clone(), *vs.last().unwrap());
+    }
+    let uniq: BTreeSet<u32> = addrs.values().copied().collect();
+    r.eq(uniq.len(), addrs.len(), "settings use distinct NVRAM bytes");
+
+    let nor = Nor::install(&mut m);
+    for (name, &v) in &vals {
+        m.call(b.sym(&format!("nv_set_{name}")), &[v])?;
+    }
+    m.call(stock::NV_FLUSH, &[])?;
+    let (off, n, buf) = nor.writes.borrow().last().cloned().unwrap_or((0, 0, Vec::new()));
+    let mut rec = BTreeMap::new();
+    if off == 8 {
+        for (name, &a) in &addrs {
+            rec.insert(name.clone(), buf[0x18 + (a - stock::NV_BLOCK) as usize] as u32);
+        }
+    }
+    r.eq(rec, vals.clone(), "stock flush writes the settings into the NOR record (block at NOR 0x20)");
+    {
+        let mut d = nor.data.borrow_mut();
+        d[0..4].copy_from_slice(&0x2012_0918u32.to_be_bytes());
+        d[off as usize..(off + n) as usize].copy_from_slice(&buf);
+    }
+    m.wr(stock::NV_BLOCK, &vec![0u8; stock::NV_PERSIST]);
+    m.call(stock::NV_LOAD, &[stock::NV_BLOCK])?;
+    let mut got = BTreeMap::new();
+    for name in vals.keys() {
+        got.insert(name.clone(), m.call(b.sym(&format!("nv_get_{name}")), &[])?);
+    }
+    r.eq(got, vals, "settings survive NOR flush + boot load");
+    Ok(addrs)
+}
+
+fn check_bracketing(b: &Build, r: &mut Report) -> Result<(), String> {
+    let mut m = Machine::new(&b.img, 0);
+    for idx in [1u16, 3] {
+        m.w16(stock::BKT_STEP_IDX, idx);
+        let step = b.img.u32(stock::BKT_STEP_TBL + 4 * idx as u32) as i32;
+        for (order, ev) in [
+            (0u8, &[0i32, 1, -1][..]),
+            (4, &[0, 2, 1, -1, -2][..]),
+            (6, &[2, 1, 0, -1, -2][..]),
+            (7, &[-2, -1, 0, 1, 2][..]),
+        ] {
+            m.w8(stock::NV_BKT_ORD, order);
+            let cnt = m.call(stock::BKT_COUNT, &[])? as usize;
+            let mut got_ev = Vec::new();
+            for i in 0..ev.len() {
+                got_ev.push(m.call(stock::BKT_EV_Q16, &[i as u32])? as i32);
+            }
+            let exp_ev: Vec<i32> = ev.iter().map(|&e| e * step).collect();
+            r.eq((cnt, got_ev), (ev.len(), exp_ev), format!("bracketing order {order} step {:.3} EV", step as f64 / 65536.0));
+        }
+    }
+    Ok(())
+}
+
+fn check_min_shutter(b: &Build, r: &mut Report, nv: u32) -> Result<(), String> {
+    let mut m = Machine::new(&b.img, 0);
+    let tv = &b.catalog.tv_min;
+    let (mut a_bad, mut p_bad) = (Vec::new(), Vec::new());
+    for idx in [0u8, 1, 2, 3, 4, 5, 6, 7, 0xFF] {
+        m.w8(nv, idx);
+        m.run_slice(stock::AUTOISO_A, stock::AUTOISO_A + 14, 1_000_000, STACK.1, &[(0, 0), (1, 0x1234_5678)])?;
+        let exp_a = tv[if idx <= 6 { idx as usize } else { 0 }] as u32;
+        if (m.cpu.r[0], m.cpu.r[1]) != (exp_a, 0x1234_5678) {
+            a_bad.push(idx);
+        }
+        for site in stock::AUTOISO_P {
+            m.run_slice(site, site + 4, 1_000_000, STACK.1, &[(0, 0)])?;
+            let exp_p = if (1..=6).contains(&idx) {
+                (tv[idx as usize] + 0x30000) as u32
+            } else {
+                0x90000
+            };
+            if m.cpu.r[0] != exp_p {
+                p_bad.push((site, idx));
+            }
+        }
+    }
+    r.eq(a_bad, vec![], "ISO Auto min shutter, A mode: table value, idx > 6 -> Auto, r1 kept");
+    r.eq(p_bad, vec![], "ISO Auto min shutter, P mode (both sites): table value + 3 EV, Auto -> stock 9.0");
+    Ok(())
+}
+
+fn check_ipc(b: &Build, r: &mut Report, addrs: &HashMap<String, u32>) -> Result<(), String> {
+    let mut m = Machine::new(&b.img, 0);
+    m.load_nv_defaults();
+    let (cmd, meta) = (SCRATCH + 0x100, SCRATCH + 0x200);
+    let mut regs_bad = Vec::new();
+
+    let mut pack = |cm: u32, cs: u32, nv: &HashMap<&str, u32>| -> Result<(u8, u8), String> {
+        for (&k, &v) in nv {
+            if let Some(&a) = addrs.get(k) {
+                m.w8(a, v as u8);
+            }
+        }
+        m.wr(meta + 0x1D, &[cs as u8, cm as u8]);
+        m.w32(STACK.1 + 0x14, meta);
+        m.wr(cmd, &[0u8; 8]);
+        m.run_slice(stock::IPC_CMD20, stock::IPC_CMD20 + 6, 1_000_000, STACK.1, &[(0, 0x55), (1, 0x3F80_0000), (4, cmd)])?;
+        if (m.cpu.r[0], m.cpu.r[1]) != (0, 0x3F80_0000) {
+            regs_bad.push((cm, cs));
+        }
+        Ok((m.u8(cmd + 5), m.u8(cmd + 6)))
+    };
+
+    let mut zero = HashMap::new();
+    for k in ["engine", "grain", "halation", "fill", "color_paper", "bw_paper", "lut_slot"] {
+        zero.insert(k, 0u32);
+    }
+
+    let mut bad_stock = Vec::new();
+    for cm in 0..FILM_MODE0 {
+        if pack(cm, 0, &zero)?.0 as u32 != cm {
+            bad_stock.push(cm);
+        }
+    }
+    r.eq(bad_stock, vec![], "cmd[5] = stock color modes 0..8 unchanged");
+
+    for cls in 0..4u32 {
+        let fs: Vec<&FilmEntry> = b.catalog.films.iter().filter(|f| f.paper_cls == cls).collect();
+        let papers: Vec<u32> = if cls != 0 { (0..10).collect() } else { vec![0, 3] };
+        let mut bad = Vec::new();
+        for f in &fs {
+            for &p in &papers {
+                let mut nv = zero.clone();
+                if cls != 0 {
+                    nv.insert(paper_nv(cls), p);
+                }
+                if pack(f.cm, 0, &nv)?.0 as u32 != packed_of(f, &nv) {
+                    bad.push((f.cm, p));
+                }
+            }
+        }
+        r.eq(
+            bad,
+            vec![],
+            format!("cmd[5] packed mode, paper class {cls}: {} films x papers {}..{}", fs.len(), papers[0], papers.last().unwrap()),
+        );
+    }
+
+    let f0 = &b.catalog.films[0];
+    let mut bad_p1d = Vec::new();
+    for e in 0..2u32 {
+        for g in 0..2u32 {
+            for h in 0..2u32 {
+                for fill in 0..4u32 {
+                    for cs in 0..4u32 {
+                        let mut nv = zero.clone();
+                        nv.insert("engine", e);
+                        nv.insert("grain", g);
+                        nv.insert("halation", h);
+                        nv.insert("fill", fill);
+                        let got = pack(f0.cm, cs, &nv)?.1 as u32;
+                        let exp = cs | ((e | (g << 1) | (h << 2)) << 2) | (fill << 5);
+                        if got != exp {
+                            bad_p1d.push((e, g, h, fill, cs, got));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    r.eq(bad_p1d, vec![], "cmd[6] = colorspace | (3d | grain<<1 | halation<<2) << 2 | fill << 5 (128 combos)");
+    r.eq(regs_bad, vec![], "IPC hook keeps live r1 (1.0f) and returns r0 = 0");
+    Ok(())
+}
+
+fn check_makernote(b: &Build, r: &mut Report) -> Result<(), String> {
+    let mut m = Machine::new(&b.img, 0);
+    let (sp, rec, txt) = (STACK.1 - 0x200, SCRATCH, SCRATCH + 0x100);
+    let mut cms: Vec<u32> = vec![0, 1, 2, 3, 4];
+    cms.extend(b.catalog.films.iter().map(|f| f.cm));
+    let mut bad = Vec::new();
+    for cm in cms {
+        m.w8(rec + 0x8E, cm as u8);
+        m.run_slice(MN_SWITCH_SETUP, MN_SWITCH_DONE, 1_000_000, sp, &[(7, rec + 0x80)])?;
+        let tag3d = m.rd(MN_TAG_3D, 11);
+        let tag59 = m.rd(MN_TAG_59, 15);
+        let ok = if cm < FILM_MODE0 {
+            let exp: &[u8] = match cm {
+                1 => b"Sepia",
+                2 => b"Monochrome",
+                4 => b"Vivid",
+                _ => b"Standard",
+            };
+            tag3d.starts_with(exp) && tag59.starts_with(exp)
+        } else {
+            let mut exp3d = format!("Film {:02}", cm - FILM_MODE0).into_bytes();
+            exp3d.resize(11, 0);
+            let s = b.catalog.strings[(cm - FILM_MODE0) as usize].as_bytes();
+            let mut exp59 = s[..s.len().min(14)].to_vec();
+            exp59.resize(15, 0);
+            tag3d == exp3d && tag59 == exp59
+        };
+        if !ok {
+            bad.push(cm);
+            continue;
+        }
+        for (site, until, rs, rr) in [
+            (0xA014_7938u32, 0xA014_793Cu32, 7usize, 4usize),
+            (0xA013_2E9A, 0xA013_2E9E, 6, 5),
+        ] {
+            let mut z = tag3d.clone();
+            z.push(0);
+            m.wr(txt, &z);
+            m.w8(rec + 0x17, 0xEE);
+            m.run_slice(site, until, 1_000_000, sp, &[(0, 0), (rs, txt), (rr, rec)])?;
+            let exp = if cm >= FILM_MODE0 { cm as u8 } else { 0 };
+            if m.u8(rec + 0x17) != exp {
+                bad.push(cm);
+            }
+        }
+    }
+    r.eq(
+        bad,
+        vec![],
+        format!("maker note: stock modes keep their names, {} films write 'Film NN' + name and parse back in JPG & X3F playback", b.catalog.films.len()),
+    );
+    Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum LvCall {
+    Gamma(u32, Vec<u8>),
+    Mono(u32, u32),
+    Cmcm(u32, u32),
+    Mat([u16; 14]),
+}
+
+fn check_lv(b: &Build, r: &mut Report) -> Result<(), String> {
+    for (site, name) in [
+        (stock::LV_GAMMA_SITE, "lv_gamma_hook"),
+        (stock::LV_MONO_SITE, "lv_mono_hook"),
+        (stock::LV_CMCM_SITE, "lv_cmcm_hook"),
+    ] {
+        r.eq(b.img.bl_target(site), Some(b.sym(name)), format!("BL @ {site:#x} -> {name}"));
+    }
+    let mut m = Machine::new(&b.img, 0);
+    m.load_nv_defaults();
+    let calls: Rc<RefCell<Vec<LvCall>>> = Rc::new(RefCell::new(Vec::new()));
+
+    {
+        let c = calls.clone();
+        m.stub_on(b.sym("stock_b2y_set_gamma"), move |cpu| {
+            let (p, n) = (cpu.r[1], cpu.r[2] as usize);
+            let mut buf = vec![0u8; n];
+            cpu.read_bytes(p, &mut buf);
+            c.borrow_mut().push(LvCall::Gamma(p, buf));
+            None
+        });
+    }
+    {
+        let c = calls.clone();
+        m.stub_on(b.sym("stock_lv_mono"), move |cpu| {
+            c.borrow_mut().push(LvCall::Mono(cpu.r[0], cpu.r[1]));
+            None
+        });
+    }
+    {
+        let c = calls.clone();
+        m.stub_on(b.sym("stock_lv_cmcm"), move |cpu| {
+            c.borrow_mut().push(LvCall::Cmcm(cpu.r[0], cpu.r[1]));
+            None
+        });
+    }
+    {
+        let c = calls.clone();
+        m.stub_on(b.sym("stock_b2y_set_mat"), move |cpu| {
+            let p = cpu.r[0];
+            let mat = core::array::from_fn(|k| cpu.r16_be(p + (k * 2) as u32));
+            c.borrow_mut().push(LvCall::Mat(mat));
+            None
+        });
+    }
+    let cc7 = [96i32, -20, 5, -30, 120, 8, 2, -15, 110];
+    let ccn = [130i32, -40, 10, -25, 140, -12, 0, -30, 150];
+    for (cc, getter) in [(cc7, "stock_get_lv_cc7"), (ccn, "stock_get_lv_ccn")] {
+        let mut raw = vec![0u8; 36];
+        for (k, &v) in cc.iter().enumerate() {
+            let w = ((v as u16) & 0x0FFF) | 0xA000;
+            raw[10 + k * 2..12 + k * 2].copy_from_slice(&w.to_be_bytes());
+        }
+        m.stub_on(b.sym(getter), move |cpu| {
+            cpu.write_bytes(cpu.r[0], &raw);
+            None
+        });
+    }
+
+    let empty = HashMap::new();
+    let look = |f: &FilmEntry| &b.catalog.looks[(packed_of(f, &empty) - FILM_MODE0) as usize];
+    let call_lv = |m: &mut Machine, fn_name: &str, args: &[u32]| -> Result<Vec<LvCall>, String> {
+        calls.borrow_mut().clear();
+        m.call(b.sym(fn_name), args)?;
+        Ok(calls.borrow().clone())
+    };
+
+    let lut = SCRATCH + 0x1000;
+    let stock_lut: Vec<u8> = (0..1024).map(|i| (i & 0xFF) as u8).collect();
+    m.wr(lut, &stock_lut);
+    let gbuf = b.sym("gamma_buf");
+    let kf = b.catalog.films.iter().find(|f| look(f).flags & LV_KNOTS != 0).unwrap();
+    let curve = expand_knots(&look(kf).knots);
+
+    m.w8(stock::NV_CM, 0);
+    r.eq(call_lv(&mut m, "lv_gamma_hook", &[0, lut, 0x400])?, vec![LvCall::Gamma(lut, stock_lut.clone())], "gamma hook, stock color mode: stock LUT");
+    m.w8(stock::NV_CM, kf.cm as u8);
+    r.eq(call_lv(&mut m, "lv_gamma_hook", &[0, lut, 0x400])?, vec![LvCall::Gamma(gbuf, curve.clone())], format!("gamma hook, film cm {}: expanded film knots", kf.cm));
+    m.w8(stock::NV_CM, 0);
+    call_lv(&mut m, "lv_gamma_hook", &[0, lut, 0x400])?;
+    let mono_cm = if kf.mono != 0 { 2 } else { 3 };
+    r.eq(
+        call_lv(&mut m, "lv_mono_hook", &[1, kf.cm])?,
+        vec![LvCall::Mono(1, mono_cm), LvCall::Gamma(gbuf, curve)],
+        format!("color mode 0 -> {}: mono routing + gamma re-applied", kf.cm),
+    );
+    r.eq(call_lv(&mut m, "lv_mono_hook", &[1, kf.cm])?, vec![LvCall::Mono(1, mono_cm)], "same color mode: gamma not re-applied");
+    r.eq(
+        call_lv(&mut m, "lv_mono_hook", &[1, 0])?,
+        vec![LvCall::Mono(1, 0), LvCall::Gamma(lut, stock_lut)],
+        format!("color mode {} -> 0: stock gamma restored", kf.cm),
+    );
+    r.eq(call_lv(&mut m, "lv_cmcm_hook", &[1, 0])?, vec![LvCall::Cmcm(1, 0)], "CMCM hook, stock color mode: stock path");
+    let cf = b.catalog.films.iter().find(|f| look(f).flags & LV_CMCM != 0 && look(f).flags & LV_MONO_Q7 == 0).unwrap();
+    for (mode, cc) in [(7u32, &cc7), (1, &ccn)] {
+        let exp = lv_matrix(&look(cf).cmcm, look(cf).flags, cc);
+        r.eq(call_lv(&mut m, "lv_cmcm_hook", &[mode, cf.cm])?, vec![LvCall::Mat(exp)], format!("CMCM hook, film cm {}, LV mode {mode}: q10 film x live q7", cf.cm));
+    }
+    if let Some(mf) = b.catalog.films.iter().find(|f| look(f).flags & LV_MONO_Q7 != 0) {
+        let exp = lv_matrix(&look(mf).cmcm, look(mf).flags, &ccn);
+        r.eq(call_lv(&mut m, "lv_cmcm_hook", &[1, mf.cm])?, vec![LvCall::Mat(exp)], format!("CMCM hook, mono film cm {}: direct q7 weights", mf.cm));
+    }
+    Ok(())
+}
+
+fn check_ycap(b: &Build, r: &mut Report) -> Result<(), String> {
+    let mut m = Machine::new(&b.img, 0);
+    let lp = b.sym_info("lv_planes");
+    r.check(
+        !(stock::NV_BLOCK..stock::NV_BLOCK + stock::NV_LEN as u32).contains(&lp.va()),
+        format!("lv_planes @ {:#x} outside the NVRAM block", lp.va()),
+    );
+    let site = stock::LV_YCAP + 2;
+    let lit = b.stock.u32(((site + 4) & !3) + ((b.stock.u16(site) & 0xFF) as u32) * 4);
+    let planes = [0xA230_0000u32, 0xA236_0000, 0xA239_0000];
+    let mut pbuf = Vec::with_capacity(12);
+    for p in planes {
+        pbuf.extend_from_slice(&p.to_be_bytes());
+    }
+    m.wr(SCRATCH, &pbuf);
+    let f0 = m.u32(lp.va() + 12);
+    m.cpu.start_write_log(&[STACK]);
+    for _ in 0..3 {
+        m.run_slice(stock::LV_YCAP, stock::LV_YCAP + 6, 1_000_000, STACK.1, &[(0, SCRATCH)])?;
+    }
+    let log = m.cpu.stop_write_log();
+    r.eq(
+        (m.cpu.r[5], m.cpu.r[7], m.rd(lp.va(), 12), m.u32(lp.va() + 12)),
+        (lit, SCRATCH, pbuf, f0 + 3),
+        "LV Y-capture hook: planes + frame count, stock r5/r7",
+    );
+    r.eq(outside(&log, &[(lp.va(), lp.va() + lp.size)]), vec![], "LV Y-capture hook writes only lv_planes (never NVRAM)");
+    Ok(())
+}
+
+fn check_hud(b: &Build, r: &mut Report, peakcol_addr: u32, peaksens_addr: u32, zebralvl_addr: u32) -> Result<(), String> {
+    let (wget, gdraw) = (b.sym("grid_widget_get"), b.sym("grid_draw_hook"));
+    r.eq(b.img.u32(0xA07F_A4A4), wget | 1, "LV widget 0x14 getter -> grid_widget_get");
+    r.check(
+        b.img.bl_target(0xA016_C708) == Some(gdraw) && b.img.bl_target(0xA004_C5AE) == Some(gdraw),
+        "both stock_grid_draw call sites -> grid_draw_hook",
+    );
+
+    let mut m = Machine::new(&b.img, 0);
+    m.load_nv_defaults();
+    let st = Rc::new(RefCell::new((0x15u32, 1u32, 0i8, 64i8, Vec::<u32>::new())));
+    { let s = st.clone(); m.stub_on(b.sym("stock_ui_screen_id"), move |_| Some(s.borrow().0)); }
+    { let s = st.clone(); m.stub_on(b.sym("stock_lv_active"), move |_| Some(s.borrow().1)); }
+    { let s = st.clone(); m.stub_on(b.sym("stock_accel_x"), move |_| Some(s.borrow().2 as u8 as u32)); }
+    { let s = st.clone(); m.stub_on(b.sym("stock_accel_y"), move |_| Some(s.borrow().3 as u8 as u32)); }
+    { let s = st.clone(); m.stub_on(b.sym("stock_grid_draw"), move |c| { s.borrow_mut().4.push(c.r[0]); None }); }
+
+    m.w8(stock::NV_GRID, 3);
+    r.eq(m.call(wget, &[])?, 3, "grid_widget_get passes stock grid 3 through");
+    m.call(gdraw, &[0x1234])?;
+    r.eq(st.borrow().4.clone(), vec![0x1234], "grid_draw_hook delegates stock grids 0..6 to stock_grid_draw");
+
+    m.w8(stock::NV_GRID, 7);
+    for (scr, lv) in [(0x1Bu32, 1u32), (0x15, 0)] {
+        { let mut s = st.borrow_mut(); s.0 = scr; s.1 = lv; }
+        m.cpu.start_write_log(&[STACK]);
+        let k = m.call(wget, &[])?;
+        m.call(gdraw, &[SCRATCH])?;
+        let log = m.cpu.stop_write_log();
+        r.check(k == 7 && log.is_empty(), format!("HUD inactive when screen={scr:#x} lv_active={lv}: key=m, zero ARGB writes"));
+    }
+    { let mut s = st.borrow_mut(); s.0 = 0x15; s.1 = 1; }
+
+    let lp = b.sym("lv_planes");
+    let k0 = m.call(wget, &[])?;
+    st.borrow_mut().2 = 1;
+    let k_dead = m.call(wget, &[])?;
+    st.borrow_mut().2 = 20;
+    let k_tilt = m.call(wget, &[])?;
+    { let mut s = st.borrow_mut(); s.2 = 64; s.3 = 0; }
+    let k_port = m.call(wget, &[])?;
+    r.check(k0 == k_dead && k_tilt != k0 && ((k_port >> 8) & 1) == 1, "grid_widget_get tilt: deadband |slope|<=1, landscape vs portrait");
+    { let mut s = st.borrow_mut(); s.2 = 0; s.3 = 64; }
+
+    let mut fkeys = Vec::new();
+    let mut fexp = Vec::new();
+    for mode in [11u32, 12, 13, 14, 17] {
+        m.w8(stock::NV_GRID, mode as u8);
+        for fc in [4u32, 5, 6] {
+            m.w32(lp + 12, fc);
+            fkeys.push(m.call(wget, &[])?);
+            fexp.push((mode << 16) | (fc >> 1));
+        }
+    }
+    r.eq(fkeys, fexp, "grid_widget_get modes 11..14 & 17 key on fcnt >> 1");
+
+    m.wr(lp, &[0u8; 16]);
+    m.w8(stock::NV_GRID, 11);
+    m.cpu.start_write_log(&[STACK]);
+    m.call(gdraw, &[SCRATCH])?;
+    let log = m.cpu.stop_write_log();
+    r.check(
+        outside(&log, &[(gdraw, END)]).len() <= 1 && log.iter().all(|&(a, _)| a != stock::ARGB_FB),
+        "grid_draw_hook skips peaking/zebras when lv_planes.y is unset",
+    );
+
+    let (yv, cbv, crv) = (0xA240_0000u32, 0xA245_0000u32, 0xA248_0000u32);
+    let mut y_plane = vec![80u8; 640 * 424];
+    for y in 0..424usize {
+        let row = y * 640;
+        y_plane[row + 160..row + 200].fill(200);
+        if (40..80).contains(&y) {
+            y_plane[row + 40..row + 80].fill(252);
+        }
+    }
+    m.wr(yv, &y_plane);
+    m.wr(cbv, &vec![110u8; 320 * 424]);
+    m.wr(crv, &vec![160u8; 320 * 424]);
+    let mut lp_init = Vec::with_capacity(16);
+    for v in [yv, cbv, crv, 4] {
+        lp_init.extend_from_slice(&v.to_be_bytes());
+    }
+    m.wr(lp, &lp_init);
+
+    let px = |m: &Machine, x: usize, y: usize| m.u16(stock::ARGB_FB + ((y * 640 + x) * 2) as u32);
+    let draw = |m: &mut Machine, mode: u8| -> Result<(), String> {
+        m.w8(stock::NV_GRID, mode);
+        m.call(gdraw, &[SCRATCH])?;
+        Ok(())
+    };
+
+    { let mut s = st.borrow_mut(); s.2 = 0; s.3 = 64; }
+    draw(&mut m, 7)?;
+    r.check(px(&m, 212, 211) == 0x1F3E && px(&m, 319, 211) == 0x1F3E && px(&m, 10, 10) == 0, "grid 7 level: green horizon & center tick");
+    st.borrow_mut().2 = 20;
+    draw(&mut m, 7)?;
+    r.eq(px(&m, 212, 211), 0xFFFE, "grid 7 tilted: white horizon");
+    { let mut s = st.borrow_mut(); s.2 = 64; s.3 = 0; }
+    draw(&mut m, 7)?;
+    r.eq(px(&m, 319, 112), 0x1F3E, "grid 7 portrait: vertical end-cap");
+    { let mut s = st.borrow_mut(); s.2 = 0; s.3 = 64; }
+
+    for (mode, vert, alpha, s) in [(8u8, false, 10u16, 74usize), (9, false, 10, 31), (10, true, 10, 107), (15, true, 9, 70), (16, true, 9, 37)] {
+        draw(&mut m, mode)?;
+        let ok = if vert {
+            px(&m, s - 1, 10) == alpha && px(&m, s, 10) == 0xFFFC && px(&m, 640 - s - 1, 10) == 0xFFFC && px(&m, s + 4, 10) == 0
+        } else {
+            px(&m, 10, s - 1) == alpha && px(&m, 10, s) == 0xFFFC && px(&m, 10, 424 - s - 1) == 0xFFFC && px(&m, 10, s + 4) == 0
+        };
+        r.check(ok, format!("grid {mode} aspect mask ({} {s}px): matte, 1px white guide, clean interior", if vert { "vert" } else { "horiz" }));
+    }
+
+    m.w16(stock::ARGB_FB, 0xDEAD);
+    m.w16(stock::ARGB_FB + ((423 * 640 + 10) * 2) as u32, 0xDEAD);
+    let mut got_cols = Vec::new();
+    for c in 0..4u8 {
+        m.w8(peakcol_addr, c);
+        draw(&mut m, 11)?;
+        got_cols.push(px(&m, 160, 120));
+    }
+    r.eq(got_cols, vec![0xF11E, 0xFE1E, 0xFFFE, 0x111E], "grid 11 focus peaking: edge detected across all 4 peaking colors");
+    r.check(px(&m, 0, 0) == 0 && px(&m, 10, 423) == 0 && px(&m, 300, 120) == 0, "grid 11 focus peaking: 2px border clear & flat background = 0");
+    m.w8(peakcol_addr, 0);
+    // Runtime peaking sensitivity: High (24) detects soft 30-step edge, Med (44) skips it, Low (72) skips 56-step edge, Auto boosts on MF_SPOT
+    let mut soft_y = vec![80u8; 640 * 424];
+    for y in 0..424usize {
+        let row = y * 640;
+        soft_y[row + 160..row + 200].fill(110); // step = 30
+        soft_y[row + 320..row + 360].fill(136); // step = 56
+    }
+    m.wr(yv, &soft_y);
+    m.w8(0xA093_9A53, 0); // MF_SPOT_ACTIVE = 0
+    m.w8(peaksens_addr, 0); // Med (44)
+    draw(&mut m, 11)?;
+    let med_ok = px(&m, 160, 120) == 0 && px(&m, 320, 120) == 0xF11E;
+    m.w8(peaksens_addr, 1); // High (24)
+    draw(&mut m, 11)?;
+    let high_ok = px(&m, 160, 120) == 0xF11E && px(&m, 320, 120) == 0xF11E;
+    m.w8(peaksens_addr, 2); // Low (72)
+    draw(&mut m, 11)?;
+    let low_ok = px(&m, 160, 120) == 0 && px(&m, 320, 120) == 0;
+    m.w8(peaksens_addr, 3); // Auto (MF High)
+    m.w8(0xA093_9A53, 0);
+    draw(&mut m, 11)?;
+    let auto_1x = px(&m, 160, 120) == 0 && px(&m, 320, 120) == 0xF11E;
+    m.w8(0xA093_9A53, 1); // MF magnification engaged
+    draw(&mut m, 11)?;
+    let auto_mf = px(&m, 160, 120) == 0xF11E && px(&m, 320, 120) == 0xF11E;
+    m.w8(0xA093_9A53, 0);
+    m.w8(peaksens_addr, 0);
+    r.check(
+        med_ok && high_ok && low_ok && auto_1x && auto_mf,
+        "grid 11 peaking sensitivity: Med(44)/High(24)/Low(72) & Auto MF-magnify boost",
+    );
+    m.wr(yv, &y_plane);
+
+    draw(&mut m, 12)?;
+    r.check(px(&m, 160, 120) == 0xF11E && px(&m, 319, 211) == 0x1F3E, "grid 12 peaking + level: combines edge overlay and level");
+
+    m.w32(lp + 12, 0);
+    draw(&mut m, 13)?;
+    let z0 = px(&m, 48, 48);
+    m.w32(lp + 12, 2);
+    draw(&mut m, 13)?;
+    let z2 = px(&m, 48, 48);
+    r.check(
+        (z0 == 0xF40E || z0 == 0x111A) && (z2 == 0xF40E || z2 == 0x111A) && z0 != z2 && px(&m, 300, 200) == 0,
+        "grid 13 zebras: highlights >= ZEBRA_THRESH striped, phase shifts on fcnt, midtones = 0",
+    );
+
+    // Runtime zebra thresholds (90% Safe = 230, 100% Clip = 252) & Dual Highlight+Shadow (<= 12 cyan)
+    let mut z_y = vec![80u8; 640 * 424];
+    for y in 40..80usize {
+        let row = y * 640;
+        z_y[row + 40..row + 80].fill(235);  // 90% Safe only
+        z_y[row + 120..row + 160].fill(246); // 95% & 90%, below 100%
+        z_y[row + 200..row + 240].fill(253); // >= 100% Clip
+        z_y[row + 280..row + 320].fill(6);   // Crushed shadow <= 12
+    }
+    m.wr(yv, &z_y);
+    m.w32(lp + 12, 0);
+    m.w8(zebralvl_addr, 1); // 90% Safe (230)
+    draw(&mut m, 13)?;
+    let z90_ok = px(&m, 48, 48) != 0 && px(&m, 288, 48) == 0;
+    m.w8(zebralvl_addr, 2); // 100% Clip (252)
+    draw(&mut m, 13)?;
+    let z100_ok = px(&m, 128, 48) == 0 && px(&m, 208, 48) != 0;
+    m.w8(zebralvl_addr, 3); // Dual Hi + Lo
+    draw(&mut m, 13)?;
+    let zh = px(&m, 208, 48);
+    let zl0 = px(&m, 288, 48);
+    let zl1 = px(&m, 292, 48);
+    let zdual_ok = (zh == 0xF40E || zh == 0x111A)
+        && ((zl0 == 0x1DFE && zl1 == 0x111A) || (zl0 == 0x111A && zl1 == 0x1DFE))
+        && px(&m, 400, 200) == 0;
+    m.w8(zebralvl_addr, 0);
+    r.check(z90_ok && z100_ok && zdual_ok, "grid 13 zebra levels: 90% Safe, 100% Clip & Dual Hi(orange)+Lo(cyan)");
+
+    // Mode 17: Foveon False Color (IRE) 6 zones + vertical IRE scale bar
+    let mut fc_y = vec![80u8; 640 * 424];
+    for y in 40..80usize {
+        let row = y * 640;
+        fc_y[row + 20..row + 60].fill(6);    // Violet (0..5% IRE)
+        fc_y[row + 80..row + 120].fill(20);  // Blue (5..11% IRE)
+        fc_y[row + 140..row + 180].fill(116); // Green (42..48% IRE, 18% gray)
+        fc_y[row + 200..row + 240].fill(156); // Pink (56..66% IRE, skin)
+        fc_y[row + 260..row + 300].fill(232); // Yellow (88..94% IRE, Foveon knee)
+        fc_y[row + 320..row + 360].fill(250); // Red (94..100% IRE, clipped)
+    }
+    m.wr(yv, &fc_y);
+    draw(&mut m, 17)?;
+    let fc_zones = [
+        px(&m, 30, 50), px(&m, 90, 50), px(&m, 150, 50),
+        px(&m, 210, 50), px(&m, 270, 50), px(&m, 330, 50),
+        px(&m, 400, 200), px(&m, 626, 124), px(&m, 626, 284),
+    ];
+    r.eq(
+        fc_zones,
+        [0x61FD, 0x17FB, 0x1E3C, 0xF7BC, 0xFE1C, 0xF11E, 0x0000, 0xF11F, 0x61FF],
+        "grid 17 false color: 6 IRE zones, transparent midtones & right-edge legend bar",
+    );
+    m.wr(yv, &y_plane);
+
+    draw(&mut m, 14)?;
+    let mut has_bar = false;
+    for y in 360..408 {
+        for x in 496..624 {
+            let p = px(&m, x, y);
+            if (p & 0xF) == 14 && (p >> 4) != 0 {
+                has_bar = true;
+            }
+        }
+    }
+    r.check(px(&m, 492, 354) == 0xBBBC && has_bar, "grid 14 RGB histogram: frame & bars drawn");
+    m.wr(yv, &vec![255u8; 640 * 424]);
+    draw(&mut m, 14)?;
+    r.eq(px(&m, 625, 360), 0xF11F, "grid 14 RGB histogram: highlight clip bar");
+
+    draw(&mut m, 7)?;
+    r.check(
+        px(&m, 48, 48) == 0 && px(&m, 160, 120) == 0 && px(&m, 500, 360) == 0 && px(&m, 319, 211) == 0x1F3E,
+        "HUD transition 14 -> 7 clears outer overlay plane before drawing level",
+    );
+    draw(&mut m, 0)?;
+    r.check(m.rd(stock::ARGB_FB, 640 * 424 * 2).iter().all(|&b| b == 0), "HUD transition 7 -> 0 clears entire 640x424 RGBA4444 plane");
+    Ok(())
+}
+
+fn check_updater_and_package(b: &Build, r: &mut Report) -> Result<(), String> {
+    let ver = b.pkg.version();
+    let mut parts = ver.split('.');
+    let maj: u8 = parts.next().unwrap_or("0").parse().map_err(|_| "bad major ver")?;
+    let mi: u8 = parts.next().unwrap_or("0").parse().map_err(|_| "bad minor ver")?;
+    r.eq(
+        b.img.rd(stock::VERSION_IMM, 4),
+        &[0x22, maj, 0x23, mi][..],
+        format!("'Current version' immediates = {maj}.{mi:02}"),
+    );
+    for va in stock::UPDATER_BANNERS {
+        let old = b.stock.cstr(va, 64);
+        let new = b.img.cstr(va, 64);
+        let slot = (old.len() + 4) & !3;
+        let mut padded = new.as_bytes().to_vec();
+        padded.resize(slot, 0);
+        let ok = old.contains("Debug Write")
+            && !new.is_empty()
+            && new != old
+            && b.img.rd(va, slot) == padded.as_slice()
+            && b.img.rd(va + slot as u32, 4) == b.stock.rd(va + slot as u32, 4);
+        r.check(ok, format!("updater banner {va:#x}: {old:?} -> {new:?}"));
+    }
+
+    let s = b.stock.pkg.as_ref().ok_or("stock firmware must be a DP2MVxxx.bin package")?;
+    r.eq(b.pkg_name.as_str(), &format!("DP2MV{maj}{mi:02}.bin"), "package file name matches the version");
+    let vs = b.pkg.versions();
+    let ver_ok = vs[0] == vs[1] && vs[1] == vs[2] && ver.len() == 4 && ver.as_bytes()[1] == b'.';
+    r.check(ver_ok, format!("header versions {vs:?}"));
+    let date = b.pkg.date();
+    r.check(date.len() == 8 && date.starts_with("20") && date.bytes().all(|c| c.is_ascii_digit()), format!("header date {date}"));
+    r.eq(
+        (b.pkg.raw.len(), b.pkg.flags(), b.pkg.c78_off()),
+        (s.raw.len(), s.flags(), s.c78_off()),
+        "size, stage flags, M6M segment offset = stock",
+    );
+    let diff_hdr: Vec<usize> = (0..0x80)
+        .filter(|&i| !(0x10..0x20).contains(&i) && !(0x30..0x58).contains(&i) && b.pkg.raw[i] != s.raw[i])
+        .collect();
+    r.eq(diff_hdr, vec![], "header bytes outside version/date = stock");
+    r.check(b.pkg.segment("bridge") == s.segment("bridge"), "bridge M6M segment is stock");
+    let firm = fs::read(b.dir.join("Firm.bin")).map_err(|e| format!("read Firm.bin: {e}"))?;
+    r.check(b.pkg.segment("m5") == firm.as_slice(), "M5 segment = Firm.bin");
+    r.check(b.pkg.segment("m6m") == b.img.c78.as_slice(), "M6M segment = C78FRM.bin");
+    Ok(())
+}
+
+pub fn run(b: &Build, r: &mut Report) -> Result<bool, String> {
+    check_invariants(b, r);
+    check_hooks(b, r)?;
+    check_menus(b, r)?;
+    check_strings(b, r)?;
+    let addrs = check_settings(b, r)?;
+    check_bracketing(b, r)?;
+    check_min_shutter(b, r, addrs["minshutter"])?;
+    check_ipc(b, r, &addrs)?;
+    check_makernote(b, r)?;
+    check_lv(b, r)?;
+    check_ycap(b, r)?;
+    check_hud(b, r, addrs["peakcol"], addrs["peaksens"], addrs["zebralvl"])?;
+    check_updater_and_package(b, r)?;
+    Ok(true)
+}

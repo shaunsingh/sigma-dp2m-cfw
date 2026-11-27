@@ -3,6 +3,7 @@
 mod catalog;
 mod config;
 mod elf;
+mod lut;
 mod m5;
 mod m6m;
 mod pack;
@@ -18,10 +19,15 @@ use pack::FilmPack;
 
 const USAGE: &str = "usage:
   dp2m build [DP2MV105.bin] [--config dp2m.fnl] [--out <dir>] [--pack <film_pack.bin>] [--skip-verify]
+  dp2m verify [out_dir] [--fw <DP2MV105.bin>] [--suite m6m|custom|labels] [--artifacts <dir>] [--quiet]
+  dp2m re [--fw <DP2MV105.bin>] [--image <C78FRM.bin>] [--syms <m6m.syms>] <package|dis|xrefs|callers|sid|strings|menus|screens|icons|nvram|liveness|text> ...
+  dp2m x3f <file.X3F> [--dump <out.camf>] [--all]
+  dp2m lut <input.cube> <LUTn.BIN> [--grain N] [--grain-profile 0|1|2] [--halo N] [--halo-tint 0|1|2] [--tag NAME]
+  dp2m lut inspect <LUTn.BIN>
   dp2m stage [--config dp2m.fnl] [--from <out_dir>] [--to <sd_mount>]
   dp2m sim [--from <out_dir>] [--port <port>]
   dp2m sim-trace [DP2MVxxx.bin] [--keys k1,k2,...] [--ppm <out.ppm>] [--watch-text]
-  dp2m verify-m5 <Firm.bin>
+  dp2m verify-m5 <Firm.bin|out_dir>
   dp2m disasm-fr80 <Firm.bin> <va_start_hex> <va_end_hex>
   dp2m inspect <file.bin>";
 
@@ -257,8 +263,8 @@ fn sim(root: &Path, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_sim_key(name: &str) -> Result<dp2m_sim::Key, String> {
-    use dp2m_sim::Key;
+fn parse_sim_key(name: &str) -> Result<dp2m_emu::sim::Key, String> {
+    use dp2m_emu::sim::Key;
     Ok(match name.to_ascii_lowercase().as_str() {
         "ok" | "enter" => Key::Ok,
         "up" => Key::Up,
@@ -279,7 +285,7 @@ fn parse_sim_key(name: &str) -> Result<dp2m_sim::Key, String> {
 }
 
 fn sim_trace(root: &Path, args: &[String]) -> Result<(), String> {
-    use dp2m_sim::{Camera, LCD_H, LCD_W};
+    use dp2m_emu::sim::{Camera, LCD_H, LCD_W};
 
     let a = Args::parse(args, &["--config", "--keys", "--ppm"], &["--watch-text"])?;
     let cfg = load_config(a.path("--config").as_deref(), root)?;
@@ -386,18 +392,283 @@ fn sim_trace(root: &Path, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn parse_u32_auto(s: &str) -> Result<u32, String> {
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).map_err(|_| format!("invalid hex '{s}'"))
+    } else {
+        s.parse::<u32>().map_err(|_| format!("invalid int '{s}'"))
+    }
+}
+
+fn verify_cmd(root: &Path, args: &[String]) -> Result<(), String> {
+    use dp2m_emu::verify::{Build, run_suites_with_artifacts};
+    use std::time::Instant;
+
+    let a = Args::parse(args, &["--fw", "--suite", "--artifacts"], &["--quiet"])?;
+    let out = a.positional.first().map(PathBuf::from).unwrap_or_else(|| root.join("out"));
+    let fw = a.path("--fw").unwrap_or_else(|| root.join("data/DP2MV105.bin"));
+    let verbose = !a.switches.iter().any(|s| s == "--quiet");
+    let suites: Vec<&str> = a.flags.iter().filter(|(f, _)| f == "--suite").map(|(_, v)| v.as_str()).collect();
+
+    let t0 = Instant::now();
+    let b = Build::load(&out, &fw)?;
+    let results = run_suites_with_artifacts(&b, &suites, verbose, a.path("--artifacts").as_deref());
+    println!("== summary ({:.2}s)", t0.elapsed().as_secs_f64());
+    let mut failed = false;
+    for s in &results {
+        let status = if s.skipped { "SKIP" } else if s.failed > 0 { "FAIL" } else { "PASS" };
+        println!("  {:<7} {status}  {} pass, {} fail", s.name, s.passed, s.failed);
+        for f in &s.fails {
+            println!("    FAIL {f}");
+        }
+        if s.failed > 0 {
+            failed = true;
+        }
+    }
+    if failed {
+        return Err("verification failed".into());
+    }
+    Ok(())
+}
+
+fn re_cmd(root: &Path, args: &[String]) -> Result<(), String> {
+    use dp2m_emu::re::{self, ReCtx, dis, xref::{self, RefKind, XrefIndex}};
+    use dp2m_emu::stock;
+
+    // Parse top-level options before subcommand
+    let mut fw = root.join("data/DP2MV105.bin");
+    let mut image: Option<PathBuf> = None;
+    let mut syms: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--fw" if i + 1 < args.len() => { fw = PathBuf::from(&args[i + 1]); i += 2; }
+            "--image" if i + 1 < args.len() => { image = Some(PathBuf::from(&args[i + 1])); i += 2; }
+            "--syms" if i + 1 < args.len() => { syms = Some(PathBuf::from(&args[i + 1])); i += 2; }
+            _ => break,
+        }
+    }
+    let Some(sub) = args.get(i).map(String::as_str) else {
+        return Err("usage: dp2m re [--image C78FRM.bin] <package|dis|xrefs|callers|sid|strings|menus|screens|icons|nvram>".into());
+    };
+    let rest = &args[i + 1..];
+    let img_path = image.unwrap_or_else(|| fw.clone());
+
+    match sub {
+        "package" => {
+            let p = rest.first().map(PathBuf::from).unwrap_or(img_path);
+            for line in re::cmd_package(&p, Some(&fw))? {
+                println!("{line}");
+            }
+        }
+        "dis" => {
+            let a = Args::parse(rest, &["-n"], &["--arm"])?;
+            let ctx = ReCtx::load(&img_path, syms.as_deref())?;
+            let va = parse_u32_auto(a.positional.first().ok_or("dis <va> [end]")?)?;
+            let end = a.positional.get(1).map(|s| parse_u32_auto(s)).transpose()?;
+            let n: usize = a.flags.iter().rev().find(|(f, _)| f == "-n").map_or(Ok(40), |(_, v)| v.parse().map_err(|_| "bad -n".to_owned()))?;
+            let arm = a.switches.iter().any(|s| s == "--arm");
+            let (stop, lim) = match end {
+                Some(e) => (e, None),
+                None => (va.saturating_add((n as u32) * 4), Some(n)),
+            };
+            for line in dis::dis_range(&ctx.img, &ctx.names, va, stop, lim, arm) {
+                println!("{line}");
+            }
+        }
+        "xrefs" | "callers" => {
+            let a = Args::parse(rest, &["--kinds"], &[])?;
+            let ctx = ReCtx::load(&img_path, syms.as_deref())?;
+            let val = parse_u32_auto(a.positional.first().ok_or("expected hex address")?)?;
+            let kinds: Option<Vec<RefKind>> = if sub == "callers" {
+                Some(vec![RefKind::Tbl, RefKind::Tblx, RefKind::Abl, RefKind::Ablx])
+            } else if let Some((_, ks)) = a.flags.iter().rev().find(|(f, _)| f == "--kinds") {
+                Some(ks.split(',').map(|k| RefKind::parse(k).ok_or_else(|| format!("unknown kind '{k}'"))).collect::<Result<_, _>>()?)
+            } else {
+                None
+            };
+            let idx = XrefIndex::build(&ctx.img);
+            for r in idx.refs(val, kinds.as_deref()) {
+                let slot = if r.slot != r.src { format!(" slot {:#x}", r.slot) } else { String::new() };
+                println!("{:08x} {:<5}{slot}  {}", r.src, r.kind.as_str(), ctx.where_va(r.src));
+            }
+        }
+        "sid" => {
+            let a = Args::parse(rest, &["--find", "--lang"], &[])?;
+            let ctx = ReCtx::load(&img_path, syms.as_deref())?;
+            let find = a.flags.iter().rev().find(|(f, _)| f == "--find").map(|(_, v)| v.as_str());
+            let lang = a.flags.iter().rev().find(|(f, _)| f == "--lang").map_or(Ok(0), |(_, v)| parse_u32_auto(v))?;
+            let sids: Vec<u32> = a.positional.iter().map(|s| parse_u32_auto(s)).collect::<Result<_, _>>()?;
+            for line in re::cmd_sid(&ctx, &sids, find, lang) {
+                println!("{line}");
+            }
+        }
+        "strings" => {
+            let a = Args::parse(rest, &["--min"], &["--refs"])?;
+            let ctx = ReCtx::load(&img_path, syms.as_deref())?;
+            let min: usize = a.flags.iter().rev().find(|(f, _)| f == "--min").map_or(Ok(4), |(_, v)| v.parse().map_err(|_| "bad --min".to_owned()))?;
+            let with_refs = a.switches.iter().any(|s| s == "--refs");
+            for line in re::cmd_strings(&ctx, a.positional.first().map(String::as_str), min, with_refs) {
+                println!("{line}");
+            }
+        }
+        "menus" => {
+            let ctx = ReCtx::load(&img_path, syms.as_deref())?;
+            let ids: Vec<u32> = rest.iter().map(|s| parse_u32_auto(s)).collect::<Result<_, _>>()?;
+            for line in re::cmd_menus(&ctx, &ids) {
+                println!("{line}");
+            }
+        }
+        "screens" => {
+            let ctx = ReCtx::load(&img_path, syms.as_deref())?;
+            for line in re::cmd_screens(&ctx) {
+                println!("{line}");
+            }
+        }
+        "icons" => {
+            let ctx = ReCtx::load(&img_path, syms.as_deref())?;
+            let ids: Vec<u32> = rest.iter().map(|s| parse_u32_auto(s)).collect::<Result<_, _>>()?;
+            for line in re::cmd_icons(&ctx, &ids) {
+                println!("{line}");
+            }
+        }
+        "nvram" => {
+            let a = Args::parse(rest, &["--window", "--block", "--len", "--offset"], &[])?;
+            let ctx = ReCtx::load(&img_path, syms.as_deref())?;
+            let (lo, hi) = if let Some((_, w)) = a.flags.iter().rev().find(|(f, _)| f == "--window") {
+                let (a_s, b_s) = w.split_once(':').ok_or("expected LO:HI for --window")?;
+                (parse_u32_auto(a_s)?, parse_u32_auto(b_s)?)
+            } else {
+                (0xA093_9600, 0xA093_9B00)
+            };
+            let block = a.flags.iter().rev().find(|(f, _)| f == "--block").map_or(Ok(stock::NV_BLOCK), |(_, v)| parse_u32_auto(v))?;
+            let len = a.flags.iter().rev().find(|(f, _)| f == "--len").map_or(Ok(stock::NV_LEN), |(_, v)| parse_u32_auto(v).map(|x| x as usize))?;
+            let offsets: Vec<u32> = a.flags.iter().filter(|(f, _)| f == "--offset").map(|(_, v)| parse_u32_auto(v)).collect::<Result<_, _>>()?;
+            let idx = XrefIndex::build(&ctx.img);
+            let (acc, calls) = xref::nvram_scan(&ctx.img, lo, hi, &idx, 48);
+            eprintln!("{} accesses, {} calls", acc.len(), calls.len());
+            for line in xref::nvram_report(&ctx.img, &acc, &calls, block, len, stock::NV_DEFAULTS, &offsets) {
+                println!("{line}");
+            }
+        }
+        "liveness" => {
+            let a = Args::parse(rest, &["--min-size", "--stock"], &["--tsv"])?;
+            let ctx = ReCtx::load(&img_path, syms.as_deref())?;
+            let min_size = a.flags.iter().rev().find(|(f, _)| f == "--min-size").map_or(Ok(512), |(_, v)| parse_u32_auto(v))?;
+            let tsv = a.switches.iter().any(|s| s == "--tsv");
+            let t0 = std::time::Instant::now();
+            let lv = re::liveness::analyse(&ctx.img, &[]);
+            let stock_lv = if let Some(sp) = a.path("--stock") {
+                let simg = dp2m_emu::image::Image::load(&sp)?;
+                Some(re::liveness::analyse(&simg, &[]))
+            } else {
+                None
+            };
+            let cands = re::liveness::candidates(&ctx.img, &lv, stock_lv.as_ref(), min_size, &[], &[]);
+            eprintln!(
+                "liveness: {} functions ({} live, {} roots), {} candidates >= {min_size} B ({:.0} ms)",
+                lv.ents.len(),
+                lv.live.len(),
+                lv.roots.len(),
+                cands.len(),
+                t0.elapsed().as_secs_f64() * 1000.0
+            );
+            if tsv {
+                println!("{}", re::liveness::TSV_HEADER);
+                for c in &cands {
+                    println!("{}", c.tsv());
+                }
+            } else {
+                for c in &cands {
+                    println!("{:#010x}..{:#010x} {:7} B  {:<18} {:3} fns  {}", c.start, c.end, c.size(), c.kind, c.fns, c.hint);
+                }
+            }
+        }
+        "text" => {
+            let a = Args::parse(rest, &["--px", "--style", "--lang"], &[])?;
+            let ctx = ReCtx::load(&img_path, syms.as_deref())?;
+            let s = a.positional.first().ok_or("usage: dp2m re text <string> [--px N] [--style H] [--lang N]")?;
+            let px = a.flags.iter().rev().find(|(f, _)| f == "--px").map_or(Ok(18), |(_, v)| parse_u32_auto(v))?;
+            let style = a.flags.iter().rev().find(|(f, _)| f == "--style").map_or(Ok(0x22), |(_, v)| parse_u32_auto(v))?;
+            let lang = a.flags.iter().rev().find(|(f, _)| f == "--lang").map_or(Ok(0), |(_, v)| parse_u32_auto(v))?;
+            for line in re::cmd_text(&ctx, s, px, style, lang)? {
+                println!("{line}");
+            }
+        }
+        _ => return Err(format!("unknown re subcommand '{sub}'")),
+    }
+    Ok(())
+}
+
+fn x3f_cmd(args: &[String]) -> Result<(), String> {
+    use dp2m_emu::x3f;
+    let a = Args::parse(args, &["--dump"], &["--all"])?;
+    let path = PathBuf::from(a.positional.first().ok_or("usage: dp2m x3f <file.X3F> [--dump out.camf] [--all]")?);
+    let raw = read(&path)?;
+    let camf = x3f::extract_x3f_camf(&raw)?;
+    if let Some(dp) = a.path("--dump") {
+        write(&dp, &camf)?;
+    }
+    let entries = x3f::parse_camf(&camf);
+    let show_all = a.switches.iter().any(|s| s == "--all");
+    println!("Decoded {} B CAMF, {} entries from {}", camf.len(), entries.len(), path.display());
+    const FILTER: &[&str] = &[
+        "Color", "CMCM", "CMCC", "MCAS", "CCMatrix", "WBGain", "TC", "Gamma", "Sat",
+        "CP1", "CP2", "Camsettings", "Model", "Firmware", "Sharp", "Contrast", "Noise",
+        "Mode", "Capture", "WhiteBalance",
+    ];
+    for e in &entries {
+        if show_all || FILTER.iter().any(|w| e.name.contains(w)) {
+            let line = x3f::format_entry(e);
+            if line.len() > 180 {
+                println!("  {}...", &line[..177]);
+            } else {
+                println!("  {line}");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn lut_cmd(args: &[String]) -> Result<(), String> {
+    if args.first().map(String::as_str) == Some("inspect") {
+        let p = args.get(1).ok_or("usage: dp2m lut inspect <LUTn.BIN>")?;
+        return lut::inspect_d2ml(Path::new(p));
+    }
+    let a = Args::parse(args, &["--grain", "--grain-profile", "--halo", "--halo-tint", "--tag"], &[])?;
+    let input = PathBuf::from(a.positional.first().ok_or("usage: dp2m lut <in.cube> <out.bin>")?);
+    let output = PathBuf::from(a.positional.get(1).ok_or("usage: dp2m lut <in.cube> <out.bin>")?);
+    let opt = |flag: &str, def: u8| -> Result<u8, String> {
+        a.flags
+            .iter()
+            .rev()
+            .find(|(f, _)| f == flag)
+            .map_or(Ok(def), |(_, v)| v.parse::<u8>().map_err(|_| format!("invalid {flag} '{v}'")))
+    };
+    let tag = a.flags.iter().rev().find(|(f, _)| f == "--tag").map(|(_, v)| v.as_str());
+    lut::compile_file(&input, &output, opt("--grain", 28)?, opt("--grain-profile", 0)?, opt("--halo", 64)?, opt("--halo-tint", 0)?, tag)
+}
+
 fn run() -> Result<(), String> {
     let args: Vec<String> = env::args().skip(1).collect();
     let root = repo_root();
     match args.first().map(String::as_str) {
         Some("build") => build(&root, &args[1..]),
+        Some("verify") => verify_cmd(&root, &args[1..]),
+        Some("re") => re_cmd(&root, &args[1..]),
+        Some("x3f") => x3f_cmd(&args[1..]),
+        Some("lut") => lut_cmd(&args[1..]),
         Some("stage") => stage(&root, &args[1..]),
         Some("sim") => sim(&root, &args[1..]),
         Some("sim-trace") => sim_trace(&root, &args[1..]),
-        Some("verify-m5") if args.len() == 2 => m5::verify_m5(&read(Path::new(&args[1]))?),
+        Some("verify-m5") if args.len() == 2 => {
+            let path = Path::new(&args[1]);
+            let firm = if path.is_dir() { path.join("Firm.bin") } else { path.to_path_buf() };
+            m5::verify_m5(&read(&firm)?)
+        }
         Some("disasm-fr80") if args.len() == 4 => {
             let buf = read(Path::new(&args[1]))?;
-            for line in fr80::dis_range(&buf, parse_hex(&args[2])?, parse_hex(&args[3])?, m5::DELTA) {
+            for line in dp2m_emu::fr80::dis_range(&buf, parse_hex(&args[2])?, parse_hex(&args[3])?, m5::DELTA) {
                 println!("{line}");
             }
             Ok(())

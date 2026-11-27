@@ -60,64 +60,117 @@ static uint32_t udiv(uint32_t n, uint32_t d) {
 }
 
 __attribute__((noinline, target("arm")))
-static struct box scan_box(uint32_t rows, uint8_t *occ) {
-    struct box b = { LB_W, 0, 0, 0 };
+static struct box scan_box(uint32_t rows) {
+    struct box b = { 0, 0, 0, 0 };
+    if (!rows) return b;
+    memset(cols, 0, sizeof cols);
+    const uint32_t *rw = (const uint32_t *)(const void *)LINE_BUF;
+    uint32_t *ow_base = (uint32_t *)(void *)cols;
     for (uint32_t y = 0; y < rows; y++) {
-        const uint32_t *rw = (const uint32_t *)(const void *)(LINE_BUF + y * LB_W);
-        for (uint32_t xw = 0; xw < LB_W / 4; xw++) {
-            uint32_t w = rw[xw];
-            if (!w) continue;
-            uint32_t x = xw << 2;
+        uint32_t *ow = ow_base;
+        uint32_t nz = 0, n = LB_W / 32u;
+        __asm__ volatile(
+            "1:\n\t"
+            "ldmia %[p]!, {r0, r1, r2, r3, r4, r5, r6, r7}\n\t"
+            "orr r12, r0, r1\n\t"
+            "orr r12, r12, r2\n\t"
+            "orr r12, r12, r3\n\t"
+            "orr r12, r12, r4\n\t"
+            "orr r12, r12, r5\n\t"
+            "orr r12, r12, r6\n\t"
+            "orrs r12, r12, r7\n\t"
+            "beq 2f\n\t"
+            "mov %[nz], #1\n\t"
+            "ldr r12, [%[o], #0];  orr r0, r0, r12\n\t"
+            "ldr r12, [%[o], #4];  orr r1, r1, r12\n\t"
+            "ldr r12, [%[o], #8];  orr r2, r2, r12\n\t"
+            "ldr r12, [%[o], #12]; orr r3, r3, r12\n\t"
+            "ldr r12, [%[o], #16]; orr r4, r4, r12\n\t"
+            "ldr r12, [%[o], #20]; orr r5, r5, r12\n\t"
+            "ldr r12, [%[o], #24]; orr r6, r6, r12\n\t"
+            "ldr r12, [%[o], #28]; orr r7, r7, r12\n\t"
+            "stmia %[o]!, {r0, r1, r2, r3, r4, r5, r6, r7}\n\t"
+            "subs %[n], %[n], #1\n\t"
+            "bne 1b\n\t"
+            "b 3f\n\t"
+            "2:\n\t"
+            "add %[o], %[o], #32\n\t"
+            "subs %[n], %[n], #1\n\t"
+            "bne 1b\n\t"
+            "3:\n\t"
+            : [p] "+r"(rw), [o] "+r"(ow), [n] "+r"(n), [nz] "+r"(nz)
+            :
+            : "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r12", "cc", "memory");
+        if (nz) {
             if (!b.y1) b.y0 = y;
-            b.y1 = y + 1;
-            if (w >> 24)           { if (x < b.x0) b.x0 = x;           if (x + 1 > b.x1) b.x1 = x + 1; if (occ) occ[x] = 1; }
-            if ((w >> 16) & 0xFFu) { if (x + 1 < b.x0) b.x0 = x + 1;   if (x + 2 > b.x1) b.x1 = x + 2; if (occ) occ[x + 1] = 1; }
-            if ((w >> 8) & 0xFFu)  { if (x + 2 < b.x0) b.x0 = x + 2;   if (x + 3 > b.x1) b.x1 = x + 3; if (occ) occ[x + 2] = 1; }
-            if (w & 0xFFu)         { if (x + 3 < b.x0) b.x0 = x + 3;   if (x + 4 > b.x1) b.x1 = x + 4; if (occ) occ[x + 3] = 1; }
+            b.y1 = y + 1u;
         }
     }
-    if (!b.y1) b.x0 = 0;
+    if (!b.y1) return b;
+    uint32_t xw = 0;
+    while (!ow_base[xw]) xw++;
+    b.x0 = (xw << 2) + ((uint32_t)__builtin_clz(ow_base[xw]) >> 3);
+    uint32_t rw_i = LB_W / 4u - 1u;
+    while (!ow_base[rw_i]) rw_i--;
+    uint32_t w = ow_base[rw_i];
+    b.x1 = (rw_i << 2) + ((uint32_t)__builtin_clz(w & (0u - w)) >> 3) + 1u;
     return b;
 }
 
-// ink box of s[..n] drawn offscreen (rect y >= 480 leaves the OSD untouched); marks inked columns in occ
-static struct box draw(const struct cls *c, const char *s, int32_t n, uint32_t px, uint8_t *occ) {
+// ink box of s[..n] drawn offscreen (rect y >= 480 leaves the OSD untouched); marks inked columns in cols
+static struct box draw(const struct cls *c, const char *s, int32_t n, uint32_t px) {
     static const uint16_t offscreen[4] = { 0, 600, LB_W, 100 };
     stock_text(0, s, n, px, c->weight, 0, !(c->flags & BOLD), offscreen, 0x21, 0);
-    return scan_box(rows_of(px), occ);
+    return scan_box(rows_of(px));
 }
 
+__attribute__((noinline, target("arm")))
 static void put(uint8_t *t, const struct cls *c, int32_t x, int32_t y, const uint8_t *src, uint32_t w, uint32_t h, uint32_t stride) {
-    for (uint32_t j = 0; j < h; j++) {
-        uint32_t ty = (uint32_t)(y + (int32_t)j);
-        if (ty >= c->h) continue;
-        uint8_t *dst = t + ty * c->w;
-        const uint8_t *sr = src + j * stride;
-        for (uint32_t i = 0; i < w; i++) {
-            uint32_t tx = (uint32_t)(x + (int32_t)i);
-            if (tx < c->w && sr[i]) dst[tx] = sr[i];
+    int32_t j0 = y < 0 ? -y : 0;
+    int32_t j1 = (int32_t)h;
+    if (y + j1 > (int32_t)c->h) j1 = (int32_t)c->h - y;
+    int32_t i0 = x < 0 ? -x : 0;
+    int32_t i1 = (int32_t)w;
+    if (x + i1 > (int32_t)c->w) i1 = (int32_t)c->w - x;
+    if (j0 >= j1 || i0 >= i1) return;
+    uint32_t cw = c->w, len = (uint32_t)(i1 - i0);
+    uint8_t *dst = t + (uint32_t)(y + j0) * cw + (uint32_t)(x + i0);
+    const uint8_t *sr = src + (uint32_t)j0 * stride + (uint32_t)i0;
+    for (int32_t j = j0; j < j1; j++, dst += cw, sr += stride) {
+        for (uint32_t i = 0; i < len; i++) {
+            uint8_t v = sr[i];
+            if (v) dst[i] = v;
         }
     }
 }
 
 // MODE / widget tokens & mid-size text: strokes 1 px heavier; stock outline shapes: r = 1 plus, r = 2 5x5 without corners
 __attribute__((noinline, target("arm")))
-static void finish_tile(uint8_t *t, uint32_t w, uint32_t h, uint32_t bold, uint32_t r, uint8_t *m) {
+static void finish_tile(uint8_t *t, uint32_t w, uint32_t h, uint32_t bold, uint32_t r, uint8_t *m, struct box ink) {
+    uint32_t ix0 = ink.x0, iy0 = ink.y0, ix1 = ink.x1, iy1 = ink.y1;
+    if (ix0 >= ix1 || iy0 >= iy1) return;
     if (bold) {
-        for (uint32_t y = 0; y < h; y++) {
-            uint8_t *row = t + y * w;
-            for (uint32_t x = w - 1; x > 0; x--) {
-                uint8_t l = row[x - 1];
+        uint32_t bx0 = ix0 + 1u, bx1 = ix1 < w ? ix1 : w - 1u;
+        uint8_t *row = t + iy0 * w;
+        for (uint32_t y = iy0; y < iy1; y++, row += w) {
+            for (uint32_t x = bx1; x >= bx0; x--) {
+                uint8_t l = row[x - 1u];
                 if ((uint32_t)(l - 1u) < (uint32_t)(row[x] - 1u)) row[x] = l;
             }
         }
+        if (ix1 < w) ix1++;
     }
     static const uint8_t z[112] = { 0 };
+    uint32_t oy0 = iy0 > r ? iy0 - r : 0u;
+    uint32_t oy1 = iy1 + r < h ? iy1 + r : h;
+    uint32_t ox0 = ix0 > r ? ix0 - r : 0u;
+    uint32_t ox1 = ix1 + r < w ? ix1 + r : w;
     if (r == 1u) {
-        for (uint32_t y = 0; y < h; y++) {
-            uint8_t *tr = t + y * w;
-            const uint8_t *up = y ? tr - w : z, *dn = y + 1u < h ? tr + w : z;
-            for (uint32_t x = 0; x < w; x++) {
+        uint8_t *tr = t + oy0 * w;
+        for (uint32_t y = oy0; y < oy1; y++, tr += w) {
+            const uint8_t *up = (y > iy0) ? tr - w : z;
+            const uint8_t *dn = (y + 1u >= iy0 && y + 1u < iy1) ? tr + w : z;
+            for (uint32_t x = ox0; x < ox1; x++) {
                 if (tr[x]) continue;
                 if (((uint32_t)(up[x] - 1u) < INK_MAX) || ((uint32_t)(dn[x] - 1u) < INK_MAX) ||
                     (x && (uint32_t)(tr[x - 1u] - 1u) < INK_MAX) || (x + 1u < w && (uint32_t)(tr[x + 1u] - 1u) < INK_MAX))
@@ -126,26 +179,49 @@ static void finish_tile(uint8_t *t, uint32_t w, uint32_t h, uint32_t bold, uint3
         }
         return;
     }
-    for (uint32_t y = 0; y < h; y++) {
+    for (uint32_t y = iy0; y < iy1; y++) {
         const uint8_t *tr = t + y * w;
         uint8_t *mr = m + y * w;
-        uint32_t win = (((uint32_t)(tr[0] - 1u) < INK_MAX) << 1) | ((uint32_t)(tr[1] - 1u) < INK_MAX);
-        for (uint32_t x = 0; x < w; x++) {
+        uint32_t win = ox0 ? 0u : ((((uint32_t)(tr[0] - 1u) < INK_MAX) << 1) | ((uint32_t)(tr[1] - 1u) < INK_MAX));
+        for (uint32_t x = ox0; x < ox1; x++) {
             uint32_t nxt = (x + 2u < w) && ((uint32_t)(tr[x + 2u] - 1u) < INK_MAX);
             win = ((win << 1) | nxt) & 0x1Fu;
             mr[x] = (uint8_t)(win ? ((win & 0x0Eu) ? 3u : 2u) : 0u);
         }
     }
-    for (uint32_t y = 0; y < h; y++) {
-        uint8_t *tr = t + y * w;
-        const uint8_t *m0 = y >= 2u ? m + (y - 2u) * w : z;
-        const uint8_t *m1 = y >= 1u ? m + (y - 1u) * w : z;
-        const uint8_t *m2 = m + y * w;
-        const uint8_t *m3 = y + 1u < h ? m + (y + 1u) * w : z;
-        const uint8_t *m4 = y + 2u < h ? m + (y + 2u) * w : z;
-        for (uint32_t x = 0; x < w; x++)
-            if (!tr[x] && (((m0[x] | m4[x]) & 1u) | (m1[x] | m2[x] | m3[x])))
-                tr[x] = OUTLINE;
+    uint32_t len = ox1 - ox0;
+    for (uint32_t y = oy0; y < oy1; y++) {
+        uint8_t *tr = t + y * w + ox0;
+        const uint8_t *m0 = (y >= iy0 + 2u && y - 2u < iy1) ? m + (y - 2u) * w + ox0 : z;
+        const uint8_t *m1 = (y >= iy0 + 1u && y - 1u < iy1) ? m + (y - 1u) * w + ox0 : z;
+        const uint8_t *m2 = (y >= iy0 && y < iy1) ? m + y * w + ox0 : z;
+        const uint8_t *m3 = (y + 1u >= iy0 && y + 1u < iy1) ? m + (y + 1u) * w + ox0 : z;
+        const uint8_t *m4 = (y + 2u >= iy0 && y + 2u < iy1) ? m + (y + 2u) * w + ox0 : z;
+        uint32_t cnt = len;
+        __asm__ volatile(
+            "1:\n\t"
+            "subs %[cnt], %[cnt], #1\n\t"
+            "ldrb r0, [%[tr], %[cnt]]\n\t"
+            "cmp r0, #0\n\t"
+            "bne 2f\n\t"
+            "ldrb r0, [%[m0], %[cnt]]\n\t"
+            "ldrb r1, [%[m4], %[cnt]]\n\t"
+            "orr r0, r0, r1\n\t"
+            "and r0, r0, #1\n\t"
+            "ldrb r1, [%[m1], %[cnt]]\n\t"
+            "orr r0, r0, r1\n\t"
+            "ldrb r1, [%[m2], %[cnt]]\n\t"
+            "orr r0, r0, r1\n\t"
+            "ldrb r1, [%[m3], %[cnt]]\n\t"
+            "orrs r0, r0, r1\n\t"
+            "movne r0, #16\n\t"
+            "strbne r0, [%[tr], %[cnt]]\n\t"
+            "2:\n\t"
+            "cmp %[cnt], #0\n\t"
+            "bne 1b\n\t"
+            : [cnt] "+r"(cnt)
+            : [tr] "r"(tr), [m0] "r"(m0), [m1] "r"(m1), [m2] "r"(m2), [m3] "r"(m3), [m4] "r"(m4)
+            : "r0", "r1", "cc", "memory");
     }
 }
 
@@ -191,31 +267,40 @@ static uint32_t best_split(const char *s, struct box b, uint32_t aw, uint32_t ah
 // uppercase, centred, as large as fits on 1 line or 2 balanced lines
 static uint8_t *render(const struct cls *c, const char *src) {
     char s[LEN_MAX];
-    uint32_t n = 0;
-    for (; src[n] && n < LEN_MAX - 1; n++) s[n] = (src[n] >= 'a' && src[n] <= 'z') ? (char)(src[n] - 32) : src[n];
+    uint32_t n = 0, has_sp = 0;
+    for (; src[n] && n < LEN_MAX - 1; n++) {
+        char ch = src[n];
+        if (ch == ' ') has_sp = 1u;
+        s[n] = (ch >= 'a' && ch <= 'z') ? (char)(ch - 32) : ch;
+    }
     s[n] = 0;
 
-    memset(cols, 0, sizeof cols);
-    struct box b = draw(c, s, -1, PX_REF, cols);
+    struct box b = draw(c, s, -1, PX_REF);
     if (!b.y1) return 0;
     uint32_t bold = 1u, r = c->ring;
     uint32_t aw = c->w - 2u * (c->mx + r) - bold, ah = c->h - 2u * (c->my + r);
     uint32_t px = min(udiv(PX_REF * aw, b.x1 - b.x0), udiv(PX_REF * min(ah, c->hmax - 2u * r), b.y1 - b.y0));
-    uint32_t split = best_split(s, b, aw, ah, r, &px);
+    uint32_t split = has_sp ? best_split(s, b, aw, ah, r, &px) : 0u;
 
     struct box b1, b2 = { 0, 0, 0, 0 };
     uint32_t w1, h1, w2 = 0, h2 = 0, tot;
+    uint32_t have_ref = 1u;
     for (px = min(max(px, PX_MIN), PX_MAX);; px--) {
         r = px >= PX_RING2 ? c->ring : 1u;
         bold = (c->flags & BOLD) || (px >= PX_BOLD0 && px < PX_BOLD1);
         aw = c->w - 2u * (c->mx + r) - bold;
         ah = c->h - 2u * (c->my + r);
-        b1 = draw(c, s, split ? (int32_t)split - 1 : -1, px, 0);
+        if (!split && have_ref && px == PX_REF) {
+            b1 = b;
+        } else {
+            have_ref = 0u;
+            b1 = draw(c, s, split ? (int32_t)split - 1 : -1, px);
+        }
         w1 = min(b1.x1 - b1.x0, c->w);
         h1 = tot = min(b1.y1 - b1.y0, c->h);
         if (split) {
             for (uint32_t y = 0; y < h1; y++) memcpy(scratch + y * w1, LINE_BUF + (b1.y0 + y) * LB_W + b1.x0, w1);
-            b2 = draw(c, s + split, -1, px, 0);
+            b2 = draw(c, s + split, -1, px);
             w2 = min(b2.x1 - b2.x0, c->w);
             h2 = min(b2.y1 - b2.y0, c->h);
             tot += r + 1u + h2;
@@ -225,14 +310,27 @@ static uint8_t *render(const struct cls *c, const char *src) {
 
     uint8_t *t = alloc(c->w * c->h);
     memset(t, 0, c->w * c->h);
-    int32_t y = ((int32_t)c->h - (int32_t)tot) / 2, x = (int32_t)(c->mx + r);
+    int32_t y0_p = ((int32_t)c->h - (int32_t)tot) / 2, x_l = (int32_t)(c->mx + r);
+    int32_t y = y0_p;
+    int32_t x1_p = (c->flags & LEFT) ? x_l : ((int32_t)(c->w - w1) - (int32_t)bold) / 2;
+    int32_t x2_p = split ? ((c->flags & LEFT) ? x_l : ((int32_t)(c->w - w2) - (int32_t)bold) / 2) : x1_p;
     const uint8_t *last = LINE_BUF + (split ? b2.y0 * LB_W + b2.x0 : b1.y0 * LB_W + b1.x0);
     if (split) {
-        put(t, c, (c->flags & LEFT) ? x : ((int32_t)(c->w - w1) - (int32_t)bold) / 2, y, scratch, w1, h1, w1);
+        put(t, c, x1_p, y, scratch, w1, h1, w1);
         y += (int32_t)(h1 + r + 1u);
     }
-    put(t, c, (c->flags & LEFT) ? x : ((int32_t)(c->w - (split ? w2 : w1)) - (int32_t)bold) / 2, y, last, split ? w2 : w1, split ? h2 : h1, LB_W);
-    finish_tile(t, c->w, c->h, bold, r, scratch);
+    put(t, c, x2_p, y, last, split ? w2 : w1, split ? h2 : h1, LB_W);
+    int32_t min_x = split && x1_p < x2_p ? x1_p : x2_p;
+    int32_t max_x = x1_p + (int32_t)w1;
+    if (split && x2_p + (int32_t)w2 > max_x) max_x = x2_p + (int32_t)w2;
+    int32_t max_y = y + (int32_t)(split ? h2 : h1);
+    struct box ink = {
+        min_x > 0 ? (uint32_t)min_x : 0u,
+        y0_p > 0 ? (uint32_t)y0_p : 0u,
+        max_x > 0 ? min((uint32_t)max_x, c->w) : 0u,
+        max_y > 0 ? min((uint32_t)max_y, c->h) : 0u,
+    };
+    finish_tile(t, c->w, c->h, bold, r, scratch, ink);
     return t;
 }
 
@@ -253,6 +351,7 @@ const struct icon *label_icon(uint32_t id) {
         REG32(OSD_DIRTY + 4u) = d1;
         if (!t) return 0;
         cache.tile[k][i] = t;
+        hw_dcache_sync();
     }
     ICON_RESULT->data = t;
     ICON_RESULT->w = c->w;

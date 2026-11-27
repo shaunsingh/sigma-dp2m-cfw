@@ -1,0 +1,8 @@
+[package]
+name = "dp2m-emu"
+description = "Unified DP2 Merrill emulation (ARM926EJ-S BE + FR80 BE), simulation, RE, and verification core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

@@ -1,9 +1,9 @@
-//! Zero-dependency `wasm32-unknown-unknown` C-ABI bindings for `dp2m-sim`.
+//! Zero-dependency `wasm32-unknown-unknown` C-ABI bindings for `dp2m-emu::sim`.
 
 use std::cell::RefCell;
 use std::slice;
 
-use dp2m_sim::{Camera, Key};
+use dp2m_emu::sim::{Camera, Key};
 
 thread_local! {
     static CAM: RefCell<Option<Camera>> = const { RefCell::new(None) };
@@ -97,7 +97,9 @@ pub extern "C" fn cam_tilt(ax: i8, ay: i8) {
 /// `rgba_ptr..+(w * h * 4)` must be a valid RGBA8888 buffer in linear memory.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cam_set_scene(rgba_ptr: *const u8, w: usize, h: usize) {
-    let len = w.saturating_mul(h).saturating_mul(4);
+    let Some(len) = w.checked_mul(h).and_then(|px| px.checked_mul(4)) else {
+        return;
+    };
     if rgba_ptr.is_null() || len == 0 {
         return;
     }
@@ -186,8 +188,8 @@ pub extern "C" fn cam_last_packed_cm() -> u32 {
     CAM.with(|slot| {
         slot.borrow()
             .as_ref()
-            .and_then(Camera::last_capture)
-            .map_or(0, |cap| cap.packed_cm as u32)
+            .and_then(|c| c.with_last_capture(|cap| cap.packed_cm as u32))
+            .unwrap_or(0)
     })
 }
 
@@ -196,8 +198,8 @@ pub extern "C" fn cam_last_p1d() -> u32 {
     CAM.with(|slot| {
         slot.borrow()
             .as_ref()
-            .and_then(Camera::last_capture)
-            .map_or(0, |cap| cap.p1d as u32)
+            .and_then(|c| c.with_last_capture(|cap| cap.p1d as u32))
+            .unwrap_or(0)
     })
 }
 

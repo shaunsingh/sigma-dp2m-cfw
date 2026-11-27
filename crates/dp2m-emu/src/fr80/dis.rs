@@ -30,9 +30,9 @@ pub fn dis_one(buf: &[u8], off: usize, va: u32) -> (usize, String) {
     let n0 = (op & 0xF) as u8;
 
     let s8 = |v: u8| -> i32 { (v as i8) as i32 };
-    let s12 = |v: u16| -> i32 {
-        let x = v & 0xFFF;
-        if x & 0x800 != 0 { x as i32 - 4096 } else { x as i32 }
+    let s11 = |v: u16| -> i32 {
+        let x = v & 0x7FF;
+        if x & 0x400 != 0 { x as i32 - 2048 } else { x as i32 }
     };
 
     if hi8 == 0x9F && n1 == 0x8 {
@@ -55,7 +55,7 @@ pub fn dis_one(buf: &[u8], off: usize, va: u32) -> (usize, String) {
         return (2, format!("ldi:8    #0x{:02x}, r{}", (n2 << 4) | n1, n0));
     }
     if n3 == 0xD {
-        let disp = s12((((n2 & 7) as u16) << 8) | lo8 as u16) * 2;
+        let disp = s11((((n2 & 7) as u16) << 8) | lo8 as u16) * 2;
         let tgt = (va as i64 + 2 + disp as i64) as u32;
         let mnem = if n2 & 8 != 0 { "call:d" } else { "call" };
         return (2, format!("{:<8} 0x{:06x}", mnem, tgt));
@@ -130,9 +130,12 @@ pub fn dis_one(buf: &[u8], off: usize, va: u32) -> (usize, String) {
 
 pub fn dis_range(buf: &[u8], va_start: u32, va_end: u32, delta: u32) -> Vec<String> {
     let mut out = Vec::new();
-    let mut va = va_start;
+    let mut va = va_start.max(delta);
     while va < va_end {
         let off = (va - delta) as usize;
+        if off >= buf.len() {
+            break;
+        }
         let (sz, text) = dis_one(buf, off, va);
         let hex: String = buf[off..(off + sz).min(buf.len())]
             .iter()

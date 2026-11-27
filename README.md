@@ -18,7 +18,8 @@ dp2m starts from the stock 1.05 package (`DP2MV105.bin`). It assembles FR80 code
 - Live view uses each film's color matrix and tone curve, and follows mode and paper changes immediately.
 - Custom exposure modes C1..C3, F1, F2.
 - ISO 50, 5-shot bracketing, minimum shutter speed for ISO auto.
-- Live-view overlays as extra grid modes: electronic level, aspect masks, focus peaking, zebras, RGB histogram.
+- 11 live-view overlays as extra grid modes: electronic level (standard or Quattro minimal), aspect masks (21:9, 21:9 + level, 4:3, 1:1), focus peaking (runtime Low / Normal / High / Auto MF sensitivity + color), zebras (runtime 95% / 100% / 90% / Dual Hi+Lo), RGB histogram, and False Color (IRE heatmap + legend).
+- Bare-metal ARM926EJ-S big-endian **DOOM** raycaster applet (`SCREEN_DOOM`, Setup page 4): procedural E1M1-style level, textured walls/flats, enemy sprites, weapon/HUD, and clean return to camera UI.
 
 ## Requirements
 
@@ -69,7 +70,7 @@ Example: show only negative and B&W films, use Kodak 2383 as the "Auto" paper fo
 | `:version` | `"2.00"` | package version `major.minor`, at least `1.05` |
 | `:films` | all shown | per film slug: `true` / `false`, or `{:enabled bool :paper slug}`; `:paper` is the paper used for "Auto" |
 | `:m5` | | `:grain-scale` and `:halo-scale` (0..4); `:sd-lut-defaults {:grain :grain-profile :halo :halo-tint}` for the SD LUT mode |
-| `:m6m` | | `:iso50`, `:bkt5`, `:peaking-threshold`, `:zebra-threshold`, `:min-shutter-q16` (7 APEX Tv values in Q16), `:grids` (per grid slug) |
+| `:m6m` | | `:iso50`, `:bkt5`, `:doom`, `:peaking-threshold`, `:zebra-threshold`, `:min-shutter-q16` (7 APEX Tv values in Q16), `:grids` (per grid slug) |
 | `:sd` | | `:mount`, and the files `stage` copies: `:package` (default `true`), `:firm`, `:c78` |
 
 Unknown keys and unknown film, paper or grid slugs are errors. `dp2m.example.fnl` lists every key.
@@ -108,6 +109,10 @@ Run as `cargo run --release -- <command>`. Without `--config`, the builder uses 
 | Command | Action |
 | --- | --- |
 | `build [DP2MV105.bin] [--config f] [--out dir] [--pack f] [--skip-verify]` | build all images; `--skip-verify` skips the FR80 check |
+| `verify [out_dir] [--fw f] [--suite m6m\|custom\|labels] [--artifacts dir] [--quiet]` | native Rust M6M verifier (506 checks across `m6m`, `custom`, `labels` in ~0.4 s; `--artifacts` writes `labels.png`) |
+| `re [--fw f] [--image f] [--syms f] <cmd>` | native M6M RE toolkit: `package`, `dis`, `xrefs`, `callers`, `sid`, `strings`, `menus`, `screens`, `icons`, `nvram`, `liveness`, `text` |
+| `x3f <file.X3F> [--dump out.camf] [--all]` | decode Merrill X3F Type-4 Huffman CAMF sections and dump `CMbM`/`CMbP`/`CMbT` entries |
+| `lut <in.cube> <LUTn.BIN> [--grain N] [--grain-profile 0\|1\|2] [--halo N] [--halo-tint 0\|1\|2] [--tag S]` | compile an Adobe/Resolve `.cube` 3D LUT (`DOMAIN_MIN`/`DOMAIN_MAX`, 17³ + gray anchors) into a 4,160 B D2ML SD-card binary; `lut inspect <LUTn.BIN>` inspects an existing binary |
 | `stage [--config f] [--from dir] [--to card]` | copy images to the SD card and read them back |
 | `verify-m5 <Firm.bin>` | checksums, protected constants and emulated capture jobs |
 | `disasm-fr80 <Firm.bin> <va_start> <va_end>` | disassemble an FR80 address range (hex) |
@@ -115,8 +120,10 @@ Run as `cargo run --release -- <command>`. Without `--config`, the builder uses 
 | `sim [--from dir] [--port p]` | serve the dual-CPU browser simulator on `127.0.0.1:p` (default `8080`) |
 | `sim-trace [pkg.bin] [--keys k1,k2,...] [--ppm f.ppm] [--watch-text]` | run headless dual-CPU key/capture steps, inspect AE/screen/OSD state, and export PPM frames |
 
-- `cargo test --release` runs the unit and integration tests (config, catalog, 36-film link, FR80/ARM9 ISA, dual-CPU `dp2m-sim` flow and Unicorn OSD parity).
+- `cargo test --release` runs the unit and integration tests (config, catalog, 36-film + 11-grid + DOOM link, FR80/ARM9 ISA, `.cube` PCG compiler, dual-CPU `dp2m-emu::sim` flow, DOOM E1M1 gameplay, Unicorn OSD parity, and the 506-check native M6M verifier).
+- `cargo test --release --workspace` needs no prior `out/`: `dp2m`'s `camera_flow` and `verify_m6m` integration tests each build firmware once through the matching CLI (`dp2m.example.fnl`) in a private temporary directory, ignore `dp2m.fnl` and `out/`, and remove their artifacts afterward (requiring `clang` and `ld.lld` on `PATH`, provided by `nix develop`). `cargo test --release -p dp2m-emu` tests only the pure-Rust emulation/RE/X3F core and needs neither `out/` nor a cross-compiler.
 - `cargo test --release -p dp2m ycc_bench -- --ignored --nocapture` prints the M5 engine cost per stage.
+- `cargo test --release -p dp2m m6m_bench -- --ignored --nocapture` prints M6M live-view overlay, label, and screen costs.
 
 Scripts in `tools/`:
 
@@ -141,13 +148,19 @@ Cargo.toml               workspace
 dp2m.example.fnl         config template
 flake.nix                Nix dev shell
 crates/
-  arm9/                  ARM926EJ-S big-endian ARM/Thumb interpreter
-  fr80/                  FR80 assembler, disassembler, emulator
-  dp2m-sim/              dual-CPU M6M + M5Slave camera simulator
+  dp2m-emu/              unified zero-dep emulation, simulation, RE & verification core
+    src/arm9.rs          ARM926EJ-S big-endian ARM/Thumb interpreter + write-range logger
+    src/fr80/            FR80 assembler, disassembler, emulator
+    src/sim/             dual-CPU M6M + M5Slave hardware simulator (`hooks`, `m5`, `isp`)
+    src/verify/          native 506-check M6M verifier (`m6m`, `custom`, `labels`)
+    src/re/              native M6M disassembler, xref indexer, recursive-descent liveness & NVRAM scanner
+    src/x3f.rs           X3F Type-4 Huffman CAMF decompressor & CMbM/CMbP/CMbT parser
+    src/{image,stock,machine}.rs  package/S3 loader, stock symbol map, ARM9 test harness
   dp2m-web/              wasm32 bindings for the browser simulator
-  dp2m/                  builder
+  dp2m/                  CLI & firmware builder
     lua/fennel.lua       Fennel compiler (embedded)
-    src/main.rs          CLI (`build`, `stage`, `verify-m5`, `disasm-fr80`, `inspect`, `sim`)
+    src/main.rs          CLI (`build`, `verify`, `re`, `lut`, `stage`, `sim`, `sim-trace`, `verify-m5`, `disasm-fr80`, `inspect`)
+    src/lut.rs           zero-dep `.cube` -> D2ML sparse PCG compiler
     src/config.rs        Fennel config loader
     src/catalog.rs       films, papers, grids, packed mode ids
     src/pack.rs          film_pack.bin reader

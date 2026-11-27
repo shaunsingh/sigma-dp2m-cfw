@@ -124,9 +124,10 @@ def check_hooks(b: Build, r: Report) -> None:
     r.eq(bad_stock, [], f".dp2m.hooks expect values match stock across all {len(hooks)} sites")
     r.eq(bad_img, [], f".dp2m.hooks patches applied in C78FRM.bin across all {len(hooks)} sites")
     ret0 = b.sym("dp2m_ret0") | 1
+    doom_scr = (b.sym("doom_screen") | 1) if "doom_screen" in b.syms else ret0
     dead = range(0xA07DEBAC, 0xA07DEBF0, 4)
-    r.check(all(0xA0059D50 <= (b.stock.u32(s) & ~1) < 0xA005D924 and b.img.u32(s) == ret0 for s in dead),
-            "retired factory screen vtable slots 33..49 -> dp2m_ret0")
+    r.check(all(0xA0059D50 <= (b.stock.u32(s) & ~1) < 0xA005D924 and b.img.u32(s) == (doom_scr if s == 0xA07DEBAC else ret0) for s in dead),
+            "retired factory screen vtable slots 33..49 -> doom_screen / dp2m_ret0")
     r.check(b.img.rd(0xA07DEB28, 0x84) == b.stock.rd(0xA07DEB28, 0x84)
             and b.img.rd(0xA07DEBF0, 0x1C) == b.stock.rd(0xA07DEBF0, 0x1C), "live screen vtable slots 0..32 & 50..55 intact")
     m = Machine(b.img)
@@ -478,7 +479,7 @@ def check_makernote(b: Build, r: Report) -> None:
     r.eq(bad, [], f"maker note: stock modes keep their names, {len(fl)} films write 'Film NN' + name and parse back in JPG & X3F playback")
 
 
-def check_hud(b: Build, r: Report, peakcol_addr: int) -> None:
+def check_hud(b: Build, r: Report, peakcol_addr: int, peaksens_addr: int, zebralvl_addr: int) -> None:
     wget, gdraw = b.sym("grid_widget_get"), b.sym("grid_draw_hook")
     r.eq(b.img.u32(0xA07FA4A4), wget | 1, "LV widget 0x14 getter -> grid_widget_get")
     r.check(b.img.bl_target(0xA016C708) == gdraw and b.img.bl_target(0xA004C5AE) == gdraw, "both stock_grid_draw call sites -> grid_draw_hook")
@@ -519,13 +520,13 @@ def check_hud(b: Build, r: Report, peakcol_addr: int) -> None:
     r.check(k0 == k_dead and k_tilt != k0 and ((k_port >> 8) & 1) == 1, "grid_widget_get tilt: deadband |slope|<=1, landscape vs portrait")
     st["ax"], st["ay"] = 0, 64
     fkeys = []
-    for mode in (11, 12, 13, 14):
+    for mode in (11, 12, 13, 14, 17):
         m.w8(stock.NV_GRID, mode)
         for fc in (4, 5, 6):
             m.w32(lp + 12, fc)
             fkeys.append(m.call(wget))
-    r.eq(fkeys, [v for mode in (11, 12, 13, 14) for v in (mode << 16 | 2, mode << 16 | 2, mode << 16 | 3)],
-         "grid_widget_get modes 11..14 key on fcnt >> 1")
+    r.eq(fkeys, [v for mode in (11, 12, 13, 14, 17) for v in (mode << 16 | 2, mode << 16 | 2, mode << 16 | 3)],
+         "grid_widget_get modes 11..14 & 17 key on fcnt >> 1")
 
     # Null/unaligned plane guard for per-frame modes
     m.wr(lp, struct.pack(">4I", 0, 0, 0, 0))
@@ -587,6 +588,36 @@ def check_hud(b: Build, r: Report, peakcol_addr: int) -> None:
     r.eq(got_cols, [0xF11E, 0xFE1E, 0xFFFE, 0x111E], "grid 11 focus peaking: edge detected across all 4 peaking colors")
     r.check(px(0, 0) == 0 and px(10, 423) == 0 and px(300, 120) == 0, "grid 11 focus peaking: 2px border clear & flat background = 0")
     m.w8(peakcol_addr, 0)
+    # Runtime peaking sensitivity: Med(44), High(24), Low(72) & Auto MF-magnify boost
+    soft_y = bytearray([80] * (640 * 424))
+    for y in range(424):
+        row = y * 640
+        soft_y[row + 160 : row + 200] = bytes([110] * 40)
+        soft_y[row + 320 : row + 360] = bytes([136] * 40)
+    m.wr(yv, bytes(soft_y))
+    m.w8(0xA0939A53, 0)
+    m.w8(peaksens_addr, 0)
+    draw(11)
+    med_ok = px(160, 120) == 0 and px(320, 120) == 0xF11E
+    m.w8(peaksens_addr, 1)
+    draw(11)
+    high_ok = px(160, 120) == 0xF11E and px(320, 120) == 0xF11E
+    m.w8(peaksens_addr, 2)
+    draw(11)
+    low_ok = px(160, 120) == 0 and px(320, 120) == 0
+    m.w8(peaksens_addr, 3)
+    m.w8(0xA0939A53, 0)
+    draw(11)
+    auto_1x = px(160, 120) == 0 and px(320, 120) == 0xF11E
+    m.w8(0xA0939A53, 1)
+    draw(11)
+    auto_mf = px(160, 120) == 0xF11E and px(320, 120) == 0xF11E
+    m.w8(0xA0939A53, 0)
+    m.w8(peaksens_addr, 0)
+    r.check(med_ok and high_ok and low_ok and auto_1x and auto_mf,
+            "grid 11 peaking sensitivity: Med(44)/High(24)/Low(72) & Auto MF-magnify boost")
+    m.wr(yv, bytes(y_plane))
+
     draw(12)
     r.check(px(160, 120) == 0xF11E and px(319, 211) == 0x1F3E, "grid 12 peaking + level: combines edge overlay and level")
 
@@ -599,6 +630,46 @@ def check_hud(b: Build, r: Report, peakcol_addr: int) -> None:
     z2 = px(48, 48)
     r.check(z0 in (0xF40E, 0x111A) and z2 in (0xF40E, 0x111A) and z0 != z2 and px(300, 200) == 0,
             "grid 13 zebras: highlights >= ZEBRA_THRESH striped, phase shifts on fcnt, midtones = 0")
+
+    # Runtime zebra thresholds & Dual Highlight+Shadow clipping
+    z_y = bytearray([80] * (640 * 424))
+    for y in range(40, 80):
+        row = y * 640
+        z_y[row + 40 : row + 80] = bytes([235] * 40)
+        z_y[row + 120 : row + 160] = bytes([246] * 40)
+        z_y[row + 200 : row + 240] = bytes([253] * 40)
+        z_y[row + 280 : row + 320] = bytes([6] * 40)
+    m.wr(yv, bytes(z_y))
+    m.w32(lp + 12, 0)
+    m.w8(zebralvl_addr, 1)
+    draw(13)
+    z90_ok = px(48, 48) != 0 and px(288, 48) == 0
+    m.w8(zebralvl_addr, 2)
+    draw(13)
+    z100_ok = px(128, 48) == 0 and px(208, 48) != 0
+    m.w8(zebralvl_addr, 3)
+    draw(13)
+    zh, zl0, zl1 = px(208, 48), px(288, 48), px(292, 48)
+    zdual_ok = zh in (0xF40E, 0x111A) and {zl0, zl1} == {0x1DFE, 0x111A} and px(400, 200) == 0
+    m.w8(zebralvl_addr, 0)
+    r.check(z90_ok and z100_ok and zdual_ok, "grid 13 zebra levels: 90% Safe, 100% Clip & Dual Hi(orange)+Lo(cyan)")
+
+    # Mode 17: Foveon False Color (IRE) 6 zones + vertical IRE scale bar
+    fc_y = bytearray([80] * (640 * 424))
+    for y in range(40, 80):
+        row = y * 640
+        fc_y[row + 20 : row + 60] = bytes([6] * 40)
+        fc_y[row + 80 : row + 120] = bytes([20] * 40)
+        fc_y[row + 140 : row + 180] = bytes([116] * 40)
+        fc_y[row + 200 : row + 240] = bytes([156] * 40)
+        fc_y[row + 260 : row + 300] = bytes([232] * 40)
+        fc_y[row + 320 : row + 360] = bytes([250] * 40)
+    m.wr(yv, bytes(fc_y))
+    draw(17)
+    fc_zones = [px(30, 50), px(90, 50), px(150, 50), px(210, 50), px(270, 50), px(330, 50), px(400, 200), px(626, 124), px(626, 284)]
+    r.eq(fc_zones, [0x61FD, 0x17FB, 0x1E3C, 0xF7BC, 0xFE1C, 0xF11E, 0x0000, 0xF11F, 0x61FF],
+         "grid 17 false color: 6 IRE zones, transparent midtones & right-edge legend bar")
+    m.wr(yv, bytes(y_plane))
 
     # Mode 14: RGB Histogram + clip indicator
     draw(14)
@@ -628,5 +699,5 @@ def run(b: Build, r: Report) -> None:
     check_makernote(b, r)
     check_lv(b, r)
     check_ycap(b, r)
-    check_hud(b, r, addrs["peakcol"])
+    check_hud(b, r, addrs["peakcol"], addrs["peaksens"], addrs["zebralvl"])
     check_package(b, r, *check_updater(b, r))

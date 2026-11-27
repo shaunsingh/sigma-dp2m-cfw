@@ -71,7 +71,7 @@ See [research/updater.md](research/updater.md).
 | --- | --- | --- |
 | `0x80000000..0x800F4C60` | ~979 KB | `.bss`, RTOS fixed pools (`0x8005AB50..0x800EDBE0`), system stack (`sp` init `0x800F4C60` @ `0x482B88`) |
 | `0x800F5000..0x8050DFFF` | ~4.1 MB | Unused after boot (`0x801A0000` @ `0x48311C` is only an offline factory RAM test) |
-| `0x80100000..0x80104560` | ~17.3 KB | **Custom scratch**: halation grids (`0x80100000`, `0x80101100`), fill grid (`0x80102200`), 5-tap blur line (`0x80103300`), pre-scaled grain LUT (`0x80103400`), SD LUT load buffer (`0x80103500..0x80104560`) |
+| `0x80100000..0x8010C800` | ~50.0 KB | **Custom scratch**: halation grids (`0x80100000`, `0x80101100`), fill grid (`0x80102200`), 1D vertically blended row (`0x80103300`), pre-scaled grain LUT (`0x80103400`), SD LUT load buffer (`0x80103500..0x80104560`), row-major `15×17×3` pyramid accumulator (`0x80105000..0x8010C560`) |
 | `0x8050E000..0x80FB0580` | 10.63 MB | Hardware JPEG output buffer (`0x4D4DD6`) |
 | `0x80FB0580..0x81046580` | 600 KB | `PREVIEW_Y` (`0x80FB0580`), `PREVIEW_CB` (`0x80FFB580`), `PREVIEW_CR` (`0x81020D80`) (`0x4D71CC`, `0x4E9758`) |
 | `0x81046580..0x8105A580` | 80 KB | `THUMB_Y/CB/CR` (`0x4E9770..0x4E9780`) — **written concurrently by background EXIF/SD task `0x4E9714`** |
@@ -124,12 +124,14 @@ Additional verified stock M5Slave addresses:
 | Mode / `fx` | Stages | insns / pair (256x128) | L | insns / pair (4704x8) | L |
 | --- | --- | --- | --- | --- | --- |
 | `fx=0` | stock HW path | 0 | 0 | 0 | 0 |
-| B&W `fx=0/1` | B&W toner (read-only Y) | 24.6 | ~2.6 s | 24.5 | ~2.6 s |
-| `fill=1..3 fx=0` | X3 Fill only (read-only Cb/Cr) | 39.5 | ~4.2 s | 39.3 | ~4.1 s |
-| `fx=1` | 3D LUT | 76.8 | ~8.1 s | 77.9 | ~8.2 s |
-| `fx=3` | 3D LUT + grain | 132.7 | ~14.0 s | 135.3 | ~14.3 s |
-| `fx=5` | 3D LUT + halation | 156.7 | ~16.5 s | 143.6 | ~15.1 s |
-| `fx=7` | 3D LUT + grain + halation | 202.3 | ~21.3 s | 188.2 | ~19.8 s |
+| B&W `fx=0/1` | B&W toner (read-only Y, 2.50 SDRAM/pair) | 23.6 | ~2.5 s | 23.5 | ~2.5 s |
+| `fill=1..3 fx=0` | X3 Fill only (read-only Cb/Cr) | 31.3 | ~3.3 s | 30.3 | ~3.2 s |
+| `fx=1` | 3D LUT | 91.0 | ~9.6 s | 64.7 | ~6.8 s |
+| `fx=3` | 3D LUT + grain | 127.7 | ~13.5 s | 112.8 | ~11.9 s |
+| `fx=4` | halation | 58.5 | ~6.2 s | 51.4 | ~5.4 s |
+| `fx=5` | 3D LUT + halation | 116.1 | ~12.2 s | 104.0 | ~11.0 s |
+| `fx=7` | 3D LUT + grain + halation | 145.2 | ~15.3 s | 134.1 | ~14.1 s |
+| `fill=1 fx=7` | 3D LUT + grain + halation + X3 Fill | 157.2 | ~16.6 s | 145.7 | ~15.4 s |
 
 ---
 
@@ -149,6 +151,12 @@ S3 runs from SDRAM at `0xA0000000` (256 MB SDRAM), so code and tables in the ima
 | `0xA1B57180..0xA2130000` | no references; payload `.bss` at `0xA1C00000..0xA1E00000` |
 | `0xA2130000..` | OSD: 8 bpp index plane `0xA2130000` (icons, text), RGBA4444 overlay `0xA21D8C00` (`R:12..15, G:8..11, B:4..7, A:0..3`, 640x480); LV and capture buffers |
 
+**CP15 MPU & 2D DMA cache coherence** (`0xA01720F0..0xA01721EC`):
+- **Region 1 (`0x00000000`, `4 KB` ITCM)**: copied at boot from `0xA07FBC1C` (`0x338 B`, scatter table `0xA07AD3CC`); holds ARM exception vectors and the `SWI` dispatcher (`0x00000170`).
+- **Region 2 (`0xA0000000..0xAFFFFFFF`, `256 MB`)**: `I-cache = 0`, `D-cache = 1` (`c2 = 0xC`), `Write-Buffer = 1` (`c3 = 0xC`). Covers `OSD` (`0xA2130000`), `ARGB_FB` (`0xA21D8C00`), and `lv_planes`.
+- **Region 3 (`0xA0000000..0xA1FFFFFF`, `32 MB`)**: `I-cache = 1` (`c2_i = 0x8`), `D-cache = 1`, `Write-Buffer = 1`. Covers S3 code, all payload regions, and `.bss` `RAM` (`0xA1C00000..0xA1E00000`).
+- **`SWI 10` (`hw_dcache_sync`, ITCM `0x00000248` / S3 `0xA07FBE64`)**: cleans all `4 ways × 128 sets × 32 B = 16 KB` of L1 D-cache (`mcr p15, 0, r2, c7, c10, 2`, clean by index), drains the write buffer (`mcr p15, 0, r1, c7, c10, 4`), then invalidates the whole D-cache (`mcr p15, 0, r0, c7, c6, 0`); the I-cache is untouched. The dispatcher (`0x00000170`) reads the SWI number from `[lr, #-2]` when SPSR.T is set, so Thumb `svc #10` is valid (11 stock Thumb call sites, e.g. `0xA0117504`), and it restores `r0`/`r1`. Call `hw_dcache_sync()` (`r0` + `lr` clobbered) before and after CPU writes that hand off to Milbeaut 2D DMA (`stock_fill_rect`, `stock_blit_bp4`, `stock_argb_commit`).
+
 See [research/m6m-memory.md](research/m6m-memory.md).
 
 ### 3.2 Protected regions
@@ -158,7 +166,7 @@ The builder checks these against the stock image after patching:
 | Range | Reason |
 | --- | --- |
 | IPL, `C78FRM.bin[0..0x20000]` | boot loader |
-| `0xA0179000..0xA023D35A` | Spartan-6 FPGA bitstream (803,674 B, length at `0xA07AE444`); any accidental change breaks FPGA configuration (white screen, dead shutter). Deliberate changes: opt-in with valid CRCs, see [../AGENTS.md](../AGENTS.md) |
+| `0xA0179000..0xA023D35A` | **Xilinx Spartan-6 XC6SLX25** FPGA bitstream (`803,674 B`, length at `0xA07AE444`, sync `AA 99 55 66` at `0xA0179010`, `IDCODE = 0x04004093`, `COR1 = 0x3D00` hardware CRC); streamed into volatile FPGA SRAM over `20 MHz` CSI/SelectMAP (`0xA0015818`, `FPGA.c` @ `0xA0178E7C`) on every boot. Drives Foveon F20 ("Merrill") sensor timing, 3-layer AFE/TG calibration, dark-frame accumulation (`FPGA_Set_Ctrl_Dark_Frame_Accumulate`), and raw readout (`0xAF64D7C0..0xAF6507C0`). Keep 100% protected: bitstream edits risk IOB contention on sensor/AFE pins with zero benefit to M5 YCC/JPEG or M6M UI/LV |
 | `0xA07FBC1C..0xA0800000` | vector source, cleared at boot |
 | word `0xA004D3D0` (`0xA07EEFCC`) | literal shared with other code; hook `Get_Menu_Table` instead |
 | `0xA005D924..0xA005F1A0` | live screen code (ids 50..55) |
@@ -174,12 +182,17 @@ The M6M payload is C and assembly in `src/m6m/`, compiled with `clang --target=a
 | --- | --- | --- | --- | --- |
 | `CODE` | `0xA0059D50..0xA005D924` | 15,316 B | `.text` | factory screens 33..49 |
 | `DATA` | `0xA0265670..0xA0268870` | 12,800 B | `.rodata`, `.data` | f64 table used only by orphaned code |
-| `LOOKS` | `0xA0094658..0xA009688C` | 8,756 B | `.lv` | orphaned Im_TFR driver |
+| `LOOKS` | `0xA0094658..0xA009688C` | 8,756 B | `.lv` (data only) | orphaned Im_TFR driver |
 | `MENU` | `0xA07EC9CC..0xA07EDC0C` | 4,672 B | `.menu` | factory service menus 0x18..0x22 |
+| `DOOM_A` | `0xA010AF44..0xA010C250` | 4,876 B | `.doom_render` | zero-xref orphaned S3 code |
+| `DOOM_B` | `0xA0107BD8..0xA0108E14` | 4,668 B | `.doom_text` | zero-xref orphaned S3 code |
+| `DOOM_C` | `0xA01360FC..0xA0136AB8` | 2,492 B | `.doom_data` | zero-xref orphaned S3 code |
+| `DOOM_D` | `0xA0140CB0..0xA01415B0` | 2,304 B | `.doom_hud`, `.lv_text` | zero-xref orphaned S3 code |
+| `DOOM_E` | `0xA002A834..0xA002B5E0` | 3,500 B | `.doom_init` | zero-xref orphaned S3 code |
 | `RAM` | `0xA1C00000..0xA1E00000` | 2 MB | `.bss`, not cleared at boot | unreferenced SDRAM |
 
-- `REGIONS` in `crates/dp2m/src/m6m/mod.rs` generates the linker `MEMORY` block (`out/m6m/regions.ld`); `src/m6m/m6m.ld` maps sections to regions. The builder rejects sections outside them.
-- The vtable slots of screens 33..49 (`0xA07DEBAC..0xA07DEBEF`) are set to `dp2m_ret0`, after checking that each still points into `CODE`.
+- `REGIONS` in `crates/dp2m/src/m6m/mod.rs` generates the linker `MEMORY` block (`out/m6m/regions.ld`); `src/m6m/m6m.ld` maps sections to regions. The builder rejects sections outside them and rejects executable (`SHF_EXECINSTR`) sections inside `0xA0070000..0xA00B8000` (`LOOKS` overlaps `Camera`'s HLE driver stub range).
+- Screen vtable slot 33 (`0xA07DEBAC`) hosts `SCREEN_DOOM` (`doom_screen`) when `:doom` is enabled; slots 34..49 (`0xA07DEBB0..0xA07DEBEF`) are set to `dp2m_ret0`, after checking that each still points into `CODE`.
 - Stock functions are absolute symbols in `src/m6m/stock.S` with bit 0 set for Thumb, so lld picks BL or BLX.
 - `crates/dp2m/src/m6m/codegen.rs` generates `catalog.c` / `catalog.h`: strings, menu tables, the film table and the live-view looks.
 
@@ -209,6 +222,9 @@ Block `0xA0939684`: `0x44C` B in RAM, initialised from ROM defaults `0xA07F9E68`
 | `0xA093968E` | halation | 0/1 (fx bit 2) |
 | `0xA093968F` | B&W paper | 0 = Auto, 1..8 |
 | `0xA0939690` | SD LUT slot | 0 = Auto, 1..8 |
+| `0xA0939691` | peaking sensitivity | 0 Normal (44), 1 Low (72), 2 High (24), 3 Auto (MF only) |
+| `0xA0939692` | zebra level | 0 95% IRE, 1 100% IRE, 2 90% IRE, 3 Dual Hi+Lo (95% + <=5%) |
+| `0xA0939693` | electronic level style | 0 Standard, 1 Quattro Minimal |
 
 Stock fields used: exposure mode `0xA09396AC` (`+0x28`; 0..3 M/S/A/P, 4 Movie, 5..7 C1..C3, 8 temporary, 9/10 F1/F2), shooting settings `0xA09396C0` (`+0x3C`, `0x8C` B), color mode `0xA09396C3`, C1..C3 slots `0xA0939818`, backup `0xA09399BC`.
 
@@ -271,11 +287,20 @@ Verified in emulation (`dp2m build`, `python -m tools.verify`, `dp2m-sim`); on-c
 
 - **On-camera checks**: full `DP2MV200.bin` install from 1.05 and reinstall of stock 1.05; runtime label icons (QS, OSD, MODE, LV status, playback info); film name in playback info for new JPG and X3F files, and how Sigma Photo Pro treats `"Film NN"` X3F files; Custom QS film items in each slot; F1/F2 slot persistence across power cycles; payload RAM window `0xA1C00000..0xA1E00000` under LV, capture, playback, movie and USB; M5 engine wall time per fx combination.
 
-### M5 performance notes
+### M5 & M6M performance notes
 
-- **`ycc_engine.fr80` (`4,088 B`, fits inside the 4 KB FR80 I-Cache)**:
-  - Biased 3D LUT bytes (`s8 ^ 0x80`, 12 instructions per Sakamoto evaluation) and SWAR 4-byte saturating luma adds (`x - e = ~(~x + e)`).
-  - Universal `4x2` tile fast path (`tile_row`) active across all `fill = 0..3`, `fx = 0..7` whenever `Y`/`Cb`/`Cr` and strides are word/halfword-aligned and the tile's halation row check `(row0 | row1) < 2` passes, with signed `[X00 - 15, X00 + 16]` luma/chroma coherence (`94%..99%` smooth-tile rate on DP2M shots), `call.far` subroutines for X3 Fill / B&W toner / grain, and halfword `lduh`/`sth` chroma pairs.
-  - Dedicated word-strided Paths **T** (B&W toner `fx=0/1`, read-only `Y`, `24.5` insns/pair) and **F** (`fill=1..3 fx=0`, read-only `Cb/Cr`, `39.3` insns/pair).
-- **`spatial_driver.fr80` (`2,202 B`)**: specialized `pyr_halo_only`, `pyr_fill_only`, and `pyr_bx` box-downsample passes, register-history in-place `blur_5tap`, SWAR `hblend`, and word-copied SD LUT path (`4704x3136` pyramid: `1.17 M` instructions).
-- **Rejected**: `8x4` block coherence (max `|Δ|` reached 15 levels vs `4x2` and regressed steep strips) and unverified `mulh`.
+- **`ycc_engine.fr80` (`4,028 B`, `-50.0%` from initial `8,064 B`, fits inside the 4 KB FR80 I-Cache)**:
+  - Silicon-verified 2-byte `call rel11` (`0xD000..0xD7FF`) with monotone fixpoint branch/call relaxation in `crates/dp2m-emu/src/fr80/asm.rs`.
+  - Biased 3D LUT bytes (`s8 ^ 0x80`, 12 instructions per Sakamoto evaluation), exact `(Y00, Cb00, Cr00)` inter-tile Sakamoto 3D LUT cache (0.0000 LSB diff), split-tile `(X00, X01)` pair reuse across `4×2` fallback tiles, and SWAR 4-byte saturating luma adds (`x - e = ~(~x + e)`).
+  - Pre-blended 1D strip vertical interpolation (`vblend_row` -> `SCRATCH_BLUR_LINE` @ `0x80103300`) replacing per-tile 2D `bilerp_sub` + `mul` for both halation and X3 Fill grids.
+  - Universal `4x2` tile fast path (`tile_row`) active across all `fill = 0..3`, `fx = 0..7` whenever `Y`/`Cb`/`Cr` and strides are word/halfword-aligned, with signed `[X00 - 15, X00 + 16]` luma/chroma coherence (`94%..99%` smooth-tile rate on real DP2M shots), coherent SWAR luma fast path in `apply_fill_4x2`, tile-unified X3 Fill Light (`add_fill_delta`) and midtone halation (`2 <= halo < 85`), 2×16-bit SWAR silver grain (`ftg_row`), and halfword `lduh`/`sth` chroma pairs.
+  - Dedicated word-strided Paths **T** (B&W toner `fx=0/1`, read-only `Y`, zero stack spills, `2.50` SDRAM/pair, `23.5` insns/pair) and **F** (`fill=1..3 fx=0`, read-only `Cb/Cr`, `30.3` insns/pair).
+- **`spatial_driver.fr80` (`2,470 B`)**: row-major `15×17×3` pyramid accumulation (`0x80105000..0x8010C560`), specialized `pyr_halo_only`, `pyr_fill_only`, and `pyr_both` passes, SWAR `hblend`, and word-copied SD LUT path (`4704×3136` pyramid: `755,156` instructions, `-34.5%` from `1.15 M`).
+- **`hud.c` & `labels.c` (M6M ARM926EJ-S overlays + labels)**:
+  - 8-word cache-line-burst `stmia` in `fill_argb` (`21:9` mask `30k` insns, `1:1` mask `65k`).
+  - Milbeaut 2D DMA clear + `hw_dcache_sync()` (`SWI 10`) + zero-XOR 2-row-pair SWAR flat-block skip in `draw_peaking_arm` (`368k..626k` insns, runtime Low/Normal/High/Auto MF sensitivity).
+  - Precomputed diagonal `stmia` stripe table + 4-word SWAR zebra pass in `draw_zebras_arm` (`150k..411k` insns across 90%/95%/100%/Dual Hi+Lo).
+  - `ldmia` + register-cached RGB histogram (`150k..155k` insns) and 16-pixel `ldmia` False Color IRE pass (`331k..458k` insns).
+  - Custom 8-row ARM glyph compositor (`glyph_or_row`) + direct `(class, sid)` tile table in `labels.c` (`42` insns cached, `~4.4×` faster cold render than stock BP4 text engine).
+- **`doom*.c` (`SCREEN_DOOM`)**: bare-metal fixed-point DDA raycaster (`320×240` 8bpp -> `640×480` `RGBA4444` `ldmia`/`stmia` 2×2 upscale + `hw_dcache_sync` + `stock_argb_commit`), `~2.00M..2.06M` ARM9 insns/tick on E1M1.
+- **Rejected**: `8x4` block coherence (max `|Δ|` reached 15 levels vs `4x2` and regressed steep strips), quantized `(Y>>2, C>>2)` Sakamoto cache (3–5 LSB drift for only 2.5 insns/pair), and unverified `mulh`.

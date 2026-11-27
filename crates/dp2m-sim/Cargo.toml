@@ -1,9 +1,0 @@
-[package]
-name = "dp2m-sim"
-edition.workspace = true
-license.workspace = true
-version.workspace = true
-
-[dependencies]
-arm9 = { path = "../arm9" }
-fr80 = { path = "../fr80" }

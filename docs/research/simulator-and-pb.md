@@ -2,10 +2,10 @@
 
 Addresses are M6M S3 virtual addresses (`0xA0000000..0xA0800000` in `C78FRM.bin`, Thumb bit cleared unless noted as ARM).
 
-## 1. Dual-CPU Simulator Architecture (`crates/arm9`, `crates/dp2m-sim`, `crates/dp2m-web`)
+## 1. Dual-CPU Simulator Architecture (`crates/dp2m-emu`, `crates/dp2m-web`)
 
-- **M6M (`arm9::Cpu`)**: Big-endian ARMv5TE + Thumb-1 interpreter with 128 MB SDRAM (`0xA0000000..0xA8000000`), basic-block SDRAM execution for unhooked Thumb/ARM code below `0xA0200000`, 16-bit/32-bit Hook bitmap (`HookAction::Jump`, `Return`, `Continue`), peripheral MMIO pages (`0x60000000+`), and optional SDRAM write watchpoints (`set_write_watch`).
-- **M5Slave (`fr80::Emulator`)**: Big-endian FR80 interpreter running `Firm.bin` (`0x0003BF80..0x00800000`) on capture:
+- **M6M (`dp2m_emu::arm9::Cpu`)**: Big-endian ARMv5TE + Thumb-1 interpreter with 128 MB SDRAM (`0xA0000000..0xA8000000`), hook-free 128-byte SDRAM line loop with direct fetch, 16-bit/32-bit Hook bitmap (`HookAction::Jump`, `Return`, `Continue`), peripheral MMIO pages (`0x60000000+`), optional SDRAM write watchpoints (`set_write_watch`), and write-range logging (`start_write_log`) for native verification.
+- **M5Slave (`dp2m_emu::fr80::Emulator`)**: Big-endian FR80 interpreter running `Firm.bin` (`0x0003BF80..0x00800000`) on capture:
   1. M6M `ipc_hook` (`0xA00360A2`) packs `cmd 0x20` (`cmd[5] = packed_cm`, `cmd[6] = (fill << 5) | (fx << 2) | cs`).
   2. M6M MakerNote writer (`0xA0148CF8`) emits tag `0x3D` (`"Film NN"` or stock name) and tag `0x59` (full film name), then `0xA01478A6` parses tag `0x3D` back into `decoded_cm` (`rec+0x17`).
   3. M5 `0x005D0340` (`hook_ipc_exif`) unpacks `cmd 0x20` into job slot `+0x150` / `+0x14C`.

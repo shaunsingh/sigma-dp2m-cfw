@@ -25,6 +25,8 @@ const MENU_PEAKCOL: u32 = 0xF4;
 const MENU_GRAIN: u32 = 0xF5;
 const MENU_HALATION: u32 = 0xF6;
 pub const MENU_FILM_PAGE: u32 = 0xF7;
+const MENU_PEAKSENS: u32 = 0xF8;
+const MENU_ZEBRALVL: u32 = 0xF9;
 const MENU_PAPER_CLS0: u32 = 0x1F0;
 // QS copy of a setting menu: values carry label icons, which the menu page would show in place of their text
 const MENU_QS_COPY: u32 = 0x200;
@@ -50,6 +52,7 @@ const STOCK_ISO_MENU_3EV: u32 = 0xA07E_ADAC;
 const STOCK_ISO_MENU_POOL: u32 = 0xA004_D3DC;
 const STOCK_SHOOT_P2: u32 = 0xA07E_A60C;
 const STOCK_SHOOT_P3: u32 = 0xA07E_A6EC;
+const STOCK_SETUP_P1: u32 = 0xA07E_AA0C;
 const STOCK_SETUP_P4: u32 = 0xA07E_AC2C;
 const STOCK_ISO_AUTO: u32 = 0xA07F_188C;
 const STOCK_BKT_ORDER: u32 = 0xA07E_DF8C;
@@ -67,17 +70,17 @@ struct Row {
     w: [u32; 5],
     get: Fp,
     set: Fp,
-    extra: u32,
+    extra: Fp,
 }
 
 impl Row {
     fn stock(w: [u32; 8]) -> Self {
         let fp = |v| if v == 0 { Fp::Null } else { Fp::Addr(v) };
-        Self { w: [w[0], w[1], w[2], w[3], w[4]], get: fp(w[5]), set: fp(w[6]), extra: w[7] }
+        Self { w: [w[0], w[1], w[2], w[3], w[4]], get: fp(w[5]), set: fp(w[6]), extra: fp(w[7]) }
     }
 
     fn page(submenu: u32, sid: u32) -> Self {
-        Self { w: [submenu, 0x0100_0000, 0, sid << 16, 0], get: Fp::Null, set: Fp::Null, extra: 0 }
+        Self { w: [submenu, 0x0100_0000, 0, sid << 16, 0], get: Fp::Null, set: Fp::Null, extra: Fp::Null }
     }
 }
 
@@ -132,7 +135,7 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
 
     let grid = stock_rows(s3, STOCK_GRID_MENU);
     let gt = grid[1];
-    let value_row = |sid: u32, value: u32, get: Fp, set: Fp| Row { w: [gt[0], gt[1], 0, sid << 16, value], get, set, extra: 0 };
+    let value_row = |sid: u32, value: u32, get: Fp, set: Fp| Row { w: [gt[0], gt[1], 0, sid << 16, value], get, set, extra: Fp::Null };
     let mut grid_rows: Vec<Row> = grid.iter().copied().map(Row::stock).collect();
     for (i, g) in GRIDS.iter().enumerate() {
         let sid = st.add(g.label);
@@ -195,6 +198,26 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
     setting(MENU_MINSHUTTER, "minshutter", &minsh);
     let peak = ["Red", "Yellow", "White", "Black"].map(|s| st.add(s));
     setting(MENU_PEAKCOL, "peakcol", &peak);
+    let peaksens = ["Medium", "High (Fine)", "Low (Strong)", "Auto (MF High)"].map(|s| st.add(s));
+    menus.push((
+        MENU_PEAKSENS,
+        ".menu.hud",
+        peaksens
+            .iter()
+            .enumerate()
+            .map(|(v, &sid)| value_row(sid, v as u32, Fp::Sym(nv_get("peaksens")), Fp::Sym(nv_set("peaksens"))))
+            .collect(),
+    ));
+    let zebralvl = ["95% IRE", "90% IRE (Safe)", "100% IRE (Clip)", "Dual (Hi + Lo)"].map(|s| st.add(s));
+    menus.push((
+        MENU_ZEBRALVL,
+        ".menu.hud",
+        zebralvl
+            .iter()
+            .enumerate()
+            .map(|(v, &sid)| value_row(sid, v as u32, Fp::Sym(nv_get("zebralvl")), Fp::Sym(nv_set("zebralvl"))))
+            .collect(),
+    ));
 
     let t_engine = st.add("Film Engine");
     let t_grain = st.add("Film Grain");
@@ -202,6 +225,8 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
     let t_fill = st.add("X3 Fill Light");
     let t_minsh = st.add("Min Shutter");
     let t_peak = st.add("Peaking Color");
+    let t_peaksens = st.add("Peaking Level");
+    let t_zebralvl = st.add("Zebra Level");
     menus.push((
         MENU_FILM_PAGE,
         ".data.menu",
@@ -249,9 +274,20 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
         rows.extend_from_slice(add);
         rows
     };
-    menus.push((0x0F, ".data.menu", page(STOCK_SHOOT_P2, 0x09, &[])));
+    menus.push((0x0F, ".data.menu", page(STOCK_SHOOT_P2, 0x09, &[Row::page(MENU_PEAKSENS, t_peaksens)])));
     menus.push((0x10, ".data.menu", page(STOCK_SHOOT_P3, u32::MAX, &[Row::page(MENU_PEAKCOL, t_peak)])));
-    menus.push((0x17, ".data.menu", page(STOCK_SETUP_P4, u32::MAX, &[Row::page(0xA3, SID_IMAGER_TEMP)])));
+    menus.push((0x14, ".data.menu", page(STOCK_SETUP_P1, u32::MAX, &[Row::page(MENU_ZEBRALVL, t_zebralvl)])));
+    let mut setup_p4_add = vec![Row::page(0xA3, SID_IMAGER_TEMP)];
+    if cfg.m6m.doom {
+        let t_doom = st.add("DOOM");
+        setup_p4_add.push(Row {
+            w: [0x10E, 0x0100_0000, 0, t_doom << 16, 0],
+            get: Fp::Null,
+            set: Fp::Null,
+            extra: Fp::Sym("doom_open"),
+        });
+    }
+    menus.push((0x17, ".data.menu", page(STOCK_SETUP_P4, u32::MAX, &setup_p4_add)));
     menus.push((0x3E, ".data.menu", page(STOCK_ISO_AUTO, u32::MAX, &[Row::page(MENU_MINSHUTTER, t_minsh)])));
 
     let bkt = stock_rows(s3, STOCK_BKT_ORDER);
@@ -308,13 +344,17 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
         ("DP2M_N_STRINGS", st.0.len() as u32),
         ("PEAKING_THRESH", cfg.m6m.peaking_threshold),
         ("ZEBRA_THRESH", cfg.m6m.zebra_threshold as u32),
+        ("DOOM_ENABLED", cfg.m6m.doom as u32),
     ] {
         writeln!(h, "#define {name} {v}u").unwrap();
     }
     let mut c = String::new();
     writeln!(c, "// generated by dp2m; do not edit\n#include \"dp2m.h\"\n#include \"catalog.h\"\n").unwrap();
     writeln!(c, "#define G(x) ((uint32_t (*)(void))(x))\n#define S(x) ((void (*)(uint32_t))(x))").unwrap();
-    for nv in ["color_paper", "bw_paper", "lut_slot", "engine", "grain", "halation", "fill", "minshutter", "peakcol", "none"] {
+    if cfg.m6m.doom {
+        writeln!(c, "uint32_t doom_open(void);").unwrap();
+    }
+    for nv in ["color_paper", "bw_paper", "lut_slot", "engine", "grain", "halation", "fill", "minshutter", "peakcol", "peaksens", "zebralvl", "none"] {
         writeln!(c, "uint32_t nv_get_{nv}(void);\nvoid nv_set_{nv}(uint32_t);").unwrap();
     }
 
@@ -362,8 +402,8 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
             };
             writeln!(
                 c,
-                "    {{ {:#X}, {:#X}, {:#X}, {:#X}, {}, {}, {}, {:#X} }},",
-                r.w[0], r.w[1], r.w[2], r.w[3], r.w[4], fp(r.get, "G"), fp(r.set, "S"), r.extra
+                "    {{ {:#X}, {:#X}, {:#X}, {:#X}, {}, {}, {}, {} }},",
+                r.w[0], r.w[1], r.w[2], r.w[3], r.w[4], fp(r.get, "G"), fp(r.set, "S"), fp(r.extra, "G")
             )
             .unwrap();
         }
@@ -402,6 +442,8 @@ fn nv_get(nv: &str) -> &'static str {
         "fill" => "nv_get_fill",
         "minshutter" => "nv_get_minshutter",
         "peakcol" => "nv_get_peakcol",
+        "peaksens" => "nv_get_peaksens",
+        "zebralvl" => "nv_get_zebralvl",
         _ => "nv_get_none",
     }
 }
@@ -417,6 +459,8 @@ fn nv_set(nv: &str) -> &'static str {
         "fill" => "nv_set_fill",
         "minshutter" => "nv_set_minshutter",
         "peakcol" => "nv_set_peakcol",
+        "peaksens" => "nv_set_peaksens",
+        "zebralvl" => "nv_set_zebralvl",
         _ => "nv_set_none",
     }
 }
@@ -516,16 +560,16 @@ mod tests {
 
         let cfg_all = load_cfg("all", "{:films (collect [_ f (ipairs dp2m.films)] (values f.slug true))}");
         let gen_all = generate(s3, &pack, &cfg_all).expect("codegen all 36 films");
-        assert!(gen_all.stats.contains("films=36/36 grids=10/10"), "stats={}", gen_all.stats);
+        assert!(gen_all.stats.contains("films=36/36 grids=11/11"), "stats={}", gen_all.stats);
         let work = std::env::temp_dir().join(format!("dp2m-m6m36-{}", std::process::id()));
         let c78 = super::super::build_m6m(&fw, &pack, &root.join("src/m6m"), &work, &cfg_all)
-            .expect("link all 36 films + 10 grids within M6M payload regions");
+            .expect("link all 36 films + 11 grids within M6M payload regions");
         assert_eq!(c78.len(), super::super::C78_LEN);
         let _ = std::fs::remove_dir_all(&work);
 
         let cfg_sub = load_cfg("sub", "{:m6m {:grids {:peaking false :zebras false}}}");
         let gen_sub = generate(s3, &pack, &cfg_sub).expect("codegen subset grids");
-        assert!(gen_sub.stats.contains("grids=8/10"), "stats={}", gen_sub.stats);
+        assert!(gen_sub.stats.contains("grids=9/11"), "stats={}", gen_sub.stats);
         let m37 = gen_sub.source.split("struct menu_row m_37[]").nth(1).unwrap().split("};").next().unwrap();
         assert!(!m37.contains(", 11, ") && !m37.contains(", 13, "));
         assert!(m37.contains(", 12, ") && m37.contains(", 14, "));

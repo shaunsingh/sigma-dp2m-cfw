@@ -8,4 +8,4 @@ version.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-dp2m-sim = { path = "../dp2m-sim" }
+dp2m-emu = { path = "../dp2m-emu" }

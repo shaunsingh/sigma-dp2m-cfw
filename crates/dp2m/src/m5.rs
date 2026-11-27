@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use fr80::{assemble_file, assemble_sections, Emulator};
+use dp2m_emu::fr80::{self, Emulator, assemble_file, assemble_sections};
 
 use crate::catalog::MONO_FILTER_Q7;
 use crate::config::Config;
@@ -343,7 +343,7 @@ const EMU_SP: u32 = 0x8008_0100;
 const EMU_PLANES: u32 = 0x8009_0000;
 const EMU_CTX: u32 = 0x8008_5000;
 const IMG_VA: [u32; 3] = [0x8200_0000, 0x8300_0000, 0x8380_0000];
-const SCRATCH_LEN: usize = 0x5000;
+const SCRATCH_LEN: usize = 0xC800;
 // PREVIEW_Y, THUMB_Y/CB/CR & RAW buffers that must stay untouched
 const GUARDS: [(u32, usize, u8); 3] = [(0x80FB_0580, 0x1000, 0x5A), (0x8104_6580, 0x5010, 0x6B), (0x8104_B590, 0x4000, 0xA5)];
 const EMU_STEPS: u64 = 200_000_000;
@@ -509,6 +509,9 @@ pub(crate) fn run_engine(s2: &[u8], ctx: &[u32], scratch: &[u8], img: &Ycc, prof
 }
 
 pub fn verify_m5(s2: &[u8]) -> Result<(), String> {
+    if s2.len() < 0x80_0080 {
+        return Err(format!("Firm.bin too short ({} B < 0x800080)", s2.len()));
+    }
     let hdr_sum = u32::from_be_bytes(s2[0x4C..0x50].try_into().unwrap());
     let full_sum = m5_checksum(s2);
     let nor8_sum = s2[0x80..0x80_0080].iter().fold(0u32, |acc, &b| acc.wrapping_add(b as u32));
@@ -783,10 +786,34 @@ mod tests {
         build_m5(&fw, &pack, &root.join("src/asm/m5"), &Config::default()).unwrap()
     }
 
+    #[test]
+    fn pack_swar_signed_deltas() {
+        let s2 = firm();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let (_, labels) = fr80::assemble_file_labels(&root.join("src/asm/m5/ycc_engine.fr80"), VA_YCC_SUB, &HashMap::new()).unwrap();
+        let entry = labels.iter().find(|(_, name)| name == "pack_swar").unwrap().0;
+        for delta in -127i32..=127 {
+            let mut e = Emulator::new(&s2, DELTA);
+            e.r[4] = delta as u32;
+            for reg in [3, 5, 7, 8, 9, 10] {
+                e.r[reg] = 0x1234_0000 + reg as u32;
+            }
+            let steps = e.run(entry, 100).unwrap();
+            let expected = (delta.unsigned_abs() * 0x0101_0101) | if delta < 0 { 0x8000_0000 } else { 0 };
+            assert_eq!(e.r[4], expected, "delta={delta}");
+            assert_eq!(steps, 10);
+            for reg in [3, 5, 7, 8, 9, 10] {
+                assert_eq!(e.r[reg], 0x1234_0000 + reg as u32);
+            }
+        }
+    }
+
     /// ycc engine insns & SDRAM / ROM data accesses per pixel pair for every fx x fill combo; `s/L` = engine
     /// seconds for a 4704x3136 capture at ~70M insns/s. `DP2M_REF_ASM=<dir>` (e.g. `git archive <rev> src/asm/m5`)
     /// also runs that engine & driver on the same ctx / input and diffs them; `DP2M_PROF=1` prints insns/pair per
     /// engine block. `cargo test --release --offline ycc_bench -- --ignored --nocapture`
+    /// `DP2M_BENCH_STRESS=1` adds constant boundary frames and full-range noise;
+    /// `DP2M_REF_EXACT=1` makes any output difference against `DP2M_REF_ASM` fail.
     #[test]
     #[ignore]
     fn ycc_bench() {
@@ -805,11 +832,55 @@ mod tests {
         labels.insert(0, (VA_YCC_SUB, "<entry>".into()));
         let cm_c = 23 + 12 * 8 + 5;
         let groups = [("color", cm_c, 0), ("color fill=1", cm_c, 1), ("color fill=2", cm_c, 2), ("color fill=3", cm_c, 3), ("B&W toner", 151 + 13, 0), ("B&W fill=2", 151 + 13, 2)];
-        let sizes = [(Ycc::synth(256, 128), Ycc::synth(256, 128)), (Ycc::synth(4704, 8), Ycc::synth(4704, 3136))];
+        let mut sizes = vec![("mixed".to_string(), Ycc::synth(256, 128), Ycc::synth(256, 128)), ("strip".to_string(), Ycc::synth(4704, 8), Ycc::synth(4704, 3136))];
+        if std::env::var_os("DP2M_BENCH_STRESS").is_some() {
+            for level in [0, 1, 127, 128, 254, 255] {
+                let mut img = Ycc::synth(64, 32);
+                for plane in &mut img.p { plane.fill(level); }
+                sizes.push((format!("constant-{level}"), img.clone(), img));
+            }
+            let mut img = Ycc::synth(256, 32);
+            let mut seed = 0x1234_5678u32;
+            for plane in &mut img.p {
+                for pixel in plane {
+                    seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
+                    *pixel = seed as u8;
+                }
+            }
+            sizes.push(("noise".to_string(), img.clone(), img));
+        }
+        if let Some(dir) = std::env::var_os("DP2M_BENCH_YCC") {
+            let mut entries: Vec<_> = std::fs::read_dir(&dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("ycc"))
+                .collect();
+            entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+            for path in entries {
+                let raw = std::fs::read(&path).unwrap();
+                let w = u32::from_le_bytes(raw[0..4].try_into().unwrap());
+                let h = u32::from_le_bytes(raw[4..8].try_into().unwrap());
+                let y_len = (w * h) as usize;
+                let c_len = (w / 2 * h) as usize;
+                assert_eq!(raw.len(), 8 + y_len + 2 * c_len, "bad ycc size: {}", path.display());
+                let ycc = Ycc {
+                    w,
+                    h,
+                    p: [
+                        raw[8..8 + y_len].to_vec(),
+                        raw[8 + y_len..8 + y_len + c_len].to_vec(),
+                        raw[8 + y_len + c_len..].to_vec(),
+                    ],
+                };
+                let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+                sizes.push((stem, ycc.clone(), ycc));
+            }
+        }
         let l_pairs = 4704.0 * 3136.0 / 2.0;
-        for (img, cap) in &sizes {
+        for (fixture, img, cap) in &sizes {
             let pairs = (img.w / 2 * img.h) as f64;
-            println!("\n{}x{} ({} pairs)  insns/pair  sdram/pair  rom/pair   s/L  [ref insns  ref sdram  max|d|  mean|d|  (diff px)]", img.w, img.h, pairs);
+            println!("\n{} {}x{} ({} pairs)  insns/pair  sdram/pair  rom/pair   s/L  [ref insns  ref sdram  max|d|  mean|d|  (diff px)]", fixture, img.w, img.h, pairs);
             for (label, cm, fill) in groups {
                 for fx in 0..8u32 {
                     let p1d = (fill << 5) | (fx << 2) | 1;
@@ -838,6 +909,9 @@ mod tests {
                         let d: Vec<u32> = (0..3).flat_map(|k| out.p[k].iter().zip(&rout.p[k])).map(|(&a, &b)| a.abs_diff(b) as u32).collect();
                         let (maxd, ndiff) = (d.iter().max().unwrap(), d.iter().filter(|&&v| v != 0).count());
                         let mean = d.iter().sum::<u32>() as f64 / d.len() as f64;
+                        if std::env::var_os("DP2M_REF_EXACT").is_some() {
+                            assert_eq!(ndiff, 0, "{label} fx={fx}: output differs from reference");
+                        }
                         line += &format!("  {:>9.1}  {:>9.2}  {:>6}  {:>7.4}  ({})", per(rrun.steps), per(rrun.mem[0]), maxd, mean, ndiff);
                     }
                     println!("{}", line);

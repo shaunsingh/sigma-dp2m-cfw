@@ -402,6 +402,7 @@ enum Item {
     Branch { loc: String, cc: u8, target: String },
     BranchFar { loc: String, cc: u8, target: String },
     JmpFar { loc: String, target: String },
+    CallRel { loc: String, target: String },
     CallFar { loc: String, target: String },
 }
 
@@ -502,20 +503,77 @@ fn assemble_lines(
     }
 
     let mut labels: HashMap<String, u32> = HashMap::new();
-    let mut pos = base_va;
-    for it in &items {
-        match it {
-            Item::Label { loc, name } => {
-                if labels.insert(name.clone(), pos).is_some() {
-                    return Err(err(loc, format!("duplicate label '{}'", name)));
+    // Monotone relaxation: start at worst-case .far sizes and shrink in-range jumps/calls to 2 B until fixpoint.
+    // Shrinking only decreases distances between any two addresses, so convergence is guaranteed.
+    loop {
+        labels.clear();
+        let mut pos = base_va;
+        for it in &items {
+            match it {
+                Item::Label { loc, name } => {
+                    if labels.insert(name.clone(), pos).is_some() {
+                        return Err(err(loc, format!("duplicate label '{}'", name)));
+                    }
                 }
+                Item::Bytes(b) => pos += b.len() as u32,
+                Item::Branch { .. } | Item::CallRel { .. } => pos += 2,
+                Item::BranchFar { .. } => pos += 10,
+                Item::JmpFar { .. } | Item::CallFar { .. } => pos += 8,
             }
-            Item::Bytes(b) => pos += b.len() as u32,
-            Item::Branch { .. } => pos += 2,
-            Item::BranchFar { .. } => pos += 10,
-            Item::JmpFar { .. } | Item::CallFar { .. } => pos += 8,
+        }
+        let mut shrunk = false;
+        let mut cur = base_va;
+        for it in &mut items {
+            let sz = match it {
+                Item::Label { .. } => 0,
+                Item::Bytes(b) => b.len() as u32,
+                Item::Branch { .. } | Item::CallRel { .. } => 2,
+                Item::BranchFar { loc, cc, target } => {
+                    if let Some(&tgt) = labels.get(target) {
+                        let disp = (tgt as i64) - ((cur as i64) + 2);
+                        if disp % 2 == 0 && (-256..=254).contains(&disp) {
+                            *it = Item::Branch { loc: loc.clone(), cc: *cc, target: target.clone() };
+                            shrunk = true;
+                        }
+                    }
+                    10
+                }
+                Item::JmpFar { loc, target } => {
+                    if let Some(&tgt) = labels.get(target) {
+                        let disp = (tgt as i64) - ((cur as i64) + 2);
+                        if disp % 2 == 0 && (-256..=254).contains(&disp) {
+                            *it = Item::Branch { loc: loc.clone(), cc: BRA, target: target.clone() };
+                            shrunk = true;
+                        }
+                    }
+                    8
+                }
+                Item::CallFar { loc, target } => {
+                    if let Some(&tgt) = labels.get(target) {
+                        let disp = (tgt as i64) - ((cur as i64) + 2);
+                        if disp % 2 == 0 && (-2048..=2046).contains(&disp) {
+                            *it = Item::CallRel { loc: loc.clone(), target: target.clone() };
+                            shrunk = true;
+                        }
+                    }
+                    8
+                }
+            };
+            cur += sz;
+        }
+        if !shrunk {
+            break;
         }
     }
+    let pos = items.iter().fold(base_va, |p, it| {
+        p + match it {
+            Item::Label { .. } => 0,
+            Item::Bytes(b) => b.len() as u32,
+            Item::Branch { .. } | Item::CallRel { .. } => 2,
+            Item::BranchFar { .. } => 10,
+            Item::JmpFar { .. } | Item::CallFar { .. } => 8,
+        }
+    });
 
     let mut out = Vec::with_capacity((pos - base_va) as usize);
     let mut cur = base_va;
@@ -562,6 +620,21 @@ fn assemble_lines(
                 out.extend_from_slice(&[0x97, 0x0C]);
                 cur += 8;
             }
+            Item::CallRel { loc, target } => {
+                let tgt = *labels
+                    .get(target)
+                    .ok_or_else(|| err(loc, format!("undefined label '{}'", target)))?;
+                let disp = (tgt as i64) - ((cur as i64) + 2);
+                if disp % 2 != 0 || !(-2048..=2046).contains(&disp) {
+                    return Err(err(
+                        loc,
+                        format!("short call to '{}' out of range (disp={}); use call.far", target, disp),
+                    ));
+                }
+                let op = 0xD000u16 | (((disp / 2) as u16) & 0x07FF);
+                out.extend_from_slice(&op.to_be_bytes());
+                cur += 2;
+            }
             Item::CallFar { loc, target } => {
                 let tgt = *labels
                     .get(target)
@@ -588,6 +661,9 @@ fn encode_stmt(loc: &str, line: &str, syms: &HashMap<String, i64>) -> Result<Ite
             return Err(e("expected 1 target label".into()));
         }
         return Ok(Item::JmpFar { loc: loc.to_string(), target: ops[0].clone() });
+    }
+    if mnem == "call" && ops.len() == 1 && !ops[0].starts_with('@') {
+        return Ok(Item::CallRel { loc: loc.to_string(), target: ops[0].clone() });
     }
     if mnem == "call.far" {
         if ops.len() != 1 {
@@ -896,5 +972,18 @@ mod tests {
     fn rejects_ldub_indexed_into_r13() {
         let empty = HashMap::new();
         assert!(assemble_str("ldub @(r13, r3), r13", 0, &empty).is_err());
+    }
+
+    #[test]
+    fn call_rel11_matches_stock_firm() {
+        // stock Firm.bin @ 0x4d37d8: `d73c` calls 0x4d3652 (disp = -0x188)
+        let empty = HashMap::new();
+        let mut src = String::from("tgt:\n");
+        for _ in 0..195 {
+            src.push_str("nop\n");
+        }
+        src.push_str("call tgt\n");
+        let b = assemble_str(&src, 0x004D_3652, &empty).unwrap();
+        assert_eq!(&b[b.len() - 2..], &[0xD7, 0x3C]);
     }
 }

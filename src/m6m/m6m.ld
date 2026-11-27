@@ -5,6 +5,29 @@ INCLUDE regions.ld
 ENTRY(dp2m_ret0)
 
 SECTIONS {
+  .doom_render : {
+    */doom_render.o(.text .text.*)
+  } > DOOM_A
+
+  .doom_init : {
+    *(.doom.init .doom.init.*)
+  } > DOOM_E
+
+  .doom_hud : {
+    *(.doom.hud .doom.hud.*)
+    *(.lv_text .lv_text.*)
+  } > DOOM_D
+
+  .doom_text : {
+    */doom.o(.text .text.*)
+  } > DOOM_B
+
+  .doom_data : {
+    */doom.o(.rodata .rodata.* .data .data.*)
+    */doom_render.o(.rodata .rodata.* .data .data.*)
+    *(.doom.extra .doom.extra.*)
+  } > DOOM_C
+
   .text : {
     KEEP(*(.text.dp2m_ret0))
     *(.text .text.*)

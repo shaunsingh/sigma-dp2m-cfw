@@ -1,5 +1,7 @@
 //! m6m (arm926ej-s BE, `C78FRM.bin`): link the C/asm payload into reclaimed S3 regions & apply its hooks
 
+#[cfg(test)]
+mod bench;
 mod codegen;
 
 use std::fs;
@@ -20,7 +22,7 @@ pub type S3 = [u8];
 
 // payload regions, emitted as the linker MEMORY block; S3 runs from SDRAM so all are RAM seeded by the image
 const REGIONS: &[(&str, u32, u32)] = &[
-    // factory screens 33..49 (vtable slots retired to dp2m_ret0)
+    // factory screens 33..49 (vtable slots retired to dp2m_ret0; slot 33 hosts SCREEN_DOOM when enabled)
     ("CODE", 0xA005_9D50, 0xA005_D924),
     // f64 table reachable only from orphaned 0xA0034870 / 0xA00348CA
     ("DATA", 0xA026_5670, 0xA026_8870),
@@ -28,6 +30,12 @@ const REGIONS: &[(&str, u32, u32)] = &[
     ("LOOKS", 0xA009_4658, 0xA009_688C),
     // factory service menus 0x18..0x22 + their submenus; menu 0xA3 at 0xA07EDC0C stays
     ("MENU", 0xA07E_C9CC, 0xA07E_DC0C),
+    // verified zero-xref stock-orphan code runs outside 0xA0070000..0xA00B8000 for DOOM applet
+    ("DOOM_A", 0xA010_AF44, 0xA010_C250),
+    ("DOOM_B", 0xA010_7BD8, 0xA010_8E14),
+    ("DOOM_C", 0xA013_60FC, 0xA013_6AB8),
+    ("DOOM_D", 0xA014_0CB0, 0xA014_15B0),
+    ("DOOM_E", 0xA002_A834, 0xA002_B5E0),
 ];
 // unreferenced SDRAM between the uITRON task stacks (0xA1B5717C) and the OSD planes (0xA2130000)
 const RAM: (u32, u32) = (0xA1C0_0000, 0xA1E0_0000);
@@ -194,17 +202,26 @@ pub fn build_m6m(fw_raw: &[u8], pack: &FilmPack, src: &Path, work: &Path, cfg: &
             continue;
         }
         let region = REGIONS.iter().find(|r| lo >= r.1 && hi <= r.2).ok_or_else(|| format!("{} {lo:#x}..{hi:#x} outside payload regions", sec.name))?;
+        if sec.flags & elf::SHF_EXECINSTR != 0 && lo < 0xA00B_8000 && hi > 0xA007_0000 {
+            return Err(format!("executable section {} {lo:#x}..{hi:#x} overlaps simulator HLE stub range 0xA0070000..0xA00B8000", sec.name));
+        }
         used.push((region.0, sec.name.clone(), sec.size));
         write(s3, lo, sec.data);
     }
 
     let ret0 = elf.symbol("dp2m_ret0").ok_or("payload lacks dp2m_ret0")?.value;
+    let doom_scr = elf.symbol("doom_screen").map(|s| s.value);
     for slot in (DEAD_SCREEN_SLOTS.0..DEAD_SCREEN_SLOTS.1).step_by(4) {
         let old = be32(stock_s3, slot);
         if !(REGIONS[0].1..REGIONS[0].2).contains(&(old & !1)) {
             return Err(format!("screen vtable {slot:#x} = {old:#x} is not a reclaimed factory screen"));
         }
-        write(s3, slot, &(ret0 | 1).to_be_bytes());
+        let target = if slot == DEAD_SCREEN_SLOTS.0 {
+            doom_scr.unwrap_or(ret0)
+        } else {
+            ret0
+        };
+        write(s3, slot, &(target | 1).to_be_bytes());
     }
 
     let hooks = elf.section(".dp2m.hooks").ok_or("payload has no .dp2m.hooks")?;

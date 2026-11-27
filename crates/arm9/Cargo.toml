@@ -1,6 +1,0 @@
-[package]
-name = "arm9"
-description = "Big-endian ARM926EJ-S (ARMv5TE + Thumb-1) interpreter for Milbeaut M6M"
-version.workspace = true
-edition.workspace = true
-license.workspace = true

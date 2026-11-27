@@ -17,6 +17,7 @@ pub struct Symbol {
 
 pub const SHT_NOBITS: u32 = 8;
 pub const SHF_ALLOC: u32 = 2;
+pub const SHF_EXECINSTR: u32 = 4;
 
 pub struct Elf<'a> {
     pub sections: Vec<Section<'a>>,

@@ -33,13 +33,17 @@ pub struct Cpu {
     pub q: bool,
     pub thumb: bool,
     pub cpsr_low: u32,
-    pub sdram: Vec<u8>,
+    pub sdram: Box<[u8; SDRAM_SIZE]>,
     pub total_steps: u64,
     pub last_error: Option<String>,
     pub watch_hits: Vec<(u32, u32, u32)>,
     watch_range: Option<(u32, u32)>,
+    write_log_active: bool,
+    write_allow: Vec<(u32, u32)>,
+    write_log: Vec<(u32, u32)>,
     mmio: Vec<(u32, Box<[u8; 4096]>)>,
     hook_bits: Vec<u64>,
+    has_high_hooks: bool,
     hooks: Vec<(u32, Hook)>,
     stubs: Vec<RangeStub>,
 }
@@ -61,13 +65,17 @@ impl Cpu {
             q: false,
             thumb: false,
             cpsr_low: 0x13,
-            sdram: vec![0; SDRAM_SIZE],
+            sdram: vec![0u8; SDRAM_SIZE].into_boxed_slice().try_into().unwrap(),
             total_steps: 0,
             last_error: None,
             watch_hits: Vec::new(),
             watch_range: None,
+            write_log_active: false,
+            write_allow: Vec::new(),
+            write_log: Vec::new(),
             mmio: Vec::new(),
             hook_bits: vec![0; (CODE_BITMAP_SPAN / 2) / 64],
+            has_high_hooks: false,
             hooks: Vec::new(),
             stubs: Vec::new(),
         }
@@ -103,12 +111,40 @@ impl Cpu {
 
     #[inline(always)]
     pub fn sdram(&self) -> &[u8] {
-        &self.sdram
+        &self.sdram[..]
     }
 
     #[inline(always)]
     pub fn sdram_mut(&mut self) -> &mut [u8] {
-        &mut self.sdram
+        &mut self.sdram[..]
+    }
+
+    pub fn fill_bytes(&mut self, dst: u32, val: u8, len: usize) {
+        if dst < SDRAM_BASE || len == 0 {
+            return;
+        }
+        let d = (dst - SDRAM_BASE) as usize;
+        if let Some(end) = d.checked_add(len)
+            && end <= self.sdram.len()
+        {
+            self.check_watch(dst, len.min(u32::MAX as usize) as u32);
+            self.sdram[d..end].fill(val);
+        }
+    }
+
+    pub fn copy_within_bytes(&mut self, dst: u32, src: u32, len: usize) {
+        if dst < SDRAM_BASE || src < SDRAM_BASE || len == 0 {
+            return;
+        }
+        let d = (dst - SDRAM_BASE) as usize;
+        let s = (src - SDRAM_BASE) as usize;
+        if let (Some(d_end), Some(s_end)) = (d.checked_add(len), s.checked_add(len))
+            && d_end <= self.sdram.len()
+            && s_end <= self.sdram.len()
+        {
+            self.check_watch(dst, len.min(u32::MAX as usize) as u32);
+            self.sdram.copy_within(s..s_end, d);
+        }
     }
 
     #[inline(always)]
@@ -123,39 +159,39 @@ impl Cpu {
 
     #[inline(always)]
     pub fn r16(&self, va: u32) -> u16 {
-        let va = va & !1;
-        let off = va.wrapping_sub(SDRAM_BASE) as usize;
-        if off + 2 <= SDRAM_SIZE {
-            u16::from_be_bytes([self.sdram[off], self.sdram[off + 1]])
+        let off = (va.wrapping_sub(SDRAM_BASE) & !1) as usize;
+        if off < SDRAM_SIZE {
+            u16::from_be_bytes(self.sdram.as_chunks::<2>().0[off >> 1])
         } else {
-            u16::from_be_bytes([self.mmio_r8(va), self.mmio_r8(va.wrapping_add(1))])
+            u16::from_be_bytes(self.mmio_read(va & !1))
         }
     }
 
     #[inline(always)]
     pub fn r16_be(&self, va: u32) -> u16 {
+        let off = va.wrapping_sub(SDRAM_BASE) as usize;
+        if let Some(bytes) = self.sdram.get(off..).and_then(<[_]>::first_chunk::<2>) {
+            return u16::from_be_bytes(*bytes);
+        }
         u16::from_be_bytes([self.r8(va), self.r8(va.wrapping_add(1))])
     }
 
     #[inline(always)]
     pub fn r32(&self, va: u32) -> u32 {
-        let va = va & !3;
-        let off = va.wrapping_sub(SDRAM_BASE) as usize;
-        if off + 4 <= SDRAM_SIZE {
-            let s = &self.sdram[off..off + 4];
-            u32::from_be_bytes([s[0], s[1], s[2], s[3]])
+        let off = (va.wrapping_sub(SDRAM_BASE) & !3) as usize;
+        if off < SDRAM_SIZE {
+            u32::from_be_bytes(self.sdram.as_chunks::<4>().0[off >> 2])
         } else {
-            u32::from_be_bytes([
-                self.mmio_r8(va),
-                self.mmio_r8(va.wrapping_add(1)),
-                self.mmio_r8(va.wrapping_add(2)),
-                self.mmio_r8(va.wrapping_add(3)),
-            ])
+            u32::from_be_bytes(self.mmio_read(va & !3))
         }
     }
 
     #[inline(always)]
     pub fn r32_be(&self, va: u32) -> u32 {
+        let off = va.wrapping_sub(SDRAM_BASE) as usize;
+        if let Some(bytes) = self.sdram.get(off..).and_then(<[_]>::first_chunk::<4>) {
+            return u32::from_be_bytes(*bytes);
+        }
         u32::from_be_bytes([
             self.r8(va),
             self.r8(va.wrapping_add(1)),
@@ -169,26 +205,57 @@ impl Cpu {
         self.watch_hits.clear();
     }
 
-    #[cold]
-    fn record_watch(&mut self, va: u32) {
-        if self.watch_hits.len() < 64 {
-            self.watch_hits.push((self.r[15], self.r[14], va));
-        }
+    pub fn start_write_log(&mut self, allowed: &[(u32, u32)]) {
+        self.write_allow.clear();
+        self.write_allow.extend_from_slice(allowed);
+        self.write_log.clear();
+        self.write_log_active = true;
     }
 
-    #[inline(always)]
-    fn check_watch(&mut self, va: u32, end: u32) {
+    pub fn clear_write_log(&mut self) {
+        self.write_log.clear();
+    }
+
+    pub fn write_log(&self) -> &[(u32, u32)] {
+        &self.write_log
+    }
+
+    pub fn stop_write_log(&mut self) -> Vec<(u32, u32)> {
+        self.write_log_active = false;
+        self.write_allow.clear();
+        std::mem::take(&mut self.write_log)
+    }
+
+    #[cold]
+    fn check_watch_slow(&mut self, va: u32, len: u32) {
+        let end = va.saturating_add(len);
         if let Some((lo, hi)) = self.watch_range
             && va < hi
             && end > lo
+            && self.watch_hits.len() < 64
         {
-            self.record_watch(va);
+            self.watch_hits.push((self.r[15], self.r[14], va));
+        }
+        if self.write_log_active
+            && !self.write_allow.iter().any(|&(lo, hi)| va >= lo && end <= hi)
+        {
+            self.write_log.push((va, len));
         }
     }
 
     #[inline(always)]
-    pub fn w8(&mut self, va: u32, val: u8) {
-        self.check_watch(va, va.saturating_add(1));
+    fn check_watch(&mut self, va: u32, len: u32) {
+        if self.watch_range.is_none() && !self.write_log_active {
+            return;
+        }
+        self.check_watch_slow(va, len);
+    }
+
+    #[inline(always)]
+    fn w8_inner<const WATCH: bool>(&mut self, va: u32, val: u8) {
+        if WATCH {
+            self.check_watch_slow(va, 1);
+        }
         let off = va.wrapping_sub(SDRAM_BASE) as usize;
         if off < SDRAM_SIZE {
             self.sdram[off] = val;
@@ -198,33 +265,57 @@ impl Cpu {
     }
 
     #[inline(always)]
-    pub fn w16(&mut self, va: u32, val: u16) {
+    fn w16_inner<const WATCH: bool>(&mut self, va: u32, val: u16) {
         let va = va & !1;
-        self.check_watch(va, va.saturating_add(2));
-        let off = va.wrapping_sub(SDRAM_BASE) as usize;
-        if off + 2 <= SDRAM_SIZE {
-            let b = val.to_be_bytes();
-            self.sdram[off] = b[0];
-            self.sdram[off + 1] = b[1];
+        if WATCH {
+            self.check_watch_slow(va, 2);
+        }
+        let off = (va.wrapping_sub(SDRAM_BASE) & !1) as usize;
+        if off < SDRAM_SIZE {
+            self.sdram.as_chunks_mut::<2>().0[off >> 1] = val.to_be_bytes();
         } else {
-            let b = val.to_be_bytes();
-            self.mmio_w8(va, b[0]);
-            self.mmio_w8(va.wrapping_add(1), b[1]);
+            self.mmio_write(va, val.to_be_bytes());
+        }
+    }
+
+    #[inline(always)]
+    fn w32_inner<const WATCH: bool>(&mut self, va: u32, val: u32) {
+        let va = va & !3;
+        if WATCH {
+            self.check_watch_slow(va, 4);
+        }
+        let off = (va.wrapping_sub(SDRAM_BASE) & !3) as usize;
+        if off < SDRAM_SIZE {
+            self.sdram.as_chunks_mut::<4>().0[off >> 2] = val.to_be_bytes();
+        } else {
+            self.mmio_write(va, val.to_be_bytes());
+        }
+    }
+
+    #[inline(always)]
+    pub fn w8(&mut self, va: u32, val: u8) {
+        if self.watch_range.is_none() && !self.write_log_active {
+            self.w8_inner::<false>(va, val);
+        } else {
+            self.w8_inner::<true>(va, val);
+        }
+    }
+
+    #[inline(always)]
+    pub fn w16(&mut self, va: u32, val: u16) {
+        if self.watch_range.is_none() && !self.write_log_active {
+            self.w16_inner::<false>(va, val);
+        } else {
+            self.w16_inner::<true>(va, val);
         }
     }
 
     #[inline(always)]
     pub fn w32(&mut self, va: u32, val: u32) {
-        let va = va & !3;
-        self.check_watch(va, va.saturating_add(4));
-        let off = va.wrapping_sub(SDRAM_BASE) as usize;
-        if off + 4 <= SDRAM_SIZE {
-            self.sdram[off..off + 4].copy_from_slice(&val.to_be_bytes());
+        if self.watch_range.is_none() && !self.write_log_active {
+            self.w32_inner::<false>(va, val);
         } else {
-            let b = val.to_be_bytes();
-            for (i, &x) in b.iter().enumerate() {
-                self.mmio_w8(va.wrapping_add(i as u32), x);
-            }
+            self.w32_inner::<true>(va, val);
         }
     }
 
@@ -241,7 +332,7 @@ impl Cpu {
 
     pub fn write_bytes(&mut self, va: u32, src: &[u8]) {
         if !src.is_empty() {
-            self.check_watch(va, va.saturating_add(src.len() as u32));
+            self.check_watch(va, src.len() as u32);
         }
         let off = va.wrapping_sub(SDRAM_BASE) as usize;
         if off.saturating_add(src.len()) <= SDRAM_SIZE {
@@ -250,6 +341,20 @@ impl Cpu {
             for (i, &b) in src.iter().enumerate() {
                 self.w8(va.wrapping_add(i as u32), b);
             }
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn mmio_read<const N: usize>(&self, va: u32) -> [u8; N] {
+        std::array::from_fn(|i| self.mmio_r8(va.wrapping_add(i as u32)))
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn mmio_write<const N: usize>(&mut self, va: u32, bytes: [u8; N]) {
+        for (i, b) in bytes.into_iter().enumerate() {
+            self.mmio_w8(va.wrapping_add(i as u32), b);
         }
     }
 
@@ -283,6 +388,8 @@ impl Cpu {
         if off < CODE_BITMAP_SPAN {
             let idx = off >> 1;
             self.hook_bits[idx >> 6] |= 1u64 << (idx & 63);
+        } else if off < SDRAM_SIZE {
+            self.has_high_hooks = true;
         }
     }
 
@@ -342,6 +449,22 @@ impl Cpu {
     }
 
     pub fn run(&mut self, until: u32, max_steps: u64) -> Result<u64, String> {
+        if self.watch_range.is_none() && !self.write_log_active {
+            self.run_inner::<false>(until, max_steps)
+        } else {
+            self.run_inner::<true>(until, max_steps)
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn fault<T>(&mut self, msg: String) -> Result<T, ()> {
+        self.last_error = Some(msg);
+        Err(())
+    }
+
+    #[inline(never)]
+    fn run_inner<const WATCH: bool>(&mut self, until: u32, max_steps: u64) -> Result<u64, String> {
         let until = until & !1;
         let mut step = 0u64;
         while step < max_steps {
@@ -353,61 +476,64 @@ impl Cpu {
             let off = pc.wrapping_sub(SDRAM_BASE) as usize;
             if off >= SDRAM_SIZE {
                 self.total_steps = self.total_steps.wrapping_add(step);
-                let mut stack_dump = Vec::new();
-                for k in 0..24u32 {
-                    stack_dump.push(format!("{:#010x}", self.r32_be(self.r[13].wrapping_add(k * 4))));
-                }
-                let err = format!(
-                    "ARM9 wild PC={:#010x} ({}) LR={:#010x} SP={:#010x} R0..R7=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}] STK=[{}]",
-                    pc,
-                    if self.thumb { "Thumb" } else { "ARM" },
-                    self.r[14],
-                    self.r[13],
-                    self.r[0], self.r[1], self.r[2], self.r[3], self.r[4], self.r[5], self.r[6], self.r[7],
-                    stack_dump.join(",")
-                );
-                self.last_error = Some(err.clone());
-                return Err(err);
+                return Err(self.wild_pc(pc));
             }
-            if off < CODE_BITMAP_SPAN {
-                let word = self.hook_bits[off >> 7];
-                if word == 0 {
-                    // All 64 halfwords in this 128-byte SDRAM line are hook-free
-                    let line = pc & !0x7F;
+            // The precise bitmap tells us when the entire 128-byte line is
+            // hook-free. Only trace lines that don't contain the exit PC.
+            let word = if off < CODE_BITMAP_SPAN {
+                self.hook_bits[off >> 7]
+            } else if self.has_high_hooks {
+                u64::MAX
+            } else {
+                0
+            };
+            let line = pc & !0x7F;
+            if word == 0 && line != (until & !0x7F) {
+                if self.thumb {
                     loop {
-                        let res = if self.thumb {
-                            self.step_thumb(pc)
-                        } else {
-                            self.step_arm(pc)
-                        };
-                        if let Err(e) = res {
+                        let i = (pc as usize & (SDRAM_SIZE - 1)) >> 1;
+                        let op = u16::from_be_bytes(self.sdram.as_chunks::<2>().0[i]) as u32;
+                        let Ok(still_thumb) = self.step_thumb_op::<WATCH>(pc, op) else {
                             self.total_steps = self.total_steps.wrapping_add(step);
-                            self.last_error = Some(e.clone());
-                            return Err(e);
-                        }
+                            return Err(self.last_error.clone().unwrap_or_default());
+                        };
                         step += 1;
                         pc = self.r[15];
-                        if (pc & !0x7F) != line || pc == until || step >= max_steps {
+                        if !still_thumb || (pc & !0x7F) != line || step >= max_steps {
                             break;
                         }
                     }
-                    continue;
+                } else {
+                    loop {
+                        let i = (pc as usize & (SDRAM_SIZE - 1)) >> 2;
+                        let insn = u32::from_be_bytes(self.sdram.as_chunks::<4>().0[i]);
+                        if self.step_arm_op::<WATCH>(pc, insn).is_err() {
+                            self.total_steps = self.total_steps.wrapping_add(step);
+                            return Err(self.last_error.clone().unwrap_or_default());
+                        }
+                        step += 1;
+                        pc = self.r[15];
+                        if self.thumb || (pc & !0x7F) != line || step >= max_steps {
+                            break;
+                        }
+                    }
                 }
-                let bit = (off >> 1) & 63;
-                if (word >> bit) & 1 != 0 && self.fire_hook(pc) {
-                    step += 1;
-                    continue;
-                }
+                continue;
+            }
+            if (word >> ((off >> 1) & 63)) & 1 != 0 && self.fire_hook(pc) {
+                step += 1;
+                continue;
             }
             let res = if self.thumb {
-                self.step_thumb(pc)
+                let op = self.r16(pc) as u32;
+                self.step_thumb_op::<WATCH>(pc, op).map(|_| ())
             } else {
-                self.step_arm(pc)
+                let insn = self.r32(pc);
+                self.step_arm_op::<WATCH>(pc, insn)
             };
-            if let Err(e) = res {
+            if res.is_err() {
                 self.total_steps = self.total_steps.wrapping_add(step);
-                self.last_error = Some(e.clone());
-                return Err(e);
+                return Err(self.last_error.clone().unwrap_or_default());
             }
             step += 1;
         }
@@ -421,6 +547,26 @@ impl Cpu {
         );
         self.last_error = Some(err.clone());
         Err(err)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn wild_pc(&mut self, pc: u32) -> String {
+        let mut stack_dump = Vec::new();
+        for k in 0..24u32 {
+            stack_dump.push(format!("{:#010x}", self.r32_be(self.r[13].wrapping_add(k * 4))));
+        }
+        let err = format!(
+            "ARM9 wild PC={:#010x} ({}) LR={:#010x} SP={:#010x} R0..R7=[{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x},{:#x}] STK=[{}]",
+            pc,
+            if self.thumb { "Thumb" } else { "ARM" },
+            self.r[14],
+            self.r[13],
+            self.r[0], self.r[1], self.r[2], self.r[3], self.r[4], self.r[5], self.r[6], self.r[7],
+            stack_dump.join(",")
+        );
+        self.last_error = Some(err.clone());
+        err
     }
 
     #[cold]
@@ -608,26 +754,28 @@ impl Cpu {
         }
     }
 
-    fn step_arm(&mut self, pc: u32) -> Result<(), String> {
-        let insn = self.r32(pc);
+    #[inline(always)]
+    fn step_arm_op<const WATCH: bool>(&mut self, pc: u32, insn: u32) -> Result<(), ()> {
         let cond = insn >> 28;
-        if cond == 0xF {
-            // Unconditional ARMv5TE space: BLX #imm or PLD/cache hint
-            if (insn & 0x0E00_0000) == 0x0A00_0000 {
-                let h = (insn >> 23) & 2;
-                let off26 = (((insn & 0x00FF_FFFF) << 2) | h) as i32;
-                let simm = (off26 << 6) >> 6;
-                self.r[14] = pc.wrapping_add(4);
-                self.thumb = true;
-                self.r[15] = pc.wrapping_add(8).wrapping_add(simm as u32) & !1;
-            } else {
-                self.r[15] = pc.wrapping_add(4);
+        if cond != 0xE {
+            if cond == 0xF {
+                // Unconditional ARMv5TE space: BLX #imm or PLD/cache hint
+                if (insn & 0x0E00_0000) == 0x0A00_0000 {
+                    let h = (insn >> 23) & 2;
+                    let off26 = (((insn & 0x00FF_FFFF) << 2) | h) as i32;
+                    let simm = (off26 << 6) >> 6;
+                    self.r[14] = pc.wrapping_add(4);
+                    self.thumb = true;
+                    self.r[15] = pc.wrapping_add(8).wrapping_add(simm as u32) & !1;
+                } else {
+                    self.r[15] = pc.wrapping_add(4);
+                }
+                return Ok(());
             }
-            return Ok(());
-        }
-        if !self.cond_ok(cond) {
-            self.r[15] = pc.wrapping_add(4);
-            return Ok(());
+            if !self.cond_ok(cond) {
+                self.r[15] = pc.wrapping_add(4);
+                return Ok(());
+            }
         }
 
         let pc8 = pc.wrapping_add(8);
@@ -663,24 +811,26 @@ impl Cpu {
                     if w && (list & (1 << rn)) == 0 {
                         self.r[rn] = wb;
                     }
-                    for reg in 0..16usize {
-                        if (list >> reg) & 1 != 0 {
-                            let val = self.r32(addr);
-                            addr = addr.wrapping_add(4);
-                            if reg == 15 {
-                                self.branch_exchange(val);
-                            } else {
-                                self.r[reg] = val;
-                            }
+                    let mut m = list;
+                    while m != 0 {
+                        let reg = m.trailing_zeros() as usize;
+                        m &= m - 1;
+                        let val = self.r32(addr);
+                        addr = addr.wrapping_add(4);
+                        if reg == 15 {
+                            self.branch_exchange(val);
+                        } else {
+                            self.r[reg] = val;
                         }
                     }
                 } else {
-                    for reg in 0..16usize {
-                        if (list >> reg) & 1 != 0 {
-                            let val = if reg == 15 { pc8 } else { self.r[reg] };
-                            self.w32(addr, val);
-                            addr = addr.wrapping_add(4);
-                        }
+                    let mut m = list;
+                    while m != 0 {
+                        let reg = m.trailing_zeros() as usize;
+                        m &= m - 1;
+                        let val = if reg == 15 { pc8 } else { self.r[reg] };
+                        self.w32_inner::<WATCH>(addr, val);
+                        addr = addr.wrapping_add(4);
                     }
                     if w {
                         self.r[rn] = wb;
@@ -690,7 +840,7 @@ impl Cpu {
             0b010 | 0b011 => {
                 // Single Data Transfer: LDR / STR / LDRB / STRB
                 if top3 == 0b011 && (insn & 0x10) != 0 {
-                    return Err(format!("ARM undefined @ {:#010x}: {:#010x}", pc, insn));
+                    return self.fault(format!("ARM undefined @ {:#010x}: {:#010x}", pc, insn));
                 }
                 let reg_off = top3 == 0b011;
                 let p = (insn >> 24) & 1 != 0;
@@ -704,10 +854,12 @@ impl Cpu {
                 let off = if !reg_off {
                     insn & 0xFFF
                 } else {
-                    let rm = (insn & 0xF) as usize;
-                    let stype = (insn >> 5) & 3;
-                    let imm = (insn >> 7) & 0x1F;
-                    self.shift_imm(self.arm_reg(rm, pc8), stype, imm, self.c).0
+                    let rm = self.arm_reg((insn & 0xF) as usize, pc8);
+                    if (insn & 0xFF0) == 0 {
+                        rm
+                    } else {
+                        self.shift_imm(rm, (insn >> 5) & 3, (insn >> 7) & 0x1F, self.c).0
+                    }
                 };
                 let ea = if u { base.wrapping_add(off) } else { base.wrapping_sub(off) };
                 let addr = if p { ea } else { base };
@@ -724,19 +876,21 @@ impl Cpu {
                 } else {
                     let val = self.arm_reg(rd, pc8);
                     if b {
-                        self.w8(addr, val as u8);
+                        self.w8_inner::<WATCH>(addr, val as u8);
                     } else {
-                        self.w32(addr, val);
+                        self.w32_inner::<WATCH>(addr, val);
                     }
                     if !p || w {
                         self.r[rn] = ea;
                     }
                 }
             }
-            0b000 | 0b001 => self.step_arm_dp_misc(pc, pc8, insn)?,
+            0b000 | 0b001 => self.step_arm_dp_misc::<WATCH>(pc, pc8, insn)?,
             0b110 | 0b111 => {
-                // SVC / Coprocessor (MRC p15 -> 0, MCR/LDC/STC -> NOP)
-                if (insn & 0x0F10_0010) == 0x0E10_0010 {
+                // SVC -> E_OK (0) in r0; Coprocessor MRC p15 -> 0, MCR/LDC/STC -> NOP
+                if (insn & 0x0F00_0000) == 0x0F00_0000 {
+                    self.r[0] = 0;
+                } else if (insn & 0x0F10_0010) == 0x0E10_0010 {
                     let rd = ((insn >> 12) & 0xF) as usize;
                     if rd != 15 {
                         self.r[rd] = 0;
@@ -748,139 +902,13 @@ impl Cpu {
         Ok(())
     }
 
-    fn step_arm_dp_misc(&mut self, pc: u32, pc8: u32, insn: u32) -> Result<(), String> {
+    #[inline(always)]
+    fn step_arm_dp_misc<const WATCH: bool>(&mut self, pc: u32, pc8: u32, insn: u32) -> Result<(), ()> {
         let is_imm = (insn >> 25) & 1 != 0;
 
         // Multiply / Extra Load-Store (when I=0, bit7=1, bit4=1)
         if !is_imm && (insn & 0x90) == 0x90 {
-            let op_sh = (insn >> 5) & 3;
-            if op_sh == 0 {
-                let top4 = (insn >> 24) & 0xF;
-                if top4 == 0x1 {
-                    // SWP / SWPB
-                    let b = (insn >> 22) & 1 != 0;
-                    let rn = ((insn >> 16) & 0xF) as usize;
-                    let rd = ((insn >> 12) & 0xF) as usize;
-                    let rm = (insn & 0xF) as usize;
-                    let addr = self.r[rn];
-                    let src = self.r[rm];
-                    if b {
-                        let old = self.r8(addr) as u32;
-                        self.w8(addr, src as u8);
-                        self.r[rd] = old;
-                    } else {
-                        let old = self.r32(addr);
-                        self.w32(addr, src);
-                        self.r[rd] = old;
-                    }
-                    return Ok(());
-                }
-                let mul_op = (insn >> 21) & 7;
-                let s = (insn >> 20) & 1 != 0;
-                let rd = ((insn >> 16) & 0xF) as usize;
-                let rn = ((insn >> 12) & 0xF) as usize;
-                let rs = ((insn >> 8) & 0xF) as usize;
-                let rm = (insn & 0xF) as usize;
-                match mul_op {
-                    0 | 1 => {
-                        let mut res = self.r[rm].wrapping_mul(self.r[rs]);
-                        if mul_op == 1 {
-                            res = res.wrapping_add(self.r[rn]);
-                        }
-                        self.r[rd] = res;
-                        if s {
-                            self.set_nz(res);
-                        }
-                    }
-                    4..=7 => {
-                        let signed = (mul_op & 2) != 0;
-                        let accum = (mul_op & 1) != 0;
-                        let mut prod: u64 = if signed {
-                            ((self.r[rm] as i32 as i64) * (self.r[rs] as i32 as i64)) as u64
-                        } else {
-                            (self.r[rm] as u64) * (self.r[rs] as u64)
-                        };
-                        if accum {
-                            let acc = ((self.r[rd] as u64) << 32) | (self.r[rn] as u64);
-                            prod = prod.wrapping_add(acc);
-                        }
-                        self.r[rn] = prod as u32;
-                        self.r[rd] = (prod >> 32) as u32;
-                        if s {
-                            self.n = (self.r[rd] as i32) < 0;
-                            self.z = prod == 0;
-                        }
-                    }
-                    _ => return Err(format!("ARM unknown mul @ {:#010x}: {:#010x}", pc, insn)),
-                }
-                return Ok(());
-            }
-
-            // Extra Load/Store: STRH, LDRD, STRD, LDRH, LDRSB, LDRSH
-            let p = (insn >> 24) & 1 != 0;
-            let u = (insn >> 23) & 1 != 0;
-            let i_imm = (insn >> 22) & 1 != 0;
-            let w = (insn >> 21) & 1 != 0;
-            let l = (insn >> 20) & 1 != 0;
-            let rn = ((insn >> 16) & 0xF) as usize;
-            let rd = ((insn >> 12) & 0xF) as usize;
-            let base = self.arm_reg(rn, pc8);
-            let off = if i_imm {
-                ((insn >> 4) & 0xF0) | (insn & 0xF)
-            } else {
-                self.arm_reg((insn & 0xF) as usize, pc8)
-            };
-            let ea = if u { base.wrapping_add(off) } else { base.wrapping_sub(off) };
-            let addr = if p { ea } else { base };
-            match (l, op_sh) {
-                (false, 1) => {
-                    self.w16(addr, self.arm_reg(rd, pc8) as u16);
-                    if !p || w {
-                        self.r[rn] = ea;
-                    }
-                }
-                (true, 1) => {
-                    let v = self.r16(addr) as u32;
-                    if (!p || w) && rn != rd {
-                        self.r[rn] = ea;
-                    }
-                    self.r[rd] = v;
-                }
-                (true, 2) => {
-                    let v = (self.r8(addr) as i8) as i32 as u32;
-                    if (!p || w) && rn != rd {
-                        self.r[rn] = ea;
-                    }
-                    self.r[rd] = v;
-                }
-                (true, 3) => {
-                    let v = (self.r16(addr) as i16) as i32 as u32;
-                    if (!p || w) && rn != rd {
-                        self.r[rn] = ea;
-                    }
-                    self.r[rd] = v;
-                }
-                (false, 2) => {
-                    // LDRD (ARMv5TE: L=0, S=1, H=0)
-                    let v0 = self.r32(addr);
-                    let v1 = self.r32(addr.wrapping_add(4));
-                    if (!p || w) && rn != rd && rn != rd + 1 {
-                        self.r[rn] = ea;
-                    }
-                    self.r[rd] = v0;
-                    self.r[rd + 1] = v1;
-                }
-                (false, 3) => {
-                    // STRD (ARMv5TE: L=0, S=1, H=1)
-                    self.w32(addr, self.r[rd]);
-                    self.w32(addr.wrapping_add(4), self.r[rd + 1]);
-                    if !p || w {
-                        self.r[rn] = ea;
-                    }
-                }
-                _ => return Err(format!("ARM extra mem @ {:#010x}: {:#010x}", pc, insn)),
-            }
-            return Ok(());
+            return self.step_arm_extra_mem_mul::<WATCH>(pc, pc8, insn);
         }
 
         let opcode = (insn >> 21) & 0xF;
@@ -888,135 +916,7 @@ impl Cpu {
 
         // Miscellaneous space: !S && opcode in 8..=11
         if !s && (8..=11).contains(&opcode) {
-            if !is_imm && (insn & 0x90) == 0x80 {
-                // ARMv5TE 16-bit DSP multiplies: SMLAxy, SMLAWy, SMULWy, SMLALxy, SMULxy
-                let rd = ((insn >> 16) & 0xF) as usize;
-                let rn = ((insn >> 12) & 0xF) as usize;
-                let rs = ((insn >> 8) & 0xF) as usize;
-                let rm = (insn & 0xF) as usize;
-                let x_top = (insn >> 5) & 1 != 0;
-                let y_top = (insn >> 6) & 1 != 0;
-                let mx = if x_top { (self.r[rm] >> 16) as i16 } else { self.r[rm] as i16 } as i32;
-                let sy = if y_top { (self.r[rs] >> 16) as i16 } else { self.r[rs] as i16 } as i32;
-                match opcode {
-                    8 => {
-                        let (res, ovf) = (mx * sy).overflowing_add(self.r[rn] as i32);
-                        if ovf {
-                            self.q = true;
-                        }
-                        self.r[rd] = res as u32;
-                    }
-                    9 => {
-                        let prod = ((self.r[rm] as i32 as i64 * sy as i64) >> 16) as i32;
-                        if x_top {
-                            self.r[rd] = prod as u32;
-                        } else {
-                            let (res, ovf) = prod.overflowing_add(self.r[rn] as i32);
-                            if ovf {
-                                self.q = true;
-                            }
-                            self.r[rd] = res as u32;
-                        }
-                    }
-                    10 => {
-                        let acc = ((self.r[rd] as u64) << 32 | (self.r[rn] as u64)) as i64;
-                        let sum = acc.wrapping_add((mx as i64) * (sy as i64)) as u64;
-                        self.r[rn] = sum as u32;
-                        self.r[rd] = (sum >> 32) as u32;
-                    }
-                    11 => {
-                        self.r[rd] = (mx * sy) as u32;
-                    }
-                    _ => unreachable!(),
-                }
-                return Ok(());
-            }
-            if !is_imm {
-                let sub = (insn >> 4) & 0xF;
-                match sub {
-                    0 => {
-                        if opcode & 1 == 0 {
-                            // MRS
-                            let rd = ((insn >> 12) & 0xF) as usize;
-                            self.r[rd] = self.cpsr();
-                        } else {
-                            // MSR reg
-                            let mask = msr_mask((insn >> 16) & 0xF);
-                            let val = self.r[(insn & 0xF) as usize];
-                            self.set_cpsr(val, mask);
-                        }
-                        return Ok(());
-                    }
-                    1 => {
-                        if opcode == 9 {
-                            // BX Rm
-                            let tgt = self.arm_reg((insn & 0xF) as usize, pc8);
-                            self.branch_exchange(tgt);
-                        } else if opcode == 11 {
-                            // CLZ Rd, Rm
-                            let rd = ((insn >> 12) & 0xF) as usize;
-                            let rm = (insn & 0xF) as usize;
-                            self.r[rd] = self.r[rm].leading_zeros();
-                        }
-                        return Ok(());
-                    }
-                    3 => {
-                        // BLX Rm
-                        let tgt = self.arm_reg((insn & 0xF) as usize, pc8);
-                        self.r[14] = pc.wrapping_add(4);
-                        self.branch_exchange(tgt);
-                        return Ok(());
-                    }
-                    5 => {
-                        // QADD / QSUB / QDADD / QDSUB
-                        let rn = self.r[((insn >> 16) & 0xF) as usize] as i32;
-                        let rm = self.r[(insn & 0xF) as usize] as i32;
-                        let rd = ((insn >> 12) & 0xF) as usize;
-                        let mut q = false;
-                        let rhs = if opcode >= 10 {
-                            let (d, o) = rn.overflowing_mul(2);
-                            if o {
-                                q = true;
-                                if rn < 0 { i32::MIN } else { i32::MAX }
-                            } else {
-                                d
-                            }
-                        } else {
-                            rn
-                        };
-                        let res = if opcode & 1 == 0 {
-                            let (v, o) = rm.overflowing_add(rhs);
-                            if o {
-                                q = true;
-                                if rm < 0 { i32::MIN } else { i32::MAX }
-                            } else {
-                                v
-                            }
-                        } else {
-                            let (v, o) = rm.overflowing_sub(rhs);
-                            if o {
-                                q = true;
-                                if rm < 0 { i32::MIN } else { i32::MAX }
-                            } else {
-                                v
-                            }
-                        };
-                        if q {
-                            self.q = true;
-                        }
-                        self.r[rd] = res as u32;
-                        return Ok(());
-                    }
-                    _ => return Err(format!("ARM misc @ {:#010x}: {:#010x}", pc, insn)),
-                }
-            } else if opcode & 1 == 1 {
-                // MSR imm
-                let rot = ((insn >> 8) & 0xF) * 2;
-                let imm = (insn & 0xFF).rotate_right(rot);
-                let mask = msr_mask((insn >> 16) & 0xF);
-                self.set_cpsr(imm, mask);
-                return Ok(());
-            }
+            return self.step_arm_misc(pc, pc8, insn, is_imm, opcode);
         }
 
         // Standard Data Processing
@@ -1032,12 +932,16 @@ impl Cpu {
             (v, c)
         } else {
             let rm = self.arm_reg((insn & 0xF) as usize, r15_val);
-            let stype = (insn >> 5) & 3;
-            if reg_shift {
-                let rs = self.r[((insn >> 8) & 0xF) as usize];
-                self.shift_reg(rm, stype, rs, self.c)
+            if (insn & 0xFF0) == 0 {
+                (rm, self.c)
             } else {
-                self.shift_imm(rm, stype, (insn >> 7) & 0x1F, self.c)
+                let stype = (insn >> 5) & 3;
+                if reg_shift {
+                    let rs = self.r[((insn >> 8) & 0xF) as usize];
+                    self.shift_reg(rm, stype, rs, self.c)
+                } else {
+                    self.shift_imm(rm, stype, (insn >> 7) & 0x1F, self.c)
+                }
             }
         };
 
@@ -1055,12 +959,12 @@ impl Cpu {
                 if logic_s { self.set_nz(r); self.c = sc; }
                 r
             }
-            0x2 => if s && rd != 15 { self.sub_flags(rn, op2) } else { rn.wrapping_sub(op2) },
-            0x3 => if s && rd != 15 { self.sub_flags(op2, rn) } else { op2.wrapping_sub(rn) },
-            0x4 => if s && rd != 15 { self.add_flags(rn, op2) } else { rn.wrapping_add(op2) },
-            0x5 => if s && rd != 15 { self.adc_flags(rn, op2, cin) } else { rn.wrapping_add(op2).wrapping_add(cin as u32) },
-            0x6 => if s && rd != 15 { self.sbc_flags(rn, op2, cin) } else { rn.wrapping_add(!op2).wrapping_add(cin as u32) },
-            0x7 => if s && rd != 15 { self.sbc_flags(op2, rn, cin) } else { op2.wrapping_add(!rn).wrapping_add(cin as u32) },
+            0x2 => if logic_s { self.sub_flags(rn, op2) } else { rn.wrapping_sub(op2) },
+            0x3 => if logic_s { self.sub_flags(op2, rn) } else { op2.wrapping_sub(rn) },
+            0x4 => if logic_s { self.add_flags(rn, op2) } else { rn.wrapping_add(op2) },
+            0x5 => if logic_s { self.adc_flags(rn, op2, cin) } else { rn.wrapping_add(op2).wrapping_add(cin as u32) },
+            0x6 => if logic_s { self.sbc_flags(rn, op2, cin) } else { rn.wrapping_add(!op2).wrapping_add(cin as u32) },
+            0x7 => if logic_s { self.sbc_flags(op2, rn, cin) } else { op2.wrapping_add(!rn).wrapping_add(cin as u32) },
             0x8 => { self.set_nz(rn & op2); self.c = sc; 0 }
             0x9 => { self.set_nz(rn ^ op2); self.c = sc; 0 }
             0xA => { self.sub_flags(rn, op2); 0 }
@@ -1097,8 +1001,268 @@ impl Cpu {
         Ok(())
     }
 
-    fn step_thumb(&mut self, pc: u32) -> Result<(), String> {
-        let op = self.r16(pc) as u32;
+    #[inline(never)]
+    fn step_arm_extra_mem_mul<const WATCH: bool>(&mut self, pc: u32, pc8: u32, insn: u32) -> Result<(), ()> {
+        let op_sh = (insn >> 5) & 3;
+        if op_sh == 0 {
+            let top4 = (insn >> 24) & 0xF;
+            if top4 == 0x1 {
+                // SWP / SWPB
+                let b = (insn >> 22) & 1 != 0;
+                let rn = ((insn >> 16) & 0xF) as usize;
+                let rd = ((insn >> 12) & 0xF) as usize;
+                let rm = (insn & 0xF) as usize;
+                let addr = self.r[rn];
+                let src = self.r[rm];
+                if b {
+                    let old = self.r8(addr) as u32;
+                    self.w8_inner::<WATCH>(addr, src as u8);
+                    self.r[rd] = old;
+                } else {
+                    let old = self.r32(addr);
+                    self.w32_inner::<WATCH>(addr, src);
+                    self.r[rd] = old;
+                }
+                return Ok(());
+            }
+            let mul_op = (insn >> 21) & 7;
+            let s = (insn >> 20) & 1 != 0;
+            let rd = ((insn >> 16) & 0xF) as usize;
+            let rn = ((insn >> 12) & 0xF) as usize;
+            let rs = ((insn >> 8) & 0xF) as usize;
+            let rm = (insn & 0xF) as usize;
+            match mul_op {
+                0 | 1 => {
+                    let mut res = self.r[rm].wrapping_mul(self.r[rs]);
+                    if mul_op == 1 {
+                        res = res.wrapping_add(self.r[rn]);
+                    }
+                    self.r[rd] = res;
+                    if s {
+                        self.set_nz(res);
+                    }
+                }
+                4..=7 => {
+                    let signed = (mul_op & 2) != 0;
+                    let accum = (mul_op & 1) != 0;
+                    let mut prod: u64 = if signed {
+                        ((self.r[rm] as i32 as i64) * (self.r[rs] as i32 as i64)) as u64
+                    } else {
+                        (self.r[rm] as u64) * (self.r[rs] as u64)
+                    };
+                    if accum {
+                        let acc = ((self.r[rd] as u64) << 32) | (self.r[rn] as u64);
+                        prod = prod.wrapping_add(acc);
+                    }
+                    self.r[rn] = prod as u32;
+                    self.r[rd] = (prod >> 32) as u32;
+                    if s {
+                        self.n = (self.r[rd] as i32) < 0;
+                        self.z = prod == 0;
+                    }
+                }
+                _ => return self.fault(format!("ARM unknown mul @ {:#010x}: {:#010x}", pc, insn)),
+            }
+            return Ok(());
+        }
+
+        // Extra Load/Store: STRH, LDRD, STRD, LDRH, LDRSB, LDRSH
+        let p = (insn >> 24) & 1 != 0;
+        let u = (insn >> 23) & 1 != 0;
+        let i_imm = (insn >> 22) & 1 != 0;
+        let w = (insn >> 21) & 1 != 0;
+        let l = (insn >> 20) & 1 != 0;
+        let rn = ((insn >> 16) & 0xF) as usize;
+        let rd = ((insn >> 12) & 0xF) as usize;
+        let base = self.arm_reg(rn, pc8);
+        let off = if i_imm {
+            ((insn >> 4) & 0xF0) | (insn & 0xF)
+        } else {
+            self.arm_reg((insn & 0xF) as usize, pc8)
+        };
+        let ea = if u { base.wrapping_add(off) } else { base.wrapping_sub(off) };
+        let addr = if p { ea } else { base };
+        match (l, op_sh) {
+            (false, 1) => {
+                self.w16_inner::<WATCH>(addr, self.arm_reg(rd, pc8) as u16);
+                if !p || w {
+                    self.r[rn] = ea;
+                }
+            }
+            (true, 1) => {
+                let v = self.r16(addr) as u32;
+                if (!p || w) && rn != rd {
+                    self.r[rn] = ea;
+                }
+                self.r[rd] = v;
+            }
+            (true, 2) => {
+                let v = (self.r8(addr) as i8) as i32 as u32;
+                if (!p || w) && rn != rd {
+                    self.r[rn] = ea;
+                }
+                self.r[rd] = v;
+            }
+            (true, 3) => {
+                let v = (self.r16(addr) as i16) as i32 as u32;
+                if (!p || w) && rn != rd {
+                    self.r[rn] = ea;
+                }
+                self.r[rd] = v;
+            }
+            (false, 2) => {
+                // LDRD (ARMv5TE: L=0, S=1, H=0)
+                let v0 = self.r32(addr);
+                let v1 = self.r32(addr.wrapping_add(4));
+                if (!p || w) && rn != rd && rn != rd + 1 {
+                    self.r[rn] = ea;
+                }
+                self.r[rd] = v0;
+                self.r[rd + 1] = v1;
+            }
+            (false, 3) => {
+                // STRD (ARMv5TE: L=0, S=1, H=1)
+                self.w32_inner::<WATCH>(addr, self.r[rd]);
+                self.w32_inner::<WATCH>(addr.wrapping_add(4), self.r[rd + 1]);
+                if !p || w {
+                    self.r[rn] = ea;
+                }
+            }
+            _ => return self.fault(format!("ARM extra mem @ {:#010x}: {:#010x}", pc, insn)),
+        }
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn step_arm_misc(&mut self, pc: u32, pc8: u32, insn: u32, is_imm: bool, opcode: u32) -> Result<(), ()> {
+        if !is_imm && (insn & 0x90) == 0x80 {
+            // ARMv5TE 16-bit DSP multiplies: SMLAxy, SMLAWy, SMULWy, SMLALxy, SMULxy
+            let rd = ((insn >> 16) & 0xF) as usize;
+            let rn = ((insn >> 12) & 0xF) as usize;
+            let rs = ((insn >> 8) & 0xF) as usize;
+            let rm = (insn & 0xF) as usize;
+            let x_top = (insn >> 5) & 1 != 0;
+            let y_top = (insn >> 6) & 1 != 0;
+            let mx = if x_top { (self.r[rm] >> 16) as i16 } else { self.r[rm] as i16 } as i32;
+            let sy = if y_top { (self.r[rs] >> 16) as i16 } else { self.r[rs] as i16 } as i32;
+            match opcode {
+                8 => {
+                    let (res, ovf) = (mx * sy).overflowing_add(self.r[rn] as i32);
+                    if ovf {
+                        self.q = true;
+                    }
+                    self.r[rd] = res as u32;
+                }
+                9 => {
+                    let prod = ((self.r[rm] as i32 as i64 * sy as i64) >> 16) as i32;
+                    if x_top {
+                        self.r[rd] = prod as u32;
+                    } else {
+                        let (res, ovf) = prod.overflowing_add(self.r[rn] as i32);
+                        if ovf {
+                            self.q = true;
+                        }
+                        self.r[rd] = res as u32;
+                    }
+                }
+                10 => {
+                    let acc = ((self.r[rd] as u64) << 32 | (self.r[rn] as u64)) as i64;
+                    let sum = acc.wrapping_add((mx as i64) * (sy as i64)) as u64;
+                    self.r[rn] = sum as u32;
+                    self.r[rd] = (sum >> 32) as u32;
+                }
+                11 => {
+                    self.r[rd] = (mx * sy) as u32;
+                }
+                _ => unreachable!(),
+            }
+            return Ok(());
+        }
+        if !is_imm {
+            let sub = (insn >> 4) & 0xF;
+            match sub {
+                0 => {
+                    if opcode & 1 == 0 {
+                        let rd = ((insn >> 12) & 0xF) as usize;
+                        self.r[rd] = self.cpsr();
+                    } else {
+                        let mask = msr_mask((insn >> 16) & 0xF);
+                        let val = self.r[(insn & 0xF) as usize];
+                        self.set_cpsr(val, mask);
+                    }
+                    return Ok(());
+                }
+                1 => {
+                    if opcode == 9 {
+                        let tgt = self.arm_reg((insn & 0xF) as usize, pc8);
+                        self.branch_exchange(tgt);
+                    } else if opcode == 11 {
+                        let rd = ((insn >> 12) & 0xF) as usize;
+                        let rm = (insn & 0xF) as usize;
+                        self.r[rd] = self.r[rm].leading_zeros();
+                    }
+                    return Ok(());
+                }
+                3 => {
+                    let tgt = self.arm_reg((insn & 0xF) as usize, pc8);
+                    self.r[14] = pc.wrapping_add(4);
+                    self.branch_exchange(tgt);
+                    return Ok(());
+                }
+                5 => {
+                    let rn = self.r[((insn >> 16) & 0xF) as usize] as i32;
+                    let rm = self.r[(insn & 0xF) as usize] as i32;
+                    let rd = ((insn >> 12) & 0xF) as usize;
+                    let mut q = false;
+                    let rhs = if opcode >= 10 {
+                        let (d, o) = rn.overflowing_mul(2);
+                        if o {
+                            q = true;
+                            if rn < 0 { i32::MIN } else { i32::MAX }
+                        } else {
+                            d
+                        }
+                    } else {
+                        rn
+                    };
+                    let res = if opcode & 1 == 0 {
+                        let (v, o) = rm.overflowing_add(rhs);
+                        if o {
+                            q = true;
+                            if rm < 0 { i32::MIN } else { i32::MAX }
+                        } else {
+                            v
+                        }
+                    } else {
+                        let (v, o) = rm.overflowing_sub(rhs);
+                        if o {
+                            q = true;
+                            if rm < 0 { i32::MIN } else { i32::MAX }
+                        } else {
+                            v
+                        }
+                    };
+                    if q {
+                        self.q = true;
+                    }
+                    self.r[rd] = res as u32;
+                    return Ok(());
+                }
+                _ => return self.fault(format!("ARM misc @ {:#010x}: {:#010x}", pc, insn)),
+            }
+        } else if opcode & 1 == 1 {
+            let rot = ((insn >> 8) & 0xF) * 2;
+            let imm = (insn & 0xFF).rotate_right(rot);
+            let mask = msr_mask((insn >> 16) & 0xF);
+            self.set_cpsr(imm, mask);
+            return Ok(());
+        }
+        Ok(())
+    }
+
+    // On success, indicate whether the instruction left the CPU in Thumb mode.
+    #[inline(always)]
+    fn step_thumb_op<const WATCH: bool>(&mut self, pc: u32, op: u32) -> Result<bool, ()> {
         self.r[15] = pc.wrapping_add(2);
         let top3 = op >> 13;
 
@@ -1212,6 +1376,7 @@ impl Cpu {
                                     self.r[14] = pc.wrapping_add(2) | 1;
                                 }
                                 self.branch_exchange(vm);
+                                return Ok(self.thumb);
                             }
                         }
                     }
@@ -1228,9 +1393,9 @@ impl Cpu {
                         let rd = (op & 7) as usize;
                         let addr = self.r[rb].wrapping_add(self.r[ro]);
                         match (op >> 9) & 7 {
-                            0b000 => self.w32(addr, self.r[rd]),
-                            0b001 => self.w16(addr, self.r[rd] as u16),
-                            0b010 => self.w8(addr, self.r[rd] as u8),
+                            0b000 => self.w32_inner::<WATCH>(addr, self.r[rd]),
+                            0b001 => self.w16_inner::<WATCH>(addr, self.r[rd] as u16),
+                            0b010 => self.w8_inner::<WATCH>(addr, self.r[rd] as u8),
                             0b011 => self.r[rd] = (self.r8(addr) as i8) as i32 as u32,
                             0b100 => self.r[rd] = self.r32(addr),
                             0b101 => self.r[rd] = self.r16(addr) as u32,
@@ -1246,9 +1411,9 @@ impl Cpu {
                 let rb = ((op >> 3) & 7) as usize;
                 let rd = (op & 7) as usize;
                 match (op >> 11) & 3 {
-                    0 => self.w32(self.r[rb].wrapping_add(imm << 2), self.r[rd]),
+                    0 => self.w32_inner::<WATCH>(self.r[rb].wrapping_add(imm << 2), self.r[rd]),
                     1 => self.r[rd] = self.r32(self.r[rb].wrapping_add(imm << 2)),
-                    2 => self.w8(self.r[rb].wrapping_add(imm), self.r[rd] as u8),
+                    2 => self.w8_inner::<WATCH>(self.r[rb].wrapping_add(imm), self.r[rd] as u8),
                     _ => self.r[rd] = self.r8(self.r[rb].wrapping_add(imm)) as u32,
                 }
             }
@@ -1262,7 +1427,7 @@ impl Cpu {
                     if (op >> 11) & 1 != 0 {
                         self.r[rd] = self.r16(addr) as u32;
                     } else {
-                        self.w16(addr, self.r[rd] as u16);
+                        self.w16_inner::<WATCH>(addr, self.r[rd] as u16);
                     }
                 } else {
                     // Format 11: SP-relative LDR / STR
@@ -1271,7 +1436,7 @@ impl Cpu {
                     if (op >> 11) & 1 != 0 {
                         self.r[rd] = self.r32(addr);
                     } else {
-                        self.w32(addr, self.r[rd]);
+                        self.w32_inner::<WATCH>(addr, self.r[rd]);
                     }
                 }
             }
@@ -1299,36 +1464,39 @@ impl Cpu {
                             let count = list.count_ones() + (rbit as u32);
                             let new_sp = self.r[13].wrapping_sub(count * 4);
                             let mut a = new_sp;
-                            for reg in 0..8usize {
-                                if (list >> reg) & 1 != 0 {
-                                    self.w32(a, self.r[reg]);
-                                    a = a.wrapping_add(4);
-                                }
+                            let mut m = list;
+                            while m != 0 {
+                                let reg = m.trailing_zeros() as usize;
+                                m &= m - 1;
+                                self.w32_inner::<WATCH>(a, self.r[reg]);
+                                a = a.wrapping_add(4);
                             }
                             if rbit {
-                                self.w32(a, self.r[14]);
+                                self.w32_inner::<WATCH>(a, self.r[14]);
                             }
                             self.r[13] = new_sp;
                         } else {
                             // POP
                             let mut a = self.r[13];
-                            for reg in 0..8usize {
-                                if (list >> reg) & 1 != 0 {
-                                    self.r[reg] = self.r32(a);
-                                    a = a.wrapping_add(4);
-                                }
+                            let mut m = list;
+                            while m != 0 {
+                                let reg = m.trailing_zeros() as usize;
+                                m &= m - 1;
+                                self.r[reg] = self.r32(a);
+                                a = a.wrapping_add(4);
                             }
                             if rbit {
                                 let tgt = self.r32(a);
                                 a = a.wrapping_add(4);
                                 self.r[13] = a;
                                 self.branch_exchange(tgt);
+                                return Ok(self.thumb);
                             } else {
                                 self.r[13] = a;
                             }
                         }
                     } else {
-                        return Err(format!("Thumb undefined @ {:#010x}: {:#06x}", pc, op));
+                        return self.fault(format!("Thumb undefined @ {:#010x}: {:#06x}", pc, op));
                     }
                 }
             }
@@ -1339,19 +1507,21 @@ impl Cpu {
                     let list = op & 0xFF;
                     let mut a = self.r[rb];
                     if (op >> 11) & 1 == 0 {
-                        for reg in 0..8usize {
-                            if (list >> reg) & 1 != 0 {
-                                self.w32(a, self.r[reg]);
-                                a = a.wrapping_add(4);
-                            }
+                        let mut m = list;
+                        while m != 0 {
+                            let reg = m.trailing_zeros() as usize;
+                            m &= m - 1;
+                            self.w32_inner::<WATCH>(a, self.r[reg]);
+                            a = a.wrapping_add(4);
                         }
                         self.r[rb] = a;
                     } else {
-                        for reg in 0..8usize {
-                            if (list >> reg) & 1 != 0 {
-                                self.r[reg] = self.r32(a);
-                                a = a.wrapping_add(4);
-                            }
+                        let mut m = list;
+                        while m != 0 {
+                            let reg = m.trailing_zeros() as usize;
+                            m &= m - 1;
+                            self.r[reg] = self.r32(a);
+                            a = a.wrapping_add(4);
                         }
                         if (list >> rb) & 1 == 0 {
                             self.r[rb] = a;
@@ -1364,7 +1534,7 @@ impl Cpu {
                         // SVC #imm8: uITRON critical section / syscall -> return E_OK (0)
                         self.r[0] = 0;
                     } else if cond == 0xE {
-                        return Err(format!("Thumb UDF @ {:#010x}: {:#06x}", pc, op));
+                        return self.fault(format!("Thumb UDF @ {:#010x}: {:#06x}", pc, op));
                     } else if self.cond_ok(cond) {
                         let simm = ((op as i8) as i32) << 1;
                         self.r[15] = pc.wrapping_add(4).wrapping_add(simm as u32) & !1;
@@ -1392,17 +1562,21 @@ impl Cpu {
                     }
                     1 => {
                         // ARMv5TE BLX #tgt (op bit 0 must be 0)
+                        if op & 1 != 0 {
+                            return self.fault(format!("Thumb undefined BLX @ {:#010x}: {:#06x}", pc, op));
+                        }
                         let tgt = self.r[14].wrapping_add((op & 0x7FF) << 1) & !3;
                         self.r[14] = pc.wrapping_add(2) | 1;
                         self.thumb = false;
                         self.r[15] = tgt;
+                        return Ok(false);
                     }
                     _ => unreachable!(),
                 }
             }
             _ => unreachable!(),
         }
-        Ok(())
+        Ok(true)
     }
 }
 
@@ -1427,6 +1601,43 @@ fn msr_mask(field: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn step_counts_through_hooks_and_page_edges() {
+        let mut cpu = Cpu::new();
+        let a = SDRAM_BASE + 0x0FFE;
+        for n in 0..4 {
+            cpu.w16(a + n * 2, 0x3001); // adds r0, #1
+        }
+        cpu.add_hook(a + 2, move |cpu| {
+            assert_eq!(cpu.r[0], 1);
+            cpu.add_hook(a + 6, move |_| HookAction::Jump((a + 8) | 1));
+            HookAction::Continue
+        });
+        cpu.branch_exchange(a | 1);
+        assert_eq!(cpu.run(a + 8, 5), Ok(4));
+        assert_eq!(cpu.r[0], 3); // The last instruction was handled by the hook.
+        assert_eq!(cpu.total_steps, 4);
+
+        // A limit reached on the last instruction is still a limit error,
+        // even when that instruction's successor is the exit address.
+        cpu.branch_exchange(a | 1);
+        assert!(cpu.run(a + 2, 1).unwrap_err().contains("step limit"));
+        assert_eq!(cpu.total_steps, 5);
+        assert_eq!(cpu.r[15], a + 2);
+    }
+
+    #[test]
+    fn aligned_and_unaligned_big_endian_at_sdram_edge() {
+        let mut cpu = Cpu::new();
+        let end = SDRAM_BASE + SDRAM_SIZE as u32;
+        cpu.w32(end - 1, 0x1122_3344);
+        cpu.w16(end + 1, 0x5566);
+        assert_eq!(cpu.r32(end - 1), 0x1122_3344);
+        assert_eq!(cpu.r16(end - 1), 0x3344);
+        assert_eq!(cpu.r32_be(end - 2), 0x3344_5566);
+        assert_eq!(cpu.r16_be(end - 1), 0x4455);
+    }
 
     #[test]
     fn arm_thumb_interwork_and_swar() {

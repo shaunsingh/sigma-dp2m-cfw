@@ -62,6 +62,7 @@ A table ends with an all-zero row. Shooting and Setup pages clip rows beyond 6.
 | 0x28 | `0xA07EDF8C` | bracketing order | + three 5-shot orders (4, 6, 7) |
 | 0x37 | `0xA07EEFCC` | grid | + 11 HUD modes (7..17) |
 | 0x3E | `0xA07F188C` | ISO Auto | + Min Shutter (0xF3) |
+| 0xD2 | `0xA07EB04C` / `0xA07EB14C` | ISO Auto Lower limit 1 EV / 1/3 EV (pool words `0xA004D3EC` / `0xA004D3F0`) | + ISO 50 |
 | | `0xA07EAC8C` / `0xA07EADAC` | ISO 1 EV / 1/3 EV (pool words `0xA004D3DC` / `0xA004D3E0`) | + ISO 50 |
 | 0xA3 | `0xA07EDC0C` | Imager Temp (hidden in stock) | linked from setup page 4 |
 | 0xF0..0xF9 | | payload | paper (by class 0x1F0..0x1F3), engine, fill, min shutter, peaking color, grain, halation, Film page, peaking level, zebra level |

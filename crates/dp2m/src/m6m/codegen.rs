@@ -50,6 +50,13 @@ const STOCK_GRID_MENU: u32 = 0xA07E_EFCC;
 const STOCK_ISO_MENU_1EV: u32 = 0xA07E_AC8C;
 const STOCK_ISO_MENU_3EV: u32 = 0xA07E_ADAC;
 const STOCK_ISO_MENU_POOL: u32 = 0xA004_D3DC;
+const STOCK_ISO_MIN_1EV: u32 = 0xA07E_B04C;
+const STOCK_ISO_MIN_3EV: u32 = 0xA07E_B14C;
+const STOCK_ISO_MIN_POOL: u32 = 0xA004_D3EC;
+// Stock ISO 50 row metadata: unused row id 0x157 (outside 0xA004B650's 0x159..0x16B loop) + stock ISO 50 icons
+const ISO50_ROW_ID: u32 = 0x0157;
+const ISO50_ICON_W1: u32 = 0x0100_012B; // enabled | 110x70 QS "ISO 50"
+const ISO50_ICON_W2: u32 = 0x0070_0175; // 89x24 OSD "ISO 50" << 16 | 54x42 strip/menu "ISO 50"
 const STOCK_SHOOT_P2: u32 = 0xA07E_A60C;
 const STOCK_SHOOT_P3: u32 = 0xA07E_A6EC;
 const STOCK_SETUP_P1: u32 = 0xA07E_AA0C;
@@ -157,14 +164,37 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
         let iso_1ev = stock_rows(s3, STOCK_ISO_MENU_1EV, 2)?;
         let iso_3ev = stock_rows(s3, STOCK_ISO_MENU_3EV, 1)?;
         let mut iso50 = iso_1ev[1];
+        iso50[0] = ISO50_ROW_ID;
+        iso50[1] = ISO50_ICON_W1;
+        iso50[2] = ISO50_ICON_W2;
         iso50[3] = SID_ISO50 << 16;
         iso50[4] = 1;
-        for (name, stock, va) in [("iso_1ev", &iso_1ev, STOCK_ISO_MENU_1EV), ("iso_3ev", &iso_3ev, STOCK_ISO_MENU_3EV)] {
+        for (name, sec, stock, va, pool) in [
+            ("iso_1ev", ".menu.iso_1ev", &iso_1ev, STOCK_ISO_MENU_1EV, STOCK_ISO_MENU_POOL),
+            ("iso_3ev", ".menu.iso_3ev", &iso_3ev, STOCK_ISO_MENU_3EV, STOCK_ISO_MENU_POOL + 4),
+        ] {
             let mut rows: Vec<Row> = stock.iter().copied().map(Row::stock).collect();
             rows.insert(1, Row::stock(iso50));
-            menus.push((0, if name == "iso_1ev" { ".menu.iso_1ev" } else { ".menu.iso_3ev" }, rows));
-            let pool = STOCK_ISO_MENU_POOL + if name == "iso_1ev" { 0 } else { 4 };
-            writeln!(hooks, "HOOK_WORD({pool:#X}, m_{}, {va:#X});", name).unwrap();
+            menus.push((0, sec, rows));
+            writeln!(hooks, "HOOK_WORD({pool:#X}, m_{name}, {va:#X});").unwrap();
+        }
+
+        let min_1ev = stock_rows(s3, STOCK_ISO_MIN_1EV, 1)?;
+        let min_3ev = stock_rows(s3, STOCK_ISO_MIN_3EV, 1)?;
+        let mut min50 = min_1ev[0];
+        min50[0] = ISO50_ROW_ID;
+        min50[1] = ISO50_ICON_W1;
+        min50[2] = ISO50_ICON_W2;
+        min50[3] = SID_ISO50 << 16;
+        min50[4] = 1;
+        for (name, sec, stock, va, pool) in [
+            ("iso_min_1ev", ".menu.iso_min_1ev", &min_1ev, STOCK_ISO_MIN_1EV, STOCK_ISO_MIN_POOL),
+            ("iso_min_3ev", ".menu.iso_min_3ev", &min_3ev, STOCK_ISO_MIN_3EV, STOCK_ISO_MIN_POOL + 4),
+        ] {
+            let mut rows: Vec<Row> = stock.iter().copied().map(Row::stock).collect();
+            rows.insert(0, Row::stock(min50));
+            menus.push((0, sec, rows));
+            writeln!(hooks, "HOOK_WORD({pool:#X}, m_{name}, {va:#X});").unwrap();
         }
     }
 

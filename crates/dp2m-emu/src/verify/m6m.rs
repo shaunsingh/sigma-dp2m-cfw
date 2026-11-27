@@ -309,15 +309,20 @@ fn check_menus(b: &Build, r: &mut Report) -> Result<(), String> {
     m.load_nv_defaults();
 
     let mut iso_vas = BTreeSet::new();
-    for (step, name) in [(0u8, "m_iso_1ev"), (1u8, "m_iso_3ev")] {
-        if let Some(sym) = b.syms.get(name) {
-            iso_vas.insert(sym.va());
-            m.w8(stock::NV_ISO_STEP, step);
-            r.eq(
-                m.menu_table(stock::MENU_ISO)?,
-                sym.va(),
-                format!("Get_Menu_Table({:#x}) with ISO step {step} -> {name}", stock::MENU_ISO),
-            );
+    for (mid, n1, n3) in [
+        (stock::MENU_ISO, "m_iso_1ev", "m_iso_3ev"),
+        (stock::MENU_ISO_MIN, "m_iso_min_1ev", "m_iso_min_3ev"),
+    ] {
+        for (step, name) in [(0u8, n1), (1u8, n3)] {
+            if let Some(sym) = b.syms.get(name) {
+                iso_vas.insert(sym.va());
+                m.w8(stock::NV_ISO_STEP, step);
+                r.eq(
+                    m.menu_table(mid)?,
+                    sym.va(),
+                    format!("Get_Menu_Table({mid:#x}) with ISO step {step} -> {name}"),
+                );
+            }
         }
     }
     m.load_nv_defaults();
@@ -516,6 +521,187 @@ fn check_min_shutter(b: &Build, r: &mut Report, nv: u32) -> Result<(), String> {
     }
     r.eq(a_bad, vec![], "ISO Auto min shutter, A mode: table value, idx > 6 -> Auto, r1 kept");
     r.eq(p_bad, vec![], "ISO Auto min shutter, P mode (both sites): table value + 3 EV, Auto -> stock 9.0");
+    Ok(())
+}
+
+fn check_auto_iso50(b: &Build, r: &mut Report) -> Result<(), String> {
+    use std::cell::Cell;
+
+    if !b.syms.contains_key("m_iso_min_1ev") {
+        return Ok(());
+    }
+
+    const SET_AUTO_ISO_MIN: u32 = 0xA016_F572;
+    const ISO_NEXT_1EV_UP: u32 = 0xA003_F30A;
+    const UPDATE_D2_ROWS: u32 = 0xA004_B650;
+    const UPDATE_D3_ROWS: u32 = 0xA004_CC08;
+    const GET_COMMITTED_ISO: u32 = 0xA016_80EE;
+    const ISO_IDX_TO_SPEED: u32 = 0xA000_1C0E;
+    const ISO_SPEED_TO_M5: u32 = 0xA000_1D04;
+    const ISO_SPEED_TO_GAIN: u32 = 0xA001_491C;
+    const IPC_ISO_LOAD: u32 = 0xA003_5FE4;
+
+    let mut m = Machine::new(&b.img, 0);
+    let mut ms = Machine::new(&b.stock, 0);
+    m.load_nv_defaults();
+    ms.load_nv_defaults();
+
+    // 1. Lower-limit menu 0xD2 row 0 is ISO 50 (value 1, sid 53, stock ISO 50 icons, id 0x157 untouched by 0xA004B650)
+    for (step, name) in [(0u8, "m_iso_min_1ev"), (1u8, "m_iso_min_3ev")] {
+        m.w8(stock::NV_ISO_STEP, step);
+        let d2_va = m.menu_table(stock::MENU_ISO_MIN)?;
+        let rows = read_rows_mach(&m, d2_va, 16);
+        let r0 = &rows[0];
+        r.check(
+            rows.len() == 8
+                && r0.id() == 0x0157
+                && r0.w[1] == 0x0100_012B
+                && r0.w[2] == 0x0070_0175
+                && r0.sid() == 53
+                && r0.value() == 1,
+            format!("{name}: 8 rows, row 0 = ISO 50 (id 0x157, stock icons 0x12b/0x70/0x175, sid 53, v=1)"),
+        );
+    }
+
+    // 2. Setter/getter round-trip for min = 1 in 1-EV and 1/3-EV modes + dynamic row enable updaters 0xA004B650/0xA004CC08
+    for step in [0u8, 1] {
+        m.w8(stock::NV_ISO_STEP, step);
+        m.w8(stock::NV_AUTO_ISO_MAX, 5); // ISO 200 (lowest valid 0xD3 row)
+        m.call(SET_AUTO_ISO_MIN, &[1])?;
+        let got_ui = m.call(stock::GET_AUTO_ISO_MIN_UI, &[])?;
+        let nv_min = m.u8(stock::NV_AUTO_ISO_MIN);
+        let ae_min = m.u8(stock::AE_STATE + 0x20);
+        m.call(UPDATE_D2_ROWS, &[])?;
+        m.call(UPDATE_D3_ROWS, &[])?;
+        let d2_va = m.menu_table(stock::MENU_ISO_MIN)?;
+        let d3_va = m.menu_table(0xD3)?;
+        let d2 = read_rows_mach(&m, d2_va, 16);
+        let d3 = read_rows_mach(&m, d3_va, 32);
+        let iso50_en = d2[0].w[1] >> 24 == 1;
+        let d3_200_en = d3[0].w[1] >> 24 == 1;
+        r.check(
+            got_ui == 1 && nv_min == 1 && ae_min == 1 && iso50_en && d3_200_en,
+            format!("Auto-ISO min=1 (step {step}): getter=1, NV=1, AE=1, 0xD2[0] & 0xD3[0] enabled"),
+        );
+    }
+    r.eq(
+        m.call(ISO_NEXT_1EV_UP, &[1])?,
+        5,
+        "0xA003F30A(1) -> 5 (ISO 200, lowest valid 0xD3 row)",
+    );
+
+    // 3. Native AE solver (ae_solve_core via AE_SOLVE_UI) in A, P and S modes across bright, borderline & dim EVs
+    let bv_m = Rc::new(Cell::new(0i32));
+    let bv_s = Rc::new(Cell::new(0i32));
+    { let bv = bv_m.clone(); m.stub_on(stock::AE_SENSOR_EV100, move |_| Some(bv.get() as u32)); }
+    { let bv = bv_s.clone(); ms.stub_on(stock::AE_SENSOR_EV100, move |_| Some(bv.get() as u32)); }
+    m.load_nv_defaults();
+    ms.load_nv_defaults();
+    m.w8(stock::FLASH_STATE, 1);
+    ms.w8(stock::FLASH_STATE, 1);
+    m.call(stock::AE_ENABLE_LV_METER, &[1, 1])?;
+    ms.call(stock::AE_ENABLE_LV_METER, &[1, 1])?;
+
+    let solve = |mach: &mut Machine, bv_cell: &Cell<i32>, ae_mode: u32, step: u8, min_ui: u8, max_ui: u8, bv_q16: i32| -> Result<(i32, u8, u16, u16), String> {
+        bv_cell.set(bv_q16);
+        mach.load_nv_defaults();
+        mach.w8(stock::FLASH_STATE, 1);
+        mach.w8(stock::NV_ISO_STEP, step);
+        mach.w8(stock::NV_AUTO_ISO_MIN, min_ui);
+        mach.w8(stock::NV_AUTO_ISO_MAX, max_ui);
+        mach.w8(stock::NV_ISO, 0); // Auto ISO
+        mach.w8(0xA093_968B, 0);   // stock min shutter
+        let min_ae = mach.call(stock::AE_MAP_ISO_IDX, &[min_ui as u32])?;
+        let max_ae = mach.call(stock::AE_MAP_ISO_IDX, &[max_ui as u32])?;
+        mach.call(stock::AE_SET_MODE, &[ae_mode])?;
+        mach.call(stock::AE_SET_ISO_STEP, &[step as u32])?;
+        mach.call(stock::AE_SET_AUTO_ISO_MIN, &[min_ae])?;
+        mach.call(stock::AE_SET_AUTO_ISO_MAX, &[max_ae])?;
+        mach.call(stock::AE_SYNC_ISO, &[0])?;
+        mach.call(stock::AE_SYNC_AV, &[])?;
+        mach.call(stock::AE_SYNC_TV, &[])?;
+        mach.call(stock::AE_SYNC_EV, &[9])?; // 0.0 EV comp
+        mach.call(stock::AE_SOLVE_UI, &[])?;
+        let sv = mach.u32(stock::AE_STATE + 0x10) as i32;
+        let committed = mach.call(GET_COMMITTED_ISO, &[])? as u8;
+        let av = mach.u16(stock::AE_OUT_AV_IDX);
+        let tv = mach.u16(stock::AE_OUT_TV_IDX);
+        Ok((sv, committed, av, tv))
+    };
+
+    // Bright EV (BV 12.0): A (2), P (4), S (3) in both 1/3-EV and 1-EV settle on exact ISO 50; negative control min=2 -> ISO 100
+    for (ae_mode, label) in [(2u32, "A"), (4, "P"), (3, "S")] {
+        for step in [0u8, 1] {
+            let (sv50, idx50, _, _) = solve(&mut m, &bv_m, ae_mode, step, 1, 14, 12 << 16)?;
+            let (sv100, idx100, _, _) = solve(&mut m, &bv_m, ae_mode, step, 2, 14, 12 << 16)?;
+            r.eq(
+                (sv50, idx50, sv100, idx100),
+                (0x40000, 1, 0x50000, 2),
+                format!("AE {label} mode (step {step}) bright BV 12: min=50 -> Sv 4.0/idx 1; neg control min=100 -> Sv 5.0/idx 2"),
+            );
+        }
+    }
+
+    // Borderline EV in 1/3-EV mode (< 1 EV spare below ISO 100): must jump directly 4.0 -> 5.0 (no ISO 64/80) and match stock
+    let mut border_bad = Vec::new();
+    for (ae_mode, bv_q16) in [
+        (2u32, 0x0009_0000i32), // A @ f/2.8: Tv(50)=5.0 < 5.67, Tv(100)=6.0 >= 5.67
+        (2, 0x0009_5555),       // A @ f/2.8: Tv(50)=5.33 < 5.67, Tv(100)=6.33 >= 5.67
+        (4, 0x0009_0000),       // P: EV(50)=8.0 < 8.67, EV(100)=9.0 >= 8.67
+        (4, 0x0009_5555),       // P: EV(50)=8.33 < 8.67, EV(100)=9.33 >= 8.67
+    ] {
+        let got = solve(&mut m, &bv_m, ae_mode, 1, 1, 14, bv_q16)?;
+        let exp = solve(&mut ms, &bv_s, ae_mode, 1, 2, 14, bv_q16)?;
+        if got != exp || got.0 != 0x50000 || got.1 != 2 {
+            border_bad.push((ae_mode, bv_q16, got, exp));
+        }
+    }
+    r.eq(border_bad, vec![], "1/3-EV borderline EV (< 1 EV spare): jumps 4.0 -> 5.0 (no ISO 64/80), matches stock");
+
+    // Dim EV (BV 6.0): min=50 produces exact stock Sv/idx/Av/Tv in A and P modes (both 1-EV and 1/3-EV)
+    let mut dim_bad = Vec::new();
+    for ae_mode in [2u32, 4] {
+        for step in [0u8, 1] {
+            let got = solve(&mut m, &bv_m, ae_mode, step, 1, 14, 6 << 16)?;
+            let exp = solve(&mut ms, &bv_s, ae_mode, step, 2, 14, 6 << 16)?;
+            if got != exp || got.0 <= 0x50000 {
+                dim_bad.push((ae_mode, step, got, exp));
+            }
+        }
+    }
+    r.eq(dim_bad, vec![], "dim BV 6.0 (A & P, 1-EV & 1/3-EV): min=50 matches stock Auto-ISO exactly");
+
+    // Stock-identical check when lower limit >= ISO 100 (min = 2 and 5 across dim/mid/bright EVs)
+    let mut stock_bad = Vec::new();
+    for ae_mode in [2u32, 4] {
+        for step in [0u8, 1] {
+            for min_ui in [2u8, 5] {
+                for bv_ev in [6i32, 9, 12, 15] {
+                    let got = solve(&mut m, &bv_m, ae_mode, step, min_ui, 14, bv_ev << 16)?;
+                    let exp = solve(&mut ms, &bv_s, ae_mode, step, min_ui, 14, bv_ev << 16)?;
+                    if got != exp {
+                        stock_bad.push((ae_mode, step, min_ui, bv_ev, got, exp));
+                    }
+                }
+            }
+        }
+    }
+    r.eq(stock_bad, vec![], "lower limit >= ISO 100: byte-identical to stock across A/P, 1-EV/1/3-EV, BV 6..15");
+
+    // 4. Committed ISO 1 -> capture speed 50 -> IPC cmd 0x20 byte 0x18 (M5 LinLUTs50) & sensor gain 0x01FF
+    let (_, idx50, _, _) = solve(&mut m, &bv_m, 2, 1, 1, 14, 12 << 16)?;
+    let speed = m.call(ISO_IDX_TO_SPEED, &[idx50 as u32])?;
+    let ipc_code = m.call(ISO_SPEED_TO_M5, &[speed])?;
+    let gain = m.call(ISO_SPEED_TO_GAIN, &[speed])?;
+    // Run the actual M6M capture IPC ISO conversion slice (0xA0035FE4: ldrh r0,[r0,#0x1c]; bl 0xA0001D04)
+    m.w16(SCRATCH + 0x1C, speed as u16);
+    m.run_slice(IPC_ISO_LOAD, IPC_ISO_LOAD + 6, 100_000, STACK.1, &[(0, SCRATCH)])?;
+    let slice_ipc = m.cpu.r[0];
+    r.eq(
+        (idx50, speed, ipc_code, slice_ipc, gain),
+        (1, 50, 0x18, 0x18, 0x01FF),
+        "committed ISO 1 -> speed 50 (EXIF/meta) -> IPC 0x18 (M5 LinLUTs50) & sensor gain 0x01FF",
+    );
     Ok(())
 }
 
@@ -1103,6 +1289,7 @@ pub fn run(b: &Build, r: &mut Report) -> Result<bool, String> {
     let addrs = check_settings(b, r)?;
     check_bracketing(b, r)?;
     check_min_shutter(b, r, addrs["minshutter"])?;
+    check_auto_iso50(b, r)?;
     check_ipc(b, r, &addrs)?;
     check_makernote(b, r)?;
     check_lv(b, r)?;

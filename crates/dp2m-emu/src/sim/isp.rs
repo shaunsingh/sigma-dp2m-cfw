@@ -27,6 +27,9 @@ pub(crate) fn wb_q7_matrix(c: &Cpu) -> [i32; 9] {
 }
 
 pub(crate) fn sv_to_iso_speed(sv: f32) -> u16 {
+    if sv < 4.5 {
+        return 50;
+    }
     const ISOS: [u16; 19] = [
         100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000, 2500, 3200,
         4000, 5000, 6400,

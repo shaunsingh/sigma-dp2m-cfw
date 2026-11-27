@@ -25,7 +25,7 @@ fn dp2m_ret0
     movs r0, #0
     bx   lr
 
-// iso clamps 0xA003F2CC / 0xA003F30A: `movs r1,r0; push {lr}; movs r0,#5` -> `push {lr}; bl`; ISO 50 (1) passes through
+// iso 1-EV clamp 0xA003F2CC: `movs r1,r0; push {lr}; movs r0,#5` -> `push {lr}; bl`; ISO 50 (1) passes through
 fn iso50_clamp_1
     cmp  r0, #1
     bne  1f
@@ -36,16 +36,40 @@ fn iso50_clamp_1
     hook HOOK_HALF, 0xA003F2CC, 0xB500, 0x0001
     hook HOOK_BL, 0xA003F2CE, iso50_clamp_1, 0xB5002005
 
+// 0xA003F30A (next 1-EV step up when bumping upper limit 0xD3): stock default returns r1 (1); map 1 -> 5 (ISO 200)
 fn iso50_clamp_2
     cmp  r0, #1
     bne  1f
-    movs r0, #2
+    movs r0, #5
     pop  {pc}
 1:  movs r1, r0
     movs r0, #5
     bx   lr
     hook HOOK_HALF, 0xA003F30A, 0xB500, 0x0001
     hook HOOK_BL, 0xA003F30C, iso50_clamp_2, 0xB5002005
+
+// Auto-ISO lower limit 50 (Sv 4.0 = 0x40000):
+// - 0xA000D5AC: clamp initial Auto-ISO Sv to [min_sv, max_sv] around 4.0 (identical to stock for min >= ISO 100)
+// - 0xA000D5CE: sv_to_iso_idx scans from index 1 (ISO 50) instead of 2 (ISO 100)
+// - 0xA000D7C0: ae_commit_solved_iso map table[1] = 1 (stock has 2, clamping ISO 50 -> 100 in 0xA0939A51)
+// - up-loops (A/S/P1/P2): `adds r4,r4,r6; adds r5,r5,r6`; jump 4.0 -> 5.0 by 1.0 EV so 1/3-EV mode never lands on 64/80
+fn autoiso_sv_step
+    movs r2, #4
+    lsls r2, r2, #16
+    movs r3, r6
+    cmp  r5, r2
+    bne  1f
+    lsrs r3, r2, #2
+1:  adds r4, r4, r3
+    adds r5, r5, r3
+    bx   lr
+    hook HOOK_HALF, 0xA000D5B6, 0x2104, 0x2105
+    hook HOOK_HALF, 0xA000D5D4, 0x2001, 0x2002
+    hook HOOK_HALF, 0xA000D7C0, 0x0501, 0x0502
+    hook HOOK_BL, 0xA000D844, autoiso_sv_step, 0x19A419AD
+    hook HOOK_BL, 0xA000D8BA, autoiso_sv_step, 0x19A419AD
+    hook HOOK_BL, 0xA000D9AA, autoiso_sv_step, 0x19A419AD
+    hook HOOK_BL, 0xA000D9F0, autoiso_sv_step, 0x19A419AD
 
 // UI string lookup 0xA0044AAC after `push {r4-r6,lr}` (SP 8B-aligned): r0 sid, r1 lang
 fn str_hook

@@ -429,6 +429,119 @@ fn menus_exposure_wb_and_native_playback_views() {
 }
 
 #[test]
+fn auto_iso_lower_limit_50_flow() {
+    let pkg = pkg_bytes();
+    let mut cam = Camera::from_package(pkg).expect("boot DP2M simulator");
+    assert_eq!(cam.screen_id(), 0x15);
+
+    // 1. Open ISO Auto (Screen 61 = 0x3D) -> Lower limit (menu 0xD2) via real UI keypresses and select ISO 50
+    cam.press(Key::Menu);
+    assert_eq!(cam.screen_id(), 0x1B);
+    cam.press(Key::Down);  // focus Shoot P1 row 0 (ISO 0x01)
+    cam.press(Key::Right); // open ISO option list (cursor on row 0 = ISO Auto)
+    cam.press(Key::Right); // confirm ISO Auto -> invokes w7 (0xA0042CE7) -> Screen 61 (0x3D)
+    assert_eq!(cam.screen_id(), 0x3D, "ISO Auto Further Options must open Screen 61 (0x3D)");
+    assert!(cam.cpu().last_error.is_none(), "{:?}", cam.cpu().last_error);
+
+    cam.press(Key::Right); // open Lower limit (menu 0xD2) option list (default ISO 200 = row 4)
+    // Screen 61 steps cursor by 1 across all 8 rows (0=50, 1=100, 2=125, 3=160, 4=200...): four Up presses reach row 0 (ISO 50)
+    for _ in 0..4 {
+        cam.press(Key::Up);
+    }
+    cam.press(Key::Ok);    // commit set_auto_iso_min(1)
+    assert_eq!(cam.screen_id(), 0x3D);
+    assert!(cam.cpu().last_error.is_none(), "{:?}", cam.cpu().last_error);
+    assert_eq!(cam.cpu().r8(0xA093_96DB), 1, "NV_AUTO_ISO_MIN must be 1 (ISO 50)");
+    assert_eq!(cam.cpu().r8(0xA080_08F8 + 0x20), 1, "AE_STATE+0x20 must be 1 (ISO 50)");
+
+    // Return to Live View (Menu exits Screen 61 -> Main Menu -> Live View)
+    while cam.screen_id() != 0x15 {
+        cam.press(Key::Menu);
+    }
+
+    // Helper to switch exposure mode (2 = A, 3 = P) via the native MODE dial
+    let switch_expo = |cam: &mut Camera, target: u32| {
+        for _ in 0..16 {
+            if cam.expo_mode() == target {
+                break;
+            }
+            cam.press(Key::Mode);
+            cam.press(Key::DialRight);
+            cam.press(Key::Mode);
+        }
+        assert_eq!(cam.expo_mode(), target, "MODE dial must reach expo mode {target}");
+    };
+
+    // Use 1/3-EV ISO steps, Auto ISO, upper limit ISO 1600, stock min shutter
+    cam.write_u8(0xA093_96DD, 1); // 1/3-EV ISO steps
+    cam.write_u8(0xA093_96DC, 14); // Upper limit ISO 1600
+    cam.write_u8(0xA093_968B, 0); // stock min shutter
+    cam.write_u8(0xA093_96DA, 0); // Auto ISO
+
+    // 2. Bright scene (default daylight scene boosted to high luma -> bright BV ~ 10.5..11 EV)
+    let bright_scene = vec![245u8; LCD_W * 424 * 4];
+    cam.set_scene_rgba(&bright_scene, LCD_W, 424);
+
+    // Both A mode (2) and P mode (3): lower limit 50 settles on exact ISO 50; lower limit 100 settles on ISO 100
+    for (expo_ui, label) in [(2u32, "A"), (3, "P")] {
+        switch_expo(&mut cam, expo_ui);
+
+        // Lower limit = ISO 50 (value 1)
+        cam.write_u8(0xA093_96DB, 1);
+        let sv50 = cam.cpu().r32_be(0xA080_0908);
+        let idx50 = cam.cpu().r8(0xA093_9A51);
+        assert_eq!(
+            (sv50, idx50),
+            (0x0004_0000, 1),
+            "{label} mode bright EV with min=50 must solve Sv=4.0 and commit ISO idx 1"
+        );
+        cam.press(Key::Shutter);
+        let cap50 = cam.last_capture().expect("bright ISO 50 capture").clone();
+        assert_eq!(cap50.iso, 50, "{label} mode bright EV capture must report ISO 50");
+        cam.press(Key::Play);
+        assert_eq!(cam.screen_id(), 0x15);
+
+        // Negative control: lower limit = ISO 100 (value 2) at the exact same bright scene
+        cam.write_u8(0xA093_96DB, 2);
+        let sv100 = cam.cpu().r32_be(0xA080_0908);
+        let idx100 = cam.cpu().r8(0xA093_9A51);
+        assert_eq!(
+            (sv100, idx100),
+            (0x0005_0000, 2),
+            "{label} mode bright EV negative control (min=100) must stay at Sv=5.0 / idx 2"
+        );
+        cam.press(Key::Shutter);
+        let cap100 = cam.last_capture().expect("bright ISO 100 capture").clone();
+        assert_eq!(cap100.iso, 100, "{label} mode negative control must report ISO 100");
+        cam.press(Key::Play);
+        assert_eq!(cam.screen_id(), 0x15);
+    }
+
+    // 3. Dim scene: lower limit 50 produces the exact same Auto-ISO result as lower limit 100
+    let dim_scene = vec![32u8; LCD_W * 424 * 4];
+    cam.set_scene_rgba(&dim_scene, LCD_W, 424);
+    for (expo_ui, label) in [(2u32, "A"), (3, "P")] {
+        switch_expo(&mut cam, expo_ui);
+        cam.write_u8(0xA093_96DB, 2);
+        let stock_res = (
+            cam.cpu().r32_be(0xA080_0908),
+            cam.cpu().r8(0xA093_9A51),
+            cam.cpu().r16_be(0xA07D_D6E0),
+            cam.cpu().r16_be(0xA07D_D6E4),
+        );
+        cam.write_u8(0xA093_96DB, 1);
+        let iso50_res = (
+            cam.cpu().r32_be(0xA080_0908),
+            cam.cpu().r8(0xA093_9A51),
+            cam.cpu().r16_be(0xA07D_D6E0),
+            cam.cpu().r16_be(0xA07D_D6E4),
+        );
+        assert!(stock_res.0 > 0x0005_0000, "{label} mode dim EV should raise ISO above 100, got {stock_res:?}");
+        assert_eq!(iso50_res, stock_res, "{label} mode dim EV with min=50 must match min=100 exactly");
+    }
+}
+
+#[test]
 fn doom_e1m1_full_gameplay_and_clean_exit() {
     let pkg = pkg_bytes();
     let mut cam = Camera::from_package(pkg).expect("boot DP2M simulator");

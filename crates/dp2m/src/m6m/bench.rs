@@ -83,8 +83,14 @@ fn m6m_bench() {
             println!("{name:<8} {grid:>4} {idle:>12} {per_frame:>12} {only:>12}");
         }
         let y = cam.cpu().r32_be(va("lv_planes"));
+        let cb = cam.cpu().r32_be(va("lv_planes") + 4);
+        let cr = cam.cpu().r32_be(va("lv_planes") + 8);
+        let zebra = cam.cpu_mut().call(va("draw_zebras_arm"), &[y, 0, 242], &[], CALL_SP, MAX_STEPS).expect("zebras").1;
+        println!("{name:<8} zebra draw only {zebra:>12}");
         let dual = cam.cpu_mut().call(va("draw_zebras_dual_arm"), &[y, 0], &[], CALL_SP, MAX_STEPS).expect("dual zebras").1;
         println!("{name:<8} dual draw only {dual:>12}");
+        let hist = cam.cpu_mut().call(va("draw_histogram_arm"), &[y, cb, cr], &[], CALL_SP, MAX_STEPS).expect("histogram").1;
+        println!("{name:<8} histogram draw only {hist:>12}");
         let false_color = cam.cpu_mut().call(va("draw_false_color_arm"), &[y], &[], CALL_SP, MAX_STEPS).expect("false color").1;
         println!("{name:<8} false-color draw only {false_color:>12}");
         let peaking = cam.cpu_mut().call(va("draw_peaking_arm"), &[y, 0xF11E_F11E, 44], &[], CALL_SP, MAX_STEPS).expect("peaking").1;

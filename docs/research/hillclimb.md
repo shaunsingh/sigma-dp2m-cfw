@@ -69,7 +69,7 @@ Default config (`dp2m.example.fnl`: `24/36` films, `11/11` grids, DOOM enabled):
 ## 3. Emulator & verification commands
 
 - `crates/dp2m-emu/src/arm9.rs` uses a direct-fetch SDRAM loop with a 2 MB hook bitmap (`~231 MIPS` overlay / `~493 MIPS` label host rate; `m6m_bench` ~1.0 s wall time). `crates/dp2m-emu/src/fr80/emu.rs` uses direct ROM fetch with a 64 KB SDRAM TLB (`1024` pages) and handler bloom filter.
-- `dp2m verify out`: **575 / 575** checks (`m6m: 299`, `custom: 130`, `labels: 146`) in ~0.80 s; `--artifacts <dir>` writes `labels.png`.
+- `dp2m verify out`: **601 / 601** checks (`m6m: 308`, `custom: 133`, `labels: 160`) in ~0.80 s; `--artifacts <dir>` writes `labels.png`.
 - `camera_flow` verifies Film page OSD FNV-1a64 (`0x16a06c94433a64d3`), menus, AE, WB, native `SCREEN_PB`, dual-CPU capture, and DOOM gameplay.
 
 ```sh

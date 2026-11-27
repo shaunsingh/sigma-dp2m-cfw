@@ -136,7 +136,7 @@ crates/
     src/arm9.rs          ARM946E-S big-endian ARM/Thumb interpreter + write-range logger
     src/fr80/            FR80 assembler, disassembler, emulator
     src/sim/             dual-CPU M6M + M5Slave hardware simulator (`hooks`, `m5`, `isp`)
-    src/verify/          native 575-check M6M verifier (`m6m`, `custom`, `labels`)
+    src/verify/          native 601-check verifier (`m6m`, `custom`, `labels`)
     src/re/              native M6M disassembler, xref indexer, recursive-descent liveness & NVRAM scanner
     src/x3f.rs           X3F Type-4 Huffman CAMF decompressor & CMbM/CMbP/CMbT parser
     src/{image,stock,machine}.rs  package/S3 loader, stock symbol map, ARM9 test harness

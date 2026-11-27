@@ -1,4 +1,4 @@
-//! m6m suite (299 checks): invariants, hooks, menus, strings, NVRAM settings, bracketing,
+//! m6m suite (308 checks): invariants, hooks, menus, strings, NVRAM settings, bracketing,
 //! auto-ISO min shutter, IPC packing, makernotes, Live View B2Y, Y-cap, HUD overlays, updater & package.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1010,6 +1010,8 @@ fn check_hud(b: &Build, r: &mut Report, peakcol_addr: u32, peaksens_addr: u32, z
     r.eq(m.call(wget, &[])?, 3, "grid_widget_get passes stock grid 3 through");
     m.call(gdraw, &[0x1234])?;
     r.eq(st.borrow().4.clone(), vec![0x1234], "grid_draw_hook delegates stock grids 0..6 to stock_grid_draw");
+    m.call(gdraw, &[0x5678])?;
+    r.eq(st.borrow().4.clone(), vec![0x1234, 0x5678], "grid_draw_hook steady-state stock grid fast path still delegates to stock_grid_draw");
 
     m.w8(stock::NV_GRID, 7);
     for (scr, lv) in [(0x1Bu32, 1u32), (0x15, 0)] {
@@ -1143,8 +1145,9 @@ fn check_hud(b: &Build, r: &mut Report, peakcol_addr: u32, peaksens_addr: u32, z
         med_ok && high_ok && low_ok && auto_1x && auto_mf,
         "grid 11 peaking sensitivity: Med(44)/High(24)/Low(72) & Auto MF-magnify boost",
     );
-    // Independent scalar full-frame peaking oracle, including the four odd-parity border
-    // stores and both even-parity block groups. The reorder must preserve every byte.
+    // Legacy scalar full-frame peaking oracle (note: `borders` below indexes +1/+5, whereas
+    // big-endian `draw_peaking_arm` samples even offsets 0, 2, 4, 6; the three frames below
+    // agree either way, and `peak_even_scalar` below verifies the exact even-offset borders).
     let peak_expected = |y: &[u8], on: u16, thresh: u32| {
         let mut out = vec![0u8; 640 * 424 * 2];
         let mut paint = |row: usize, word: usize| {
@@ -1222,6 +1225,158 @@ fn check_hud(b: &Build, r: &mut Report, peakcol_addr: u32, peaksens_addr: u32, z
             format!("Peaking {name} full-frame scalar reference; first diff {diff:?}, got {:?}, expected {:?}", diff.map(|i| got[i]), diff.map(|i| expected[i])),
         );
     }
+
+    // Permanent peaking prefilter superset check over adversarial inputs (dense PRNG,
+    // impulses at even/odd/border/block-boundary coords, border-only edges, and SWAR bias/borrow
+    // threshold boundaries across runtime thresholds 24, 44, 72).
+    {
+        use crate::arm9::HookAction;
+        let peak_even_scalar = |y: &[u8], on: u16, thresh: u32| -> (Vec<u8>, BTreeSet<(usize, usize)>) {
+            let mut out = vec![0u8; 640 * 424 * 2];
+            let mut hit_blocks = BTreeSet::new();
+            let mut paint = |row: usize, word: usize| {
+                for rr in [row, row + 1] {
+                    for x in [2 * word, 2 * word + 1] {
+                        let o = (rr * 640 + x) * 2;
+                        out[o..o + 2].copy_from_slice(&on.to_be_bytes());
+                    }
+                }
+            };
+            let hit = |gx: i32, gy: i32| (gx.abs() + gy.abs()) as u32 >= thresh;
+            for s in 0..105usize {
+                let (row0, row2, row4, row6) = (4 * s * 640, (4 * s + 2) * 640, (4 * s + 4) * 640, (4 * s + 6) * 640);
+                // Big-endian (rX[0..1] >> 8) & 0x00FF00FF samples even offsets 0, 2, 4, 6.
+                let borders = [
+                    (2 + 4 * s, 1, i32::from(y[row2]) - i32::from(y[row2 + 4]), i32::from(y[row0 + 2]) - i32::from(y[row4 + 2])),
+                    (2 + 4 * s, 2, i32::from(y[row2 + 2]) - i32::from(y[row2 + 6]), i32::from(y[row0 + 4]) - i32::from(y[row4 + 4])),
+                    (4 + 4 * s, 1, i32::from(y[row4]) - i32::from(y[row4 + 4]), i32::from(y[row2 + 2]) - i32::from(y[row6 + 2])),
+                    (4 + 4 * s, 2, i32::from(y[row4 + 2]) - i32::from(y[row4 + 6]), i32::from(y[row2 + 4]) - i32::from(y[row6 + 4])),
+                ];
+                for (row, word, gx, gy) in borders {
+                    if hit(gx, gy) {
+                        paint(row, word);
+                    }
+                }
+                for i in 0..79usize {
+                    let base = 4 * s * 640 + 8 + 8 * i;
+                    let mut blk_hit = false;
+                    for k in 0..4usize {
+                        let word = 3 + 4 * i + k;
+                        let gx_a = i32::from(y[base - 4 + 2 * k + 1280]) - i32::from(y[base + 2 * k + 1280]);
+                        let gy_a = i32::from(y[base - 2 + 2 * k]) - i32::from(y[base - 2 + 2 * k + 2560]);
+                        if hit(gx_a, gy_a) {
+                            paint(2 + 4 * s, word);
+                            blk_hit = true;
+                        }
+                        let gx_b = i32::from(y[base - 4 + 2 * k + 2560]) - i32::from(y[base + 2 * k + 2560]);
+                        let gy_b = i32::from(y[base - 2 + 2 * k + 1280]) - i32::from(y[base - 2 + 2 * k + 3840]);
+                        if hit(gx_b, gy_b) {
+                            paint(4 + 4 * s, word);
+                            blk_hit = true;
+                        }
+                    }
+                    if blk_hit {
+                        hit_blocks.insert((s, i));
+                    }
+                }
+            }
+            (out, hit_blocks)
+        };
+
+        let mut impulse_y = vec![100u8; 640 * 424];
+        for &(x, y) in &[
+            (0usize, 2usize), (1, 2), (2, 2), (3, 2), (4, 2), (5, 2), (6, 2),
+            (8, 6), (9, 6), (14, 10), (15, 10), (16, 14), (634, 18), (636, 22), (638, 26),
+            (320, 0), (320, 420), (320, 422), (100, 100), (101, 100),
+        ] {
+            impulse_y[y * 640 + x] = 250;
+        }
+        let mut border_y = vec![80u8; 640 * 424];
+        for y in 0..424usize {
+            border_y[y * 640] = 200;
+            border_y[y * 640 + 4] = 20;
+            border_y[y * 640 + 638] = 250;
+        }
+        let mut adv_frames: Vec<(&str, Vec<u8>, u32)> = vec![
+            ("dense PRNG t=24", dense_y.clone(), 24),
+            ("dense PRNG t=44", dense_y.clone(), 44),
+            ("dense PRNG t=72", dense_y.clone(), 72),
+            ("impulses t=24", impulse_y.clone(), 24),
+            ("impulses t=72", impulse_y, 72),
+            ("borders t=24", border_y.clone(), 24),
+            ("borders t=72", border_y, 72),
+        ];
+        for (thresh, bias) in [(24u32, 8i32), (44, 16), (72, 32)] {
+            let mut bnd = vec![128u8; 640 * 424];
+            let th = thresh as i32;
+            let half = th / 2;
+            let rem = th - half;
+            // Row-pair s=2 (rows 8,10,12,14): exact threshold & SWAR borrow-across-lane boundaries
+            let r0 = 8 * 640;
+            let r1 = 10 * 640;
+            let r2 = 12 * 640;
+            let r3 = 14 * 640;
+            // Block i=1 (base = 16): horizontal -(th-1), -th, +th
+            bnd[r1 + 16] = (128 - (th - 1)) as u8;
+            bnd[r1 + 24] = (128 - th) as u8;
+            bnd[r1 + 32] = (128 + th) as u8;
+            // Block i=5 (base = 48): split |gx|=half, |gy|=rem (and rem-1)
+            bnd[r1 + 48] = (128 - half) as u8;
+            bnd[r0 + 46] = (128 + rem) as u8;
+            bnd[r1 + 56] = (128 - half) as u8;
+            bnd[r0 + 54] = (128 + rem - 1) as u8;
+            // Block i=9 (base = 80): negative low-lane borrow -(bias+1) with canceling high lane
+            bnd[r1 + 78] = (128 - (bias + 1)) as u8;
+            bnd[r0 + 78] = (128 + (th - (bias + 1))) as u8;
+            // Cross-block dv0a/dv0b negative borrow at base-2 (x = 94 for block i=11, base=96)
+            bnd[r0 + 94] = (128 - th) as u8;
+            bnd[r3 + 102] = (128 + th) as u8;
+            // Extremes 0 vs 255 in adjacent lanes
+            bnd[r2 + 120] = 0;
+            bnd[r2 + 124] = 255;
+            adv_frames.push((
+                if thresh == 24 { "swar-bounds t=24" } else if thresh == 44 { "swar-bounds t=44" } else { "swar-bounds t=72" },
+                bnd,
+                thresh,
+            ));
+        }
+        let mut mp = Machine::new(&b.img, 0);
+        let called: Rc<RefCell<BTreeSet<(usize, usize)>>> = Rc::new(RefCell::new(BTreeSet::new()));
+        {
+            let called_c = called.clone();
+            mp.cpu.add_hook(b.sym("peaking_pair_slow"), move |cpu| {
+                let off = cpu.r[0].wrapping_sub(yv) as usize;
+                let row = off / 640;
+                let col = off % 640;
+                if row.is_multiple_of(4) && col >= 8 && (col - 8).is_multiple_of(8) {
+                    called_c.borrow_mut().insert((row / 4, (col - 8) / 8));
+                }
+                HookAction::Continue
+            });
+        }
+        let mut superset_bad: Vec<String> = Vec::new();
+        for (name, frame_y, thresh) in &adv_frames {
+            called.borrow_mut().clear();
+            mp.wr(yv, frame_y);
+            mp.cpu.fill_bytes(stock::ARGB_FB, 0, 640 * 424 * 2);
+            mp.cpu.call(b.sym("draw_peaking_arm"), &[yv, 0xF11E_F11E, *thresh], &[], STACK.1, 100_000_000)?;
+            let got = mp.rd(stock::ARGB_FB, 640 * 424 * 2);
+            let (expected, hit_blocks) = peak_even_scalar(frame_y, 0xF11E, *thresh);
+            let missed: Vec<_> = hit_blocks.difference(&called.borrow()).copied().collect();
+            if !missed.is_empty() {
+                superset_bad.push(format!("{name}: prefilter suppressed {} blocks (first {:?})", missed.len(), missed[0]));
+            }
+            if got != expected {
+                let diff = got.iter().zip(&expected).position(|(g, e)| g != e);
+                superset_bad.push(format!("{name}: output mismatch at {diff:?}"));
+            }
+        }
+        r.eq(
+            superset_bad,
+            Vec::<String>::new(),
+            format!("Peaking prefilter superset of writer hits & even-parity oracle across {} adversarial frames (t=24/44/72)", adv_frames.len()),
+        );
+    }
     m.wr(yv, &y_plane);
 
     draw(&mut m, 12)?;
@@ -1265,6 +1420,115 @@ fn check_hud(b: &Build, r: &mut Report, peakcol_addr: u32, peaksens_addr: u32, z
         && px(&m, 400, 200) == 0;
     m.w8(zebralvl_addr, 0);
     r.check(z90_ok && z100_ok && zdual_ok, "grid 13 zebra levels: 90% Safe, 100% Clip & Dual Hi(orange)+Lo(cyan)");
+
+    // Full-frame scalar oracle for single Hi zebra (draw_zebras_arm) covering 2x-unrolled A/B
+    // block pairs, register-rotated row stripes, all 3 thresholds (230/242/252), phases 0..7,
+    // threshold boundaries (thresh-1/thresh), odd-column non-interference, and poisoned FB contract.
+    let hi_zebra_expected = |y: &[u8], phase: u32, thresh: u8, poison: Option<u8>| {
+        let hi = [0xF40Eu16, 0xF40E, 0x111A, 0x111A];
+        let phase = phase as usize;
+        let mut out = vec![poison.unwrap_or(0); 640 * 424 * 2];
+        for sy in (0..424).step_by(2) {
+            let row = sy / 2;
+            for bx in 0..40usize {
+                let any_hit = (0..8).any(|k| y[sy * 640 + bx * 16 + 2 * k] >= thresh);
+                if !any_hit {
+                    continue;
+                }
+                for k in 0..8 {
+                    let sx = bx * 16 + 2 * k;
+                    let v = y[sy * 640 + sx];
+                    let px = if v >= thresh {
+                        hi[(((row + phase) & 3) + ((sx / 2) & 3)) & 3]
+                    } else {
+                        0
+                    };
+                    for dy in [sy, sy + 1] {
+                        for dx in [sx, sx + 1] {
+                            let o = (dy * 640 + dx) * 2;
+                            out[o..o + 2].copy_from_slice(&px.to_be_bytes());
+                        }
+                    }
+                }
+            }
+        }
+        out
+    };
+    let mut hi_bad = Vec::new();
+    for (idx, &thresh) in [230u8, 242, 252].iter().enumerate() {
+        let mut frame = vec![0u8; 640 * 424];
+        for sy in 0..424usize {
+            for x in 0..640usize {
+                // Mix threshold-1, threshold, all-256 luma ramp, and odd-column poison 255
+                frame[sy * 640 + x] = if x & 1 == 1 {
+                    255
+                } else if (x / 16).is_multiple_of(5) {
+                    thresh - 1
+                } else if (x / 16) % 5 == 1 {
+                    thresh
+                } else {
+                    ((x * 13 + sy * 29 + idx * 7) & 255) as u8
+                };
+            }
+        }
+        m.wr(yv, &frame);
+        for phase in 0..8u32 {
+            m.cpu.fill_bytes(stock::ARGB_FB, 0xA5, 640 * 424 * 2);
+            m.cpu.call(b.sym("draw_zebras_arm"), &[yv, phase, u32::from(thresh)], &[], STACK.1, 100_000_000)?;
+            let got = m.rd(stock::ARGB_FB, 640 * 424 * 2);
+            let expected = hi_zebra_expected(&frame, phase, thresh, Some(0xA5));
+            if got != expected {
+                hi_bad.push((thresh, phase, got.iter().zip(&expected).position(|(g, e)| g != e)));
+            }
+        }
+    }
+    r.eq(hi_bad, vec![], "Single Hi zebra direct full-frame poisoned oracle across thresholds 230/242/252 & phases 0..7");
+
+    // Exhaustive A/B 32-px unroll pair combinations: {clear, all-above, mixed-first, mixed-last} x {same}
+    let mut ab_y = vec![241u8; 640 * 424];
+    for sy in (0..424).step_by(2) {
+        let row = sy / 2;
+        for pair in 0..20usize {
+            let pat_a = (row + pair) % 4;
+            let pat_b = ((row + pair) / 4) % 4;
+            for (half, pat) in [(0usize, pat_a), (16usize, pat_b)] {
+                let bx = pair * 32 + half;
+                match pat {
+                    0 => {} // all-below (241)
+                    1 => for k in 0..8 { ab_y[sy * 640 + bx + 2 * k] = 242; }, // all-above
+                    2 => ab_y[sy * 640 + bx] = 242,                            // single hit lane 0
+                    _ => ab_y[sy * 640 + bx + 14] = 255,                       // single hit lane 7
+                }
+                // Odd columns carry opposite values to prove odd-byte non-interference
+                for k in 0..8 {
+                    ab_y[sy * 640 + bx + 2 * k + 1] = if pat == 0 { 255 } else { 0 };
+                }
+            }
+        }
+    }
+    m.wr(yv, &ab_y);
+    m.cpu.fill_bytes(stock::ARGB_FB, 0xA5, 640 * 424 * 2);
+    m.cpu.call(b.sym("draw_zebras_arm"), &[yv, 5, 242], &[], STACK.1, 100_000_000)?;
+    let ab_got = m.rd(stock::ARGB_FB, 640 * 424 * 2);
+    let ab_exp = hi_zebra_expected(&ab_y, 5, 242, Some(0xA5));
+    r.check(
+        ab_got == ab_exp,
+        format!("Single Hi zebra 2x-unrolled A/B block-pair combinations & odd-column isolation; first diff {:?}", ab_got.iter().zip(&ab_exp).position(|(g, e)| g != e)),
+    );
+
+    let mut hi_grid_bad = Vec::new();
+    for (lvl, thresh) in [(0u8, 242u8), (1, 230), (2, 252)] {
+        m.w8(zebralvl_addr, lvl);
+        m.w32(lp + 12, u32::from(lvl) + 1);
+        draw(&mut m, 13)?;
+        let got = m.rd(stock::ARGB_FB, 640 * 424 * 2);
+        let exp = hi_zebra_expected(&ab_y, u32::from(lvl) + 1, thresh, None);
+        if got != exp {
+            hi_grid_bad.push(lvl);
+        }
+    }
+    m.w8(zebralvl_addr, 0);
+    r.eq(hi_grid_bad, vec![], "Grid 13 single Hi zebra zeroed-caller full-frame oracle (95%/90%/100% IRE)");
 
     let dual_expected = |y: &[u8], phase: u32, hi_thresh: u8| {
         let hi = [0xF40Eu16, 0xF40E, 0x111A, 0x111A];
@@ -1355,6 +1619,54 @@ fn check_hud(b: &Build, r: &mut Report, peakcol_addr: u32, peaksens_addr: u32, z
         r.check(
             got == expected,
             format!("Dual Hi+Lo adjacent-luma pairs page {page}/2 (65,536 total); first diff {diff:?}, got {:?}, expected {:?}", diff.map(|i| got[i]), diff.map(|i| expected[i])),
+        );
+    }
+    // Dual mixed-block checker + boundary + poisoned-buffer contract (clear blocks keep poison,
+    // hit blocks burst-store all 8 words including 0 for midtones).
+    {
+        let mut mix_y = vec![128u8; 640 * 424];
+        let vals = [0u8, 12, 13, 128, 241, 242, 255, 13];
+        for sy in (0..424).step_by(2) {
+            for bx in 0..40usize {
+                let kind = (bx + sy / 2) % 5;
+                for k in 0..8 {
+                    let v = match kind {
+                        0 => 80,                                  // all-clear (must keep poison)
+                        1 => if k & 1 == 0 { 255 } else { 0 },    // checker hi/lo
+                        2 => vals[(k + bx) & 7],                  // hi/lo/mid threshold boundaries
+                        3 => if k == 7 { 12 } else { 13 },        // single shadow boundary
+                        _ => if k == 0 { 242 } else { 241 },      // single highlight boundary
+                    };
+                    mix_y[sy * 640 + bx * 16 + 2 * k] = v;
+                    mix_y[sy * 640 + bx * 16 + 2 * k + 1] = 255;  // unsampled odd column
+                }
+            }
+        }
+        m.wr(yv, &mix_y);
+        m.cpu.fill_bytes(stock::ARGB_FB, 0xA5, 640 * 424 * 2);
+        m.cpu.call(b.sym("draw_zebras_dual_arm"), &[yv, 6], &[], STACK.1, 100_000_000)?;
+        let got = m.rd(stock::ARGB_FB, 640 * 424 * 2);
+        let mut expected = dual_expected(&mix_y, 6, 242);
+        for sy in (0..424).step_by(2) {
+            for bx in 0..40usize {
+                let all_clear = (0..8).all(|k| {
+                    let v = mix_y[sy * 640 + bx * 16 + 2 * k];
+                    v > 12 && v < 242
+                });
+                if all_clear {
+                    for dy in [sy, sy + 1] {
+                        for dx in bx * 16..(bx + 1) * 16 {
+                            let o = (dy * 640 + dx) * 2;
+                            expected[o..o + 2].fill(0xA5);
+                        }
+                    }
+                }
+            }
+        }
+        let diff = got.iter().zip(&expected).position(|(g, e)| g != e);
+        r.check(
+            got == expected,
+            format!("Dual Hi+Lo checker/boundary mixed-block full-frame poisoned oracle; first diff {diff:?}, got {:?}, expected {:?}", diff.map(|i| got[i]), diff.map(|i| expected[i])),
         );
     }
     m.w8(zebralvl_addr, 0);
@@ -1500,6 +1812,264 @@ fn check_hud(b: &Build, r: &mut Report, peakcol_addr: u32, peaksens_addr: u32, z
     m.wr(yv, &vec![255u8; 640 * 424]);
     draw(&mut m, 14)?;
     r.eq(px(&m, 625, 360), 0xF11F, "grid 14 RGB histogram: highlight clip bar");
+
+    // Independent full-frame scalar oracle for draw_histogram_arm covering extreme BT.601 chroma
+    // clamp bounds (R[-45..108], G[-34..97], B[-57..120]), Cr-neutral/gray fast paths, luma-only
+    // fallback, and highlight clip-bar threshold 180 vs 181.
+    let hist_expected = |y: &[u8], cb: Option<&[u8]>, cr: Option<&[u8]>| -> Vec<u8> {
+        let mut hr = [0u32; 64];
+        let mut hg = [0u32; 64];
+        let mut hb = [0u32; 64];
+        match (cb, cr) {
+            (Some(cb), Some(cr)) => {
+                for row in 0..52usize {
+                    for col in 0..79usize {
+                        let yv = i32::from(y[(4 + row * 8) * 640 + 4 + col * 8]);
+                        let cbv = i32::from(cb[(4 + row * 8) * 320 + 2 + col * 4]) - 128;
+                        let crv = i32::from(cr[(4 + row * 8) * 320 + 2 + col * 4]) - 128;
+                        let r = (yv + ((crv * 359) >> 8)).clamp(0, 255) as usize >> 2;
+                        let g = (yv - ((cbv * 88 + crv * 183) >> 8)).clamp(0, 255) as usize >> 2;
+                        let b = (yv + ((cbv * 454) >> 8)).clamp(0, 255) as usize >> 2;
+                        hr[r] += 1;
+                        hg[g] += 1;
+                        hb[b] += 1;
+                    }
+                }
+            }
+            _ => {
+                for row in 0..52usize {
+                    for col in 0..79usize {
+                        let bin = (y[(4 + row * 8) * 640 + 4 + col * 8] >> 2) as usize;
+                        hr[bin] += 1;
+                        hg[bin] += 1;
+                        hb[bin] += 1;
+                    }
+                }
+            }
+        }
+        let mut peak = 24u32;
+        for i in 2..62 {
+            peak = peak.max(hr[i]).max(hg[i]).max(hb[i]);
+        }
+        let mut out = vec![0u8; 640 * 424 * 2];
+        let mut put = |x: usize, y: usize, px: u16| {
+            let o = (y * 640 + x) * 2;
+            out[o..o + 2].copy_from_slice(&px.to_be_bytes());
+        };
+        const HX: usize = 492;
+        const HY: usize = 354;
+        const HW: usize = 136;
+        const HH: usize = 58;
+        for dy in 1..HH - 1 {
+            for dx in 1..HW - 1 {
+                put(HX + dx, HY + dy, 0x000B);
+            }
+        }
+        for dx in 0..HW {
+            put(HX + dx, HY, 0xBBBC);
+            put(HX + dx, HY + HH - 1, 0xBBBC);
+        }
+        for dy in 1..HH - 1 {
+            put(HX, HY + dy, 0xBBBC);
+            put(HX + HW - 1, HY + dy, 0xBBBC);
+        }
+        for dy in (2..HH - 2).step_by(2) {
+            for gx in [34usize, 66, 98] {
+                put(HX + gx, HY + dy, 0x5559);
+            }
+        }
+        for i in 0..64usize {
+            let mut bars = [
+                (if hr[i] >= peak { 48 } else { ((hr[i] * 48) / peak) as usize }, 14u16 << 12),
+                (if hg[i] >= peak { 48 } else { ((hg[i] * 48) / peak) as usize }, 14u16 << 8),
+                (if hb[i] >= peak { 48 } else { ((hb[i] * 48) / peak) as usize }, 15u16 << 4),
+            ];
+            bars.sort_by_key(|b| b.0);
+            let mut cy = HY + HH - 5;
+            let segs = [
+                (bars[0].0, bars[0].1 | bars[1].1 | bars[2].1 | 14),
+                (bars[1].0 - bars[0].0, bars[1].1 | bars[2].1 | 14),
+                (bars[2].0 - bars[1].0, bars[2].1 | 14),
+            ];
+            for (n, c) in segs {
+                for _ in 0..n {
+                    put(HX + 4 + 2 * i, cy, c);
+                    put(HX + 4 + 2 * i + 1, cy, c);
+                    cy -= 1;
+                }
+            }
+        }
+        if hr[63] + hg[63] + hb[63] > 180 {
+            for dy in 2..HH - 2 {
+                put(HX + HW - 3, HY + dy, 0xF11F);
+                put(HX + HW - 2, HY + dy, 0xF11F);
+            }
+        }
+        out
+    };
+    {
+        // Extreme chroma corners: exercises every negative & positive out-of-range padded bin
+        let mut ext_y = vec![0u8; 640 * 424];
+        let mut ext_cb = vec![128u8; 320 * 424];
+        let mut ext_cr = vec![128u8; 320 * 424];
+        let y_vals = [0u8, 1, 64, 128, 192, 254, 255];
+        let c_vals = [0u8, 1, 64, 128, 192, 254, 255];
+        for row in 0..52usize {
+            for col in 0..79usize {
+                let idx = row * 79 + col;
+                ext_y[(4 + row * 8) * 640 + 4 + col * 8] = y_vals[idx % y_vals.len()];
+                ext_cb[(4 + row * 8) * 320 + 2 + col * 4] = c_vals[(idx / 7) % c_vals.len()];
+                ext_cr[(4 + row * 8) * 320 + 2 + col * 4] = c_vals[(idx / 49) % c_vals.len()];
+            }
+        }
+        m.wr(yv, &ext_y);
+        m.wr(cbv, &ext_cb);
+        m.wr(crv, &ext_cr);
+        m.cpu.fill_bytes(stock::ARGB_FB, 0, 640 * 424 * 2);
+        m.cpu.call(b.sym("draw_histogram_arm"), &[yv, cbv, crv], &[], STACK.1, 100_000_000)?;
+        let got = m.rd(stock::ARGB_FB, 640 * 424 * 2);
+        let exp = hist_expected(&ext_y, Some(&ext_cb), Some(&ext_cr));
+        r.check(
+            got == exp,
+            format!("Histogram full-frame scalar oracle: extreme chroma clamp bounds; first diff {:?}", got.iter().zip(&exp).position(|(g, e)| g != e)),
+        );
+
+        // Mixed paths (color + Cr-neutral + gray), pure gray, luma-only (Cb=Cr=0), clip bar 180 vs 181
+        let mut hist_bad = Vec::new();
+        // 1. Mixed color/Cr-neutral/gray with varied bins
+        let mut mix_hy = vec![0u8; 640 * 424];
+        let mut mix_cb = vec![128u8; 320 * 424];
+        let mut mix_cr = vec![128u8; 320 * 424];
+        for row in 0..52usize {
+            for col in 0..79usize {
+                let idx = row * 79 + col;
+                mix_hy[(4 + row * 8) * 640 + 4 + col * 8] = ((idx * 17) & 255) as u8;
+                match idx % 3 {
+                    0 => {} // gray (Cb=128, Cr=128)
+                    1 => mix_cb[(4 + row * 8) * 320 + 2 + col * 4] = ((idx * 31) & 255) as u8, // Cr=128, Cb!=128
+                    _ => {
+                        mix_cb[(4 + row * 8) * 320 + 2 + col * 4] = ((idx * 23) & 255) as u8;
+                        mix_cr[(4 + row * 8) * 320 + 2 + col * 4] = ((idx * 41) & 255) as u8;
+                    }
+                }
+            }
+        }
+        // 2. Pure neutral gray
+        let gray_cb = vec![128u8; 320 * 424];
+        let gray_cr = vec![128u8; 320 * 424];
+        // 3 & 4. Clip-bar exact threshold: 60 white gray samples -> hr[63]+hg[63]+hb[63]=180 (off) vs 61 -> 183 (on)
+        let make_clip = |n_white: usize| {
+            let mut fy = vec![128u8; 640 * 424];
+            for k in 0..n_white {
+                let (row, col) = (k / 79, k % 79);
+                fy[(4 + row * 8) * 640 + 4 + col * 8] = 252;
+            }
+            fy
+        };
+        let clip_180 = make_clip(60);
+        let clip_183 = make_clip(61);
+        let cases = [
+            ("mixed", &mix_hy[..], Some(&mix_cb[..]), Some(&mix_cr[..])),
+            ("pure-gray", &mix_hy[..], Some(&gray_cb[..]), Some(&gray_cr[..])),
+            ("luma-only", &mix_hy[..], None, None),
+            ("clip-180", &clip_180[..], Some(&gray_cb[..]), Some(&gray_cr[..])),
+            ("clip-183", &clip_183[..], Some(&gray_cb[..]), Some(&gray_cr[..])),
+        ];
+        for (name, fy, fcb, fcr) in cases {
+            m.wr(yv, fy);
+            let (cb_arg, cr_arg) = match (fcb, fcr) {
+                (Some(c), Some(r)) => { m.wr(cbv, c); m.wr(crv, r); (cbv, crv) }
+                _ => (0, 0),
+            };
+            m.cpu.fill_bytes(stock::ARGB_FB, 0, 640 * 424 * 2);
+            m.cpu.call(b.sym("draw_histogram_arm"), &[yv, cb_arg, cr_arg], &[], STACK.1, 100_000_000)?;
+            let got = m.rd(stock::ARGB_FB, 640 * 424 * 2);
+            let exp = hist_expected(fy, fcb, fcr);
+            if got != exp {
+                hist_bad.push((name, got.iter().zip(&exp).position(|(g, e)| g != e)));
+            }
+        }
+        r.eq(hist_bad, vec![], "Histogram full-frame scalar oracle: mixed/Cr-neutral/gray, pure gray, luma-only & clip-bar 180/183");
+
+        // Torn-read regression: simulate lv_ycap_hook rotating all 4 lv_planes fields to a new
+        // buffer triple right before the cb load or right before the cr load inside draw_histogram.
+        {
+            use std::cell::Cell;
+            let (ya, cba, cra) = (0xA240_0000u32, 0xA245_0000u32, 0xA248_0000u32);
+            let (yb, cbb, crb) = (0xA250_0000u32, 0xA255_0000u32, 0xA258_0000u32);
+            let y_a = vec![64u8; 640 * 424];
+            let cb_a = vec![128u8; 320 * 424];
+            let cr_a = vec![128u8; 320 * 424];
+            let y_b = vec![180u8; 640 * 424];
+            let cb_b = vec![40u8; 320 * 424];
+            let cr_b = vec![220u8; 320 * 424];
+            let exp_b = hist_expected(&y_b, Some(&cb_b), Some(&cr_b));
+            let hist_box = |fb: &[u8]| -> Vec<u8> {
+                let mut box_px = Vec::with_capacity(136 * 58 * 2);
+                for y in 354..412usize {
+                    let o = (y * 640 + 492) * 2;
+                    box_px.extend_from_slice(&fb[o..o + 136 * 2]);
+                }
+                box_px
+            };
+            let exp_box_b = hist_box(&exp_b);
+            let gd = b.sym_info("grid_draw_hook");
+            let mut scan_ranges = vec![(gd.va(), gd.size)];
+            if let Some(dh) = b.syms.get("draw_histogram") {
+                scan_ranges.push((dh.va(), dh.size));
+            }
+            let mut torn_bad = Vec::new();
+            for (tag, imm_op) in [("before-cb", 0x6840u16), ("before-cr", 0x6880u16)] {
+                let mut mt = Machine::new(&b.img, 0);
+                mt.load_nv_defaults();
+                mt.stub_on(b.sym("stock_ui_screen_id"), |_| Some(0x15));
+                mt.stub_on(b.sym("stock_lv_active"), |_| Some(1));
+                mt.stub_on(b.sym("stock_accel_x"), |_| Some(0));
+                mt.stub_on(b.sym("stock_accel_y"), |_| Some(64));
+                mt.w8(stock::NV_GRID, 14);
+                mt.wr(ya, &y_a);
+                mt.wr(cba, &cb_a);
+                mt.wr(cra, &cr_a);
+                mt.wr(yb, &y_b);
+                mt.wr(cbb, &cb_b);
+                mt.wr(crb, &cr_b);
+                mt.w32(lp, ya);
+                mt.w32(lp + 4, cba);
+                mt.w32(lp + 8, cra);
+                mt.w32(lp + 12, 10);
+                let fired = Rc::new(Cell::new(false));
+                for &(start, size) in &scan_ranges {
+                    for off in (0..size).step_by(2) {
+                        let pc = start + off;
+                        let h = b.img.u16(pc);
+                        if (h & 0xFFC0) == imm_op {
+                            let rn = ((h >> 3) & 7) as usize;
+                            let f = fired.clone();
+                            mt.watch(pc, move |cpu| {
+                                if cpu.r[rn] == lp && !f.get() {
+                                    f.set(true);
+                                    cpu.w32(lp, yb);
+                                    cpu.w32(lp + 4, cbb);
+                                    cpu.w32(lp + 8, crb);
+                                    cpu.w32(lp + 12, 11);
+                                }
+                            });
+                        }
+                    }
+                }
+                mt.call(gdraw, &[SCRATCH])?;
+                let got_box = hist_box(&mt.rd(stock::ARGB_FB, 640 * 424 * 2));
+                if !fired.get() || got_box != exp_box_b {
+                    torn_bad.push((tag, fired.get(), got_box == exp_box_b));
+                }
+            }
+            r.eq(torn_bad, vec![], "Histogram lv_planes re-read loop rejects torn (y, cb, cr) triples across concurrent rotation");
+        }
+
+        m.wr(yv, &y_plane);
+        m.wr(cbv, &vec![110u8; 320 * 424]);
+        m.wr(crv, &vec![160u8; 320 * 424]);
+    }
 
     draw(&mut m, 7)?;
     r.check(

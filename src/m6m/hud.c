@@ -144,18 +144,77 @@ static void draw_level(void) {
 __attribute__((always_inline, target("arm")))
 static inline void fill_col(uint32_t **col, uint32_t n, uint32_t px) {
     if (!n) return;
-    uint32_t px2 = (px << 16) | px;
     uint32_t *p = *col;
-    do {
-        *p = px2;
-        p -= FB_W / 2u;
-    } while (--n);
+    __asm__ volatile(
+        "orr %[px], %[px], %[px], lsl #16\n\t"
+        "1:\n\t"
+        "str %[px], [%[p]], #-1280\n\t"
+        "subs %[n], %[n], #1\n\t"
+        "bne 1b\n\t"
+        : [p] "+r"(p), [n] "+r"(n), [px] "+r"(px)
+        :
+        : "cc", "memory");
     *col = p;
+}
+
+/* Static non-reentrant histogram scratch in .bss (528 words, 8-word aligned for stmia zeroing).
+ * Exact BT.601 unclipped bin ranges for Y,Cb,Cr in 0..255 (cb,cr in -128..127, >>8 then >>2):
+ *   R: Y + ((cr*359)>>8) in [-180..433] -> [-45..108] (pad 45 below/above 0..63)
+ *   G: Y - ((cb*88+cr*183)>>8) in [-134..391] -> [-34..97] (pad 34 below/above 0..63)
+ *   B: Y + ((cb*454)>>8) in [-227..480] -> [-57..120] (pad 57 below/above 0..63)
+ */
+enum {
+    HIST_BINS  = 64u,
+    HIST_PAD_R = 45u,
+    HIST_PAD_G = 34u,
+    HIST_PAD_B = 57u,
+    HIST_STR_R = HIST_BINS + 2u * HIST_PAD_R,
+    HIST_STR_G = HIST_BINS + 2u * HIST_PAD_G,
+    HIST_STR_B = HIST_BINS + 2u * HIST_PAD_B,
+    HIST_WORDS = 528u,
+};
+_Static_assert(HIST_WORDS == HIST_BINS + HIST_STR_R + HIST_STR_G + HIST_STR_B,
+               "hist_buf size must equal Y + padded R/G/B bins");
+_Static_assert(HIST_WORDS % 8u == 0u, "hist_buf must be a multiple of 8 words for stmia zeroing");
+_Static_assert(HIST_PAD_R >= 45u && HIST_PAD_G >= 34u && HIST_PAD_B >= 57u,
+               "hist_buf pad constants below BT.601 unclipped chroma bounds");
+static uint32_t hist_buf[HIST_WORDS] __attribute__((aligned(4)));
+
+/* Bottom-tested loop requires n >= 1 (enforced at compile time via enable_if). */
+__attribute__((noinline, target("arm")))
+static uint32_t sum_u32(const uint32_t *p, uint32_t n)
+    __attribute__((enable_if(n >= 1u, "sum_u32 requires compile-time n >= 1"))) {
+    uint32_t s = 0;
+#pragma clang loop unroll(disable)
+    do { s += *p++; } while (--n);
+    return s;
 }
 
 __attribute__((noinline, target("arm")))
 static void draw_histogram_arm(const uint8_t *Yp, const uint8_t *Cb, const uint8_t *Cr) {
-    uint16_t hr[64] = { 0 }, hg[64] = { 0 }, hb[64] = { 0 };
+    uint32_t *zptr = hist_buf, zcnt = HIST_WORDS / 8u;
+    __asm__ volatile(
+        "mov r0, #0\n\t"
+        "mov r1, #0\n\t"
+        "mov r2, #0\n\t"
+        "mov r3, #0\n\t"
+        "mov r4, #0\n\t"
+        "mov r5, #0\n\t"
+        "mov r6, #0\n\t"
+        "mov r7, #0\n\t"
+        "1:\n\t"
+        "stmia %[p]!, {r0, r1, r2, r3, r4, r5, r6, r7}\n\t"
+        "subs %[n], %[n], #1\n\t"
+        "bne 1b\n\t"
+        : [p] "+r"(zptr), [n] "+r"(zcnt)
+        :
+        : "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "cc", "memory");
+
+    uint32_t *hy = hist_buf;
+    uint32_t *hr = hist_buf + HIST_BINS + HIST_PAD_R;
+    uint32_t *hg = hist_buf + HIST_BINS + HIST_STR_R + HIST_PAD_G;
+    uint32_t *hb = hist_buf + HIST_BINS + HIST_STR_R + HIST_STR_G + HIST_PAD_B;
+
     if (Cb && Cr) {
         const uint8_t *yr = Yp + 4u * FB_W + 4u;
         const uint8_t *cbr = Cb + 4u * 320u + 2u;
@@ -163,60 +222,104 @@ static void draw_histogram_arm(const uint8_t *Yp, const uint8_t *Cb, const uint8
         uint32_t k_rb = (454u << 16) | 359u;
         uint32_t k_g = (183u << 16) | 88u;
         for (uint32_t y = 52u; y; y--, yr += 8u * FB_W - 79u * 8u, cbr += 8u * 320u - 79u * 4u, crr += 8u * 320u - 79u * 4u) {
-            uint32_t x = 79u;
+            register const uint8_t *r_yr  __asm__("r4")  = yr;
+            register const uint8_t *r_cb  __asm__("r5")  = cbr;
+            register const uint8_t *r_cr  __asm__("r6")  = crr;
+            register uint32_t       r_x   __asm__("r7")  = 79u;
+            register uint32_t      *r_hr  __asm__("r8")  = hr;
+            register uint32_t      *r_hg  __asm__("r9")  = hg;
+            register uint32_t      *r_hb  __asm__("r10") = hb;
+            register uint32_t      *r_hy  __asm__("r11") = hy;
+            register uint32_t       r_kg  __asm__("r12") = k_g;
+            register uint32_t       r_krb __asm__("lr")  = k_rb;
             __asm__ volatile(
                 "1:\n\t"
-                "ldrb r0, [%[yr]], #8\n\t"
-                "ldrb r2, [%[crr]], #4\n\t"
-                "sub r2, r2, #128\n\t"
-                "smulbb r3, r2, %[krb]\n\t"
+                "ldrb r0, [r4], #8\n\t"
+                "ldrb r2, [r6], #4\n\t"
+                "subs r2, r2, #128\n\t"
+                "beq 2f\n\t"
+                "smulbb r3, r2, lr\n\t"
                 "add r3, r0, r3, asr #8\n\t"
-                "cmp r3, #255\n\t"
-                "andls r3, %[m126], r3, lsr #1\n\t"
-                "bichi r3, %[m126], r3, asr #31\n\t"
-                "ldrh r1, [%[hr], r3]\n\t"
+                "bic r3, r3, #3\n\t"
+                "ldr r1, [r8, r3]\n\t"
                 "add r1, r1, #1\n\t"
-                "strh r1, [%[hr], r3]\n\t"
-                "ldrb r1, [%[cbr]], #4\n\t"
+                "str r1, [r8, r3]\n\t"
+                "ldrb r1, [r5], #4\n\t"
                 "sub r1, r1, #128\n\t"
-                "smulbb r3, r1, %[kg]\n\t"
-                "smlabt r3, r2, %[kg], r3\n\t"
+                "smulbb r3, r1, r12\n\t"
+                "smlabt r3, r2, r12, r3\n\t"
                 "sub r3, r0, r3, asr #8\n\t"
-                "cmp r3, #255\n\t"
-                "andls r3, %[m126], r3, lsr #1\n\t"
-                "bichi r3, %[m126], r3, asr #31\n\t"
-                "ldrh r2, [%[hg], r3]\n\t"
+                "bic r3, r3, #3\n\t"
+                "ldr r2, [r9, r3]\n\t"
                 "add r2, r2, #1\n\t"
-                "strh r2, [%[hg], r3]\n\t"
-                "smulbt r3, r1, %[krb]\n\t"
+                "str r2, [r9, r3]\n\t"
+                "smulbt r3, r1, lr\n\t"
                 "add r3, r0, r3, asr #8\n\t"
-                "cmp r3, #255\n\t"
-                "andls r3, %[m126], r3, lsr #1\n\t"
-                "bichi r3, %[m126], r3, asr #31\n\t"
-                "ldrh r2, [%[hb], r3]\n\t"
+                "bic r3, r3, #3\n\t"
+                "ldr r2, [r10, r3]\n\t"
                 "add r2, r2, #1\n\t"
-                "strh r2, [%[hb], r3]\n\t"
-                "subs %[x], %[x], #1\n\t"
+                "str r2, [r10, r3]\n\t"
+                "subs r7, r7, #1\n\t"
                 "bne 1b\n\t"
-                : [yr] "+r"(yr), [cbr] "+r"(cbr), [crr] "+r"(crr), [x] "+r"(x)
-                : [hr] "r"(hr), [hg] "r"(hg), [hb] "r"(hb),
-                  [krb] "r"(k_rb), [kg] "r"(k_g), [m126] "r"(126u)
+                "b 5f\n\t"
+                "2:\n\t"
+                "ldrb r1, [r5], #4\n\t"
+                "subs r1, r1, #128\n\t"
+                "bne 4f\n\t"
+                "bic r3, r0, #3\n\t"
+                "ldr r2, [r11, r3]\n\t"
+                "add r2, r2, #1\n\t"
+                "str r2, [r11, r3]\n\t"
+                "subs r7, r7, #1\n\t"
+                "bne 1b\n\t"
+                "b 5f\n\t"
+                "4:\n\t"
+                "bic r3, r0, #3\n\t"
+                "ldr r2, [r8, r3]\n\t"
+                "add r2, r2, #1\n\t"
+                "str r2, [r8, r3]\n\t"
+                "smulbb r3, r1, r12\n\t"
+                "sub r3, r0, r3, asr #8\n\t"
+                "bic r3, r3, #3\n\t"
+                "ldr r2, [r9, r3]\n\t"
+                "add r2, r2, #1\n\t"
+                "str r2, [r9, r3]\n\t"
+                "smulbt r3, r1, lr\n\t"
+                "add r3, r0, r3, asr #8\n\t"
+                "bic r3, r3, #3\n\t"
+                "ldr r2, [r10, r3]\n\t"
+                "add r2, r2, #1\n\t"
+                "str r2, [r10, r3]\n\t"
+                "subs r7, r7, #1\n\t"
+                "bne 1b\n\t"
+                "5:\n\t"
+                : "+r"(r_yr), "+r"(r_cb), "+r"(r_cr), "+r"(r_x)
+                : "r"(r_hr), "r"(r_hg), "r"(r_hb), "r"(r_hy), "r"(r_kg), "r"(r_krb)
                 : "r0", "r1", "r2", "r3", "cc", "memory");
+            yr = r_yr; cbr = r_cb; crr = r_cr;
         }
+        hr[0]  += sum_u32(hr - HIST_PAD_R, HIST_PAD_R);
+        hr[63] += sum_u32(hr + HIST_BINS,  HIST_PAD_R);
+        hg[0]  += sum_u32(hg - HIST_PAD_G, HIST_PAD_G);
+        hg[63] += sum_u32(hg + HIST_BINS,  HIST_PAD_G);
+        hb[0]  += sum_u32(hb - HIST_PAD_B, HIST_PAD_B);
+        hb[63] += sum_u32(hb + HIST_BINS,  HIST_PAD_B);
     } else {
         const uint8_t *yr = Yp + 4u * FB_W + 4u;
         for (uint32_t y = 52u; y; y--, yr += 8u * FB_W - 79u * 8u) {
-            for (uint32_t x = 79u; x; x--, yr += 8) {
-                uint32_t bin = *yr >> 2;
-                hr[bin]++; hg[bin]++; hb[bin]++;
-            }
+            for (uint32_t x = 79u; x; x--, yr += 8)
+                hy[*yr >> 2]++;
         }
     }
     uint32_t peak = 24;
-    for (uint32_t i = 2; i < 62; i++) {
-        if (hr[i] > peak) peak = hr[i];
-        if (hg[i] > peak) peak = hg[i];
-        if (hb[i] > peak) peak = hb[i];
+    for (uint32_t i = 0; i < 64u; i++) {
+        uint32_t yv = hy[i];
+        uint32_t vr = (hr[i] += yv), vg = (hg[i] += yv), vb = (hb[i] += yv);
+        if (i >= 2u && i < 62u) {
+            if (vr > peak) peak = vr;
+            if (vg > peak) peak = vg;
+            if (vb > peak) peak = vb;
+        }
     }
 
     /* Exact reciprocal for min(48, (v * 48) / peak) over peak in [24, 4108], v < peak */
@@ -267,11 +370,23 @@ static void draw_histogram_arm(const uint8_t *Yp, const uint8_t *Cb, const uint8
 }
 
 static void draw_histogram(void) {
-    uint32_t y = lv_planes.y, cb = lv_planes.cb, cr = lv_planes.cr;
+    /* Re-read y after cb/cr: lv_ycap_hook (hooks.S) writes y,cb,cr,fcnt to completion on rotation. */
+    uint32_t y, cb, cr;
+    do {
+        y = lv_planes.y;
+        cb = lv_planes.cb;
+        cr = lv_planes.cr;
+    } while (lv_planes.y != y);
     if (!plane_ok(y)) return;
+    /* hist_buf is shared: the grid hooks are reachable from tasks that preempt the UI task and
+     * run to completion, so a nested draw skips. Non-zero initialiser: payload .bss is not zeroed. */
+    static uint8_t hist_free = 1u;
+    if (!hist_free) return;
+    hist_free = 0u;
     draw_histogram_arm((const uint8_t *)y,
                        plane_ok(cb) ? (const uint8_t *)cb : 0,
                        plane_ok(cr) ? (const uint8_t *)cr : 0);
+    hist_free = 1u;
     stock_flush_rect(492, 354, 492 + 136, 354 + 58);
 }
 
@@ -465,92 +580,159 @@ static const uint32_t zebra_stripes_lo[7] = {
     0x1DFE1DFEu, 0x1DFE1DFEu, 0x111A111Au,
 };
 
-// 4-word (16 LCD px) SWAR zebra pass on DMA-zeroed ARGB back-buffer: precomputed row stripes + inline stmia/partial
+// 2x4-word (32 LCD px) SWAR zebra pass on DMA-zeroed ARGB back-buffer: register-rotated stripes + stmia bursts
 __attribute__((noinline, target("arm")))
 static void draw_zebras_arm(const uint8_t *Y, uint32_t phase, uint32_t thresh) {
-    const uint32_t *rw = (const uint32_t *)(const void *)Y;
-    uint32_t *f0 = (uint32_t *)(void *)ARGB_FB;
-    const uint32_t mask = 0x00FF00FFu;
     uint32_t add = 256u - thresh;
-    const uint32_t addk = (add << 16) | add;
-    for (uint32_t y = 0; y < LV_H / 2u; y++, rw += 2u * FB_W / 4u, f0 += 2u * FB_W / 2u) {
-        const uint32_t *sp_row = zebra_stripes_hi + ((y + phase) & 3u);
-        register uint32_t r_rp   __asm__("r12") = (uint32_t)(uintptr_t)rw;
-        register uint32_t r_o0   __asm__("r11") = (uint32_t)(uintptr_t)f0;
-        register uint32_t r_n    __asm__("lr")  = FB_W / 16u;
-        register uint32_t r_mask __asm__("r4")  = mask;
-        register uint32_t r_addk __asm__("r5")  = addk;
-        register uint32_t r_st   __asm__("r6")  = (uint32_t)(uintptr_t)sp_row;
-        __asm__ volatile(
-            "ldmia r6, {r7, r8, r9, r10}\n\t"
-            "1:\n\t"
-            "ldmia r12!, {r0, r1, r2, r3}\n\t"
-            "and r0, r4, r0, lsr #8\n\t"
-            "and r1, r4, r1, lsr #8\n\t"
-            "and r2, r4, r2, lsr #8\n\t"
-            "and r3, r4, r3, lsr #8\n\t"
-            "add r0, r0, r5\n\t"
-            "add r1, r1, r5\n\t"
-            "add r2, r2, r5\n\t"
-            "add r3, r3, r5\n\t"
-            "orr r6, r0, r1\n\t"
-            "orr r6, r6, r2\n\t"
-            "orr r6, r6, r3\n\t"
-            "bics r6, r6, r4\n\t"
-            "bne 2f\n\t"
-            "add r11, r11, #32\n\t"
-            "subs lr, lr, #1\n\t"
-            "bne 1b\n\t"
-            "b 4f\n\t"
-            "2:\n\t"
-            "and r6, r0, r1\n\t"
-            "and r6, r6, r2\n\t"
-            "and r6, r6, r3\n\t"
-            "bic r6, r6, r4\n\t"
-            "eor r6, r6, #0x01000000\n\t"
-            "cmp r6, #0x00000100\n\t"
-            "bne 3f\n\t"
-            "add r6, r11, #0x500\n\t"
-            "stmia r11!, {r7, r8, r9, r10}\n\t"
-            "stmia r11!, {r7, r8, r9, r10}\n\t"
-            "stmia r6!,  {r7, r8, r9, r10}\n\t"
-            "stmia r6,   {r7, r8, r9, r10}\n\t"
-            "subs lr, lr, #1\n\t"
-            "bne 1b\n\t"
-            "b 4f\n\t"
-            "3:\n\t"
-            "tst r0, #0x01000000\n\t"
-            "strne r7, [r11, #0]\n\t"
-            "strne r7, [r11, #0x500]\n\t"
-            "tst r0, #0x00000100\n\t"
-            "strne r8, [r11, #4]\n\t"
-            "strne r8, [r11, #0x504]\n\t"
-            "tst r1, #0x01000000\n\t"
-            "strne r9, [r11, #8]\n\t"
-            "strne r9, [r11, #0x508]\n\t"
-            "tst r1, #0x00000100\n\t"
-            "strne r10, [r11, #12]\n\t"
-            "strne r10, [r11, #0x50c]\n\t"
-            "tst r2, #0x01000000\n\t"
-            "strne r7, [r11, #16]\n\t"
-            "strne r7, [r11, #0x510]\n\t"
-            "tst r2, #0x00000100\n\t"
-            "strne r8, [r11, #20]\n\t"
-            "strne r8, [r11, #0x514]\n\t"
-            "tst r3, #0x01000000\n\t"
-            "strne r9, [r11, #24]\n\t"
-            "strne r9, [r11, #0x518]\n\t"
-            "tst r3, #0x00000100\n\t"
-            "strne r10, [r11, #28]\n\t"
-            "strne r10, [r11, #0x51c]\n\t"
-            "add r11, r11, #32\n\t"
-            "subs lr, lr, #1\n\t"
-            "bne 1b\n\t"
-            "4:\n\t"
-            : "+r"(r_rp), "+r"(r_o0), "+r"(r_n), "+r"(r_st)
-            : "r"(r_mask), "r"(r_addk)
-            : "r0", "r1", "r2", "r3", "r7", "r8", "r9", "r10", "cc", "memory");
-    }
+    const uint32_t *sp0 = zebra_stripes_hi + (phase & 3u);
+    register uint32_t r_rp   __asm__("r12") = (uint32_t)(uintptr_t)Y;
+    register uint32_t r_o0   __asm__("r11") = (uint32_t)(uintptr_t)ARGB_FB;
+    register uint32_t r_mask __asm__("r4")  = 0x00FF00FFu;
+    register uint32_t r_addk __asm__("r5")  = (add << 16) | add;
+    register uint32_t r_st   __asm__("r6")  = (uint32_t)(uintptr_t)sp0;
+    register uint32_t r_rows __asm__("r0")  = LV_H / 2u;
+    __asm__ volatile(
+        "ldmia r6, {r7, r8, r9, r10}\n\t"
+        "stmfd sp!, {r0}\n\t"
+        "0:\n\t"
+        "mov lr, #20\n\t"
+        "1:\n\t"
+        /* Block A (16 px) */
+        "ldmia r12!, {r0, r1, r2, r3}\n\t"
+        "and r0, r4, r0, lsr #8\n\t"
+        "and r1, r4, r1, lsr #8\n\t"
+        "and r2, r4, r2, lsr #8\n\t"
+        "and r3, r4, r3, lsr #8\n\t"
+        "add r0, r0, r5\n\t"
+        "add r1, r1, r5\n\t"
+        "add r2, r2, r5\n\t"
+        "add r3, r3, r5\n\t"
+        "orr r6, r0, r1\n\t"
+        "orr r6, r6, r2\n\t"
+        "orr r6, r6, r3\n\t"
+        "bics r6, r6, r4\n\t"
+        "bne 2f\n\t"
+        "add r11, r11, #32\n\t"
+        "4:\n\t"
+        /* Block B (16 px) */
+        "ldmia r12!, {r0, r1, r2, r3}\n\t"
+        "and r0, r4, r0, lsr #8\n\t"
+        "and r1, r4, r1, lsr #8\n\t"
+        "and r2, r4, r2, lsr #8\n\t"
+        "and r3, r4, r3, lsr #8\n\t"
+        "add r0, r0, r5\n\t"
+        "add r1, r1, r5\n\t"
+        "add r2, r2, r5\n\t"
+        "add r3, r3, r5\n\t"
+        "orr r6, r0, r1\n\t"
+        "orr r6, r6, r2\n\t"
+        "orr r6, r6, r3\n\t"
+        "bics r6, r6, r4\n\t"
+        "bne 5f\n\t"
+        "add r11, r11, #32\n\t"
+        "subs lr, lr, #1\n\t"
+        "bne 1b\n\t"
+        "b 8f\n\t"
+
+        "2:\n\t"
+        "and r6, r0, r1\n\t"
+        "and r6, r6, r2\n\t"
+        "and r6, r6, r3\n\t"
+        "tst r6, #0x01000000\n\t"
+        "tstne r6, #0x00000100\n\t"
+        "beq 3f\n\t"
+        "add r6, r11, #0x500\n\t"
+        "stmia r11!, {r7, r8, r9, r10}\n\t"
+        "stmia r11!, {r7, r8, r9, r10}\n\t"
+        "stmia r6!,  {r7, r8, r9, r10}\n\t"
+        "stmia r6,   {r7, r8, r9, r10}\n\t"
+        "b 4b\n\t"
+
+        "3:\n\t"
+        "stmfd sp!, {r2, r3}\n\t"
+        "add r6, r11, #0x500\n\t"
+        "mov r2, r1, lsl #7\n\t"
+        "and r2, r9, r2, asr #31\n\t"
+        "mov r3, r1, lsl #23\n\t"
+        "and r3, r10, r3, asr #31\n\t"
+        "mov r1, r0, lsl #23\n\t"
+        "and r1, r8, r1, asr #31\n\t"
+        "mov r0, r0, lsl #7\n\t"
+        "and r0, r7, r0, asr #31\n\t"
+        "stmia r11!, {r0, r1, r2, r3}\n\t"
+        "stmia r6!,  {r0, r1, r2, r3}\n\t"
+        "ldmfd sp!, {r0, r1}\n\t"
+        "mov r2, r1, lsl #7\n\t"
+        "and r2, r9, r2, asr #31\n\t"
+        "mov r3, r1, lsl #23\n\t"
+        "and r3, r10, r3, asr #31\n\t"
+        "mov r1, r0, lsl #23\n\t"
+        "and r1, r8, r1, asr #31\n\t"
+        "mov r0, r0, lsl #7\n\t"
+        "and r0, r7, r0, asr #31\n\t"
+        "stmia r11!, {r0, r1, r2, r3}\n\t"
+        "stmia r6,   {r0, r1, r2, r3}\n\t"
+        "b 4b\n\t"
+
+        "5:\n\t"
+        "and r6, r0, r1\n\t"
+        "and r6, r6, r2\n\t"
+        "and r6, r6, r3\n\t"
+        "tst r6, #0x01000000\n\t"
+        "tstne r6, #0x00000100\n\t"
+        "beq 6f\n\t"
+        "add r6, r11, #0x500\n\t"
+        "stmia r11!, {r7, r8, r9, r10}\n\t"
+        "stmia r11!, {r7, r8, r9, r10}\n\t"
+        "stmia r6!,  {r7, r8, r9, r10}\n\t"
+        "stmia r6,   {r7, r8, r9, r10}\n\t"
+        "subs lr, lr, #1\n\t"
+        "bne 1b\n\t"
+        "b 8f\n\t"
+
+        "6:\n\t"
+        "stmfd sp!, {r2, r3}\n\t"
+        "add r6, r11, #0x500\n\t"
+        "mov r2, r1, lsl #7\n\t"
+        "and r2, r9, r2, asr #31\n\t"
+        "mov r3, r1, lsl #23\n\t"
+        "and r3, r10, r3, asr #31\n\t"
+        "mov r1, r0, lsl #23\n\t"
+        "and r1, r8, r1, asr #31\n\t"
+        "mov r0, r0, lsl #7\n\t"
+        "and r0, r7, r0, asr #31\n\t"
+        "stmia r11!, {r0, r1, r2, r3}\n\t"
+        "stmia r6!,  {r0, r1, r2, r3}\n\t"
+        "ldmfd sp!, {r0, r1}\n\t"
+        "mov r2, r1, lsl #7\n\t"
+        "and r2, r9, r2, asr #31\n\t"
+        "mov r3, r1, lsl #23\n\t"
+        "and r3, r10, r3, asr #31\n\t"
+        "mov r1, r0, lsl #23\n\t"
+        "and r1, r8, r1, asr #31\n\t"
+        "mov r0, r0, lsl #7\n\t"
+        "and r0, r7, r0, asr #31\n\t"
+        "stmia r11!, {r0, r1, r2, r3}\n\t"
+        "stmia r6,   {r0, r1, r2, r3}\n\t"
+        "subs lr, lr, #1\n\t"
+        "bne 1b\n\t"
+
+        "8:\n\t"
+        "ldr r0, [sp]\n\t"
+        "add r12, r12, #640\n\t"
+        "add r11, r11, #1280\n\t"
+        "mov r6, r7\n\t"
+        "mov r7, r8\n\t"
+        "mov r8, r9\n\t"
+        "mov r9, r10\n\t"
+        "mov r10, r6\n\t"
+        "subs r0, r0, #1\n\t"
+        "strne r0, [sp]\n\t"
+        "bne 0b\n\t"
+        "add sp, sp, #4\n\t"
+        : "+r"(r_rp), "+r"(r_o0), "+r"(r_st), "+r"(r_rows)
+        : "r"(r_mask), "r"(r_addk)
+        : "r1", "r2", "r3", "r7", "r8", "r9", "r10", "lr", "cc", "memory");
 }
 
 // Dual highlight (>= hi_thresh, orange) + shadow (<= 12, reverse-diagonal cyan) 4-word SWAR zebra pass
@@ -588,164 +770,152 @@ static void draw_zebras_dual_c(const uint8_t *Y, uint32_t phase, uint32_t hi_thr
 
 __attribute__((noinline, target("arm")))
 static void draw_zebras_dual_arm(const uint8_t *Y, uint32_t phase) {
+    _Static_assert(ZEBRA_THRESH >= 142u && ZEBRA_THRESH <= 255u,
+                   "ZEBRA_THRESH must be in 142..255 for dual-zebra immediate");
     uint32_t addh = 256u - ZEBRA_THRESH;
     uint32_t add_hi = (addh << 16) | addh;
-    const uint32_t *rw = (const uint32_t *)(const void *)Y;
-    uint32_t *f0 = (uint32_t *)(void *)ARGB_FB;
-    for (uint32_t row = 0; row < LV_H / 2u; row++, rw += 2u * FB_W / 4u, f0 += 2u * FB_W / 2u) {
-        register uint32_t r_rp   __asm__("r12") = (uint32_t)(uintptr_t)rw;
-        register uint32_t r_o0   __asm__("r11") = (uint32_t)(uintptr_t)f0;
-        register uint32_t r_n    __asm__("lr")  = FB_W / 16u;
-        register uint32_t r_mask __asm__("r4")  = 0x00FF00FFu;
-        register uint32_t r_addh __asm__("r5")  = add_hi;
-        register uint32_t r_addl __asm__("r6")  = add_hi + 0x010C010Cu; /* (268 + addh) - h = 268 - Y */
-        register uint32_t r_sh   __asm__("r7")  = (uint32_t)(uintptr_t)(zebra_stripes_hi + ((row + phase) & 3u));
-        register uint32_t r_sl   __asm__("r8")  = (uint32_t)(uintptr_t)(zebra_stripes_lo + (((LV_H - row) + phase) & 3u));
-        __asm__ volatile(
-            "1:\n\t"
-            "ldmia r12!, {r0, r1, r2, r3}\n\t"
-            "and r0, r4, r0, lsr #8\n\t"
-            "and r1, r4, r1, lsr #8\n\t"
-            "and r2, r4, r2, lsr #8\n\t"
-            "and r3, r4, r3, lsr #8\n\t"
-            "add r0, r0, r5\n\t"
-            "add r1, r1, r5\n\t"
-            "add r2, r2, r5\n\t"
-            "add r3, r3, r5\n\t"
-            "sub r9, r6, r0\n\t"
-            "sub r10, r6, r1\n\t"
-            "orr r9, r9, r10\n\t"
-            "sub r10, r6, r2\n\t"
-            "orr r9, r9, r10\n\t"
-            "sub r10, r6, r3\n\t"
-            "orr r9, r9, r10\n\t"
-            "orr r10, r0, r1\n\t"
-            "orr r10, r10, r2\n\t"
-            "orr r10, r10, r3\n\t"
-            "orr r9, r9, r10\n\t"
-            "bics r9, r9, r4\n\t"
-            "bne 2f\n\t"
-            "add r11, r11, #32\n\t"
-            "subs lr, lr, #1\n\t"
-            "bne 1b\n\t"
-            "b 5f\n\t"
-            "2:\n\t"
-            "and r9, r0, r1\n\t"
-            "and r9, r9, r2\n\t"
-            "and r9, r9, r3\n\t"
-            "bic r9, r9, r4\n\t"
-            "eor r9, r9, #0x01000000\n\t"
-            "cmp r9, #0x00000100\n\t"
-            "bne 3f\n\t"
-            "ldmia r7, {r0, r1, r2, r3}\n\t"
-            "add r9, r11, #0x500\n\t"
-            "stmia r11!, {r0, r1, r2, r3}\n\t"
-            "stmia r11!, {r0, r1, r2, r3}\n\t"
-            "stmia r9!, {r0, r1, r2, r3}\n\t"
-            "stmia r9, {r0, r1, r2, r3}\n\t"
-            "subs lr, lr, #1\n\t"
-            "bne 1b\n\t"
-            "b 5f\n\t"
-            "3:\n\t"
-            "bics r10, r10, r4\n\t"
-            "bne 4f\n\t"
-            "sub r9, r6, r0\n\t"
-            "sub r10, r6, r1\n\t"
-            "and r9, r9, r10\n\t"
-            "sub r10, r6, r2\n\t"
-            "and r9, r9, r10\n\t"
-            "sub r10, r6, r3\n\t"
-            "and r9, r9, r10\n\t"
-            "bic r9, r9, r4\n\t"
-            "eor r9, r9, #0x01000000\n\t"
-            "cmp r9, #0x00000100\n\t"
-            "bne 4f\n\t"
-            "ldmia r8, {r0, r1, r2, r3}\n\t"
-            "add r9, r11, #0x500\n\t"
-            "stmia r11!, {r0, r1, r2, r3}\n\t"
-            "stmia r11!, {r0, r1, r2, r3}\n\t"
-            "stmia r9!, {r0, r1, r2, r3}\n\t"
-            "stmia r9, {r0, r1, r2, r3}\n\t"
-            "subs lr, lr, #1\n\t"
-            "bne 1b\n\t"
-            "b 5f\n\t"
-            "4:\n\t"
-            "sub r9, r6, r0\n\t"
-            "tst r0, #0x01000000\n\t"
-            "ldrne r10, [r7, #0]\n\t"
-            "strne r10, [r11, #0]\n\t"
-            "strne r10, [r11, #0x500]\n\t"
-            "tst r9, #0x01000000\n\t"
-            "ldrne r10, [r8, #0]\n\t"
-            "strne r10, [r11, #0]\n\t"
-            "strne r10, [r11, #0x500]\n\t"
-            "tst r0, #0x00000100\n\t"
-            "ldrne r10, [r7, #4]\n\t"
-            "strne r10, [r11, #4]\n\t"
-            "strne r10, [r11, #0x504]\n\t"
-            "tst r9, #0x00000100\n\t"
-            "ldrne r10, [r8, #4]\n\t"
-            "strne r10, [r11, #4]\n\t"
-            "strne r10, [r11, #0x504]\n\t"
-            "sub r9, r6, r1\n\t"
-            "tst r1, #0x01000000\n\t"
-            "ldrne r10, [r7, #8]\n\t"
-            "strne r10, [r11, #8]\n\t"
-            "strne r10, [r11, #0x508]\n\t"
-            "tst r9, #0x01000000\n\t"
-            "ldrne r10, [r8, #8]\n\t"
-            "strne r10, [r11, #8]\n\t"
-            "strne r10, [r11, #0x508]\n\t"
-            "tst r1, #0x00000100\n\t"
-            "ldrne r10, [r7, #12]\n\t"
-            "strne r10, [r11, #12]\n\t"
-            "strne r10, [r11, #0x50c]\n\t"
-            "tst r9, #0x00000100\n\t"
-            "ldrne r10, [r8, #12]\n\t"
-            "strne r10, [r11, #12]\n\t"
-            "strne r10, [r11, #0x50c]\n\t"
-            "sub r9, r6, r2\n\t"
-            "tst r2, #0x01000000\n\t"
-            "ldrne r10, [r7, #0]\n\t"
-            "strne r10, [r11, #16]\n\t"
-            "strne r10, [r11, #0x510]\n\t"
-            "tst r9, #0x01000000\n\t"
-            "ldrne r10, [r8, #0]\n\t"
-            "strne r10, [r11, #16]\n\t"
-            "strne r10, [r11, #0x510]\n\t"
-            "tst r2, #0x00000100\n\t"
-            "ldrne r10, [r7, #4]\n\t"
-            "strne r10, [r11, #20]\n\t"
-            "strne r10, [r11, #0x514]\n\t"
-            "tst r9, #0x00000100\n\t"
-            "ldrne r10, [r8, #4]\n\t"
-            "strne r10, [r11, #20]\n\t"
-            "strne r10, [r11, #0x514]\n\t"
-            "sub r9, r6, r3\n\t"
-            "tst r3, #0x01000000\n\t"
-            "ldrne r10, [r7, #8]\n\t"
-            "strne r10, [r11, #24]\n\t"
-            "strne r10, [r11, #0x518]\n\t"
-            "tst r9, #0x01000000\n\t"
-            "ldrne r10, [r8, #8]\n\t"
-            "strne r10, [r11, #24]\n\t"
-            "strne r10, [r11, #0x518]\n\t"
-            "tst r3, #0x00000100\n\t"
-            "ldrne r10, [r7, #12]\n\t"
-            "strne r10, [r11, #28]\n\t"
-            "strne r10, [r11, #0x51c]\n\t"
-            "tst r9, #0x00000100\n\t"
-            "ldrne r10, [r8, #12]\n\t"
-            "strne r10, [r11, #28]\n\t"
-            "strne r10, [r11, #0x51c]\n\t"
-            "add r11, r11, #32\n\t"
-            "subs lr, lr, #1\n\t"
-            "bne 1b\n\t"
-            "5:\n\t"
-            : "+r"(r_rp), "+r"(r_o0), "+r"(r_n)
-            : "r"(r_mask), "r"(r_addh), "r"(r_addl), "r"(r_sh), "r"(r_sl)
-            : "r0", "r1", "r2", "r3", "r9", "r10", "cc", "memory");
-    }
+    /* Mixed-block 1-insn classifier: cmp K, h<<7 (or h<<23) with K=(269-ZEBRA_THRESH)<<23 sets vs iff HI, hi iff LO */
+    const uint32_t *sh0 = zebra_stripes_hi + (phase & 3u);
+    const uint32_t *sl0 = zebra_stripes_lo + ((LV_H + phase) & 3u);
+    register uint32_t r_rp   __asm__("r12") = (uint32_t)(uintptr_t)Y;
+    register uint32_t r_o0   __asm__("r11") = (uint32_t)(uintptr_t)ARGB_FB;
+    register uint32_t r_mask __asm__("r4")  = 0x00FF00FFu;
+    register uint32_t r_addh __asm__("r5")  = add_hi;
+    register uint32_t r_addl __asm__("r6")  = add_hi + 0x010C010Cu; /* (268 + addh) - h = 268 - Y */
+    register uint32_t r_sh   __asm__("r7")  = (uint32_t)(uintptr_t)sh0;
+    register uint32_t r_sl   __asm__("r8")  = (uint32_t)(uintptr_t)sl0;
+    register uint32_t r_rows __asm__("r0")  = LV_H / 2u;
+    register uint32_t r_she  __asm__("r1")  = (uint32_t)(uintptr_t)(zebra_stripes_hi + 4u);
+    register uint32_t r_slb  __asm__("r2")  = (uint32_t)(uintptr_t)zebra_stripes_lo;
+    __asm__ volatile(
+        "stmfd sp!, {r0, r1, r2}\n\t"
+        "0:\n\t"
+        "mov lr, #40\n\t"
+        "1:\n\t"
+        "ldmia r12!, {r0, r1, r2, r3}\n\t"
+        "and r0, r4, r0, lsr #8\n\t"
+        "and r1, r4, r1, lsr #8\n\t"
+        "and r2, r4, r2, lsr #8\n\t"
+        "and r3, r4, r3, lsr #8\n\t"
+        "add r0, r0, r5\n\t"
+        "add r1, r1, r5\n\t"
+        "add r2, r2, r5\n\t"
+        "add r3, r3, r5\n\t"
+        "sub r9, r6, r0\n\t"
+        "sub r10, r6, r1\n\t"
+        "orr r9, r9, r10\n\t"
+        "sub r10, r6, r2\n\t"
+        "orr r9, r9, r10\n\t"
+        "sub r10, r6, r3\n\t"
+        "orr r9, r9, r10\n\t"
+        "orr r10, r0, r1\n\t"
+        "orr r10, r10, r2\n\t"
+        "orr r10, r10, r3\n\t"
+        "orr r9, r9, r10\n\t"
+        "bics r9, r9, r4\n\t"
+        "bne 2f\n\t"
+        "add r11, r11, #32\n\t"
+        "subs lr, lr, #1\n\t"
+        "bne 1b\n\t"
+        "b 5f\n\t"
+        "2:\n\t"
+        "and r9, r0, r1\n\t"
+        "and r9, r9, r2\n\t"
+        "and r9, r9, r3\n\t"
+        "tst r9, #0x01000000\n\t"
+        "tstne r9, #0x00000100\n\t"
+        "beq 3f\n\t"
+        "ldmia r7, {r0, r1, r2, r3}\n\t"
+        "add r9, r11, #0x500\n\t"
+        "stmia r11!, {r0, r1, r2, r3}\n\t"
+        "stmia r11!, {r0, r1, r2, r3}\n\t"
+        "stmia r9!, {r0, r1, r2, r3}\n\t"
+        "stmia r9, {r0, r1, r2, r3}\n\t"
+        "subs lr, lr, #1\n\t"
+        "bne 1b\n\t"
+        "b 5f\n\t"
+        "3:\n\t"
+        "bics r10, r10, r4\n\t"
+        "bne 4f\n\t"
+        "sub r9, r6, r0\n\t"
+        "sub r10, r6, r1\n\t"
+        "and r9, r9, r10\n\t"
+        "sub r10, r6, r2\n\t"
+        "and r9, r9, r10\n\t"
+        "sub r10, r6, r3\n\t"
+        "and r9, r9, r10\n\t"
+        "tst r9, #0x01000000\n\t"
+        "tstne r9, #0x00000100\n\t"
+        "beq 4f\n\t"
+        "ldmia r8, {r0, r1, r2, r3}\n\t"
+        "add r9, r11, #0x500\n\t"
+        "stmia r11!, {r0, r1, r2, r3}\n\t"
+        "stmia r11!, {r0, r1, r2, r3}\n\t"
+        "stmia r9!, {r0, r1, r2, r3}\n\t"
+        "stmia r9, {r0, r1, r2, r3}\n\t"
+        "subs lr, lr, #1\n\t"
+        "bne 1b\n\t"
+        "b 5f\n\t"
+        "4:\n\t"
+        "stmfd sp!, {r2, r3}\n\t"
+        "mov r9, #%c[kdual]\n\t"
+        "add r10, r11, #0x500\n\t"
+        "cmp r9, r1, lsl #7\n\t"
+        "mov r2, #0\n\t"
+        "ldrvs r2, [r7, #8]\n\t"
+        "ldrhi r2, [r8, #8]\n\t"
+        "cmp r9, r1, lsl #23\n\t"
+        "mov r3, #0\n\t"
+        "ldrvs r3, [r7, #12]\n\t"
+        "ldrhi r3, [r8, #12]\n\t"
+        "cmp r9, r0, lsl #23\n\t"
+        "mov r1, #0\n\t"
+        "ldrvs r1, [r7, #4]\n\t"
+        "ldrhi r1, [r8, #4]\n\t"
+        "cmp r9, r0, lsl #7\n\t"
+        "mov r0, #0\n\t"
+        "ldrvs r0, [r7, #0]\n\t"
+        "ldrhi r0, [r8, #0]\n\t"
+        "stmia r11!, {r0, r1, r2, r3}\n\t"
+        "stmia r10!, {r0, r1, r2, r3}\n\t"
+        "ldmfd sp!, {r0, r1}\n\t"
+        "cmp r9, r1, lsl #7\n\t"
+        "mov r2, #0\n\t"
+        "ldrvs r2, [r7, #8]\n\t"
+        "ldrhi r2, [r8, #8]\n\t"
+        "cmp r9, r1, lsl #23\n\t"
+        "mov r3, #0\n\t"
+        "ldrvs r3, [r7, #12]\n\t"
+        "ldrhi r3, [r8, #12]\n\t"
+        "cmp r9, r0, lsl #23\n\t"
+        "mov r1, #0\n\t"
+        "ldrvs r1, [r7, #4]\n\t"
+        "ldrhi r1, [r8, #4]\n\t"
+        "cmp r9, r0, lsl #7\n\t"
+        "mov r0, #0\n\t"
+        "ldrvs r0, [r7, #0]\n\t"
+        "ldrhi r0, [r8, #0]\n\t"
+        "stmia r11!, {r0, r1, r2, r3}\n\t"
+        "stmia r10,  {r0, r1, r2, r3}\n\t"
+        "subs lr, lr, #1\n\t"
+        "bne 1b\n\t"
+        "5:\n\t"
+        "ldmia sp, {r1, r2, r3}\n\t"
+        "add r12, r12, #640\n\t"
+        "add r11, r11, #1280\n\t"
+        "add r7, r7, #4\n\t"
+        "cmp r7, r2\n\t"
+        "subeq r7, r7, #16\n\t"
+        "cmp r8, r3\n\t"
+        "addeq r8, r8, #12\n\t"
+        "subne r8, r8, #4\n\t"
+        "subs r1, r1, #1\n\t"
+        "strne r1, [sp]\n\t"
+        "bne 0b\n\t"
+        "add sp, sp, #12\n\t"
+        : "+r"(r_rp), "+r"(r_o0), "+r"(r_sh), "+r"(r_sl), "+r"(r_rows), "+r"(r_she), "+r"(r_slb)
+        : "r"(r_mask), "r"(r_addh), "r"(r_addl), [kdual] "i"((269u - ZEBRA_THRESH) << 23)
+        : "r3", "r9", "r10", "lr", "cc", "memory");
 }
 static void draw_zebras(const uint8_t *Y) {
     clear_dma(0, 0, FB_W, LV_H);
@@ -879,17 +1049,22 @@ static void grid_draw(uint32_t m) {
 void grid_draw_hook(uint32_t arg) {
     static uint8_t prev_grid = 0xFFu;
     uint32_t m = stock_get_grid();
-    uint32_t in_lv = stock_ui_screen_id() == SCREEN_LV && stock_lv_active() == 1u;
-    if (in_lv && m != prev_grid) {
+    if (m - GRID_LEVEL > GRID_LAST - GRID_LEVEL) {
+        if (m != prev_grid && stock_ui_screen_id() == SCREEN_LV && stock_lv_active() == 1u) {
+            if (prev_grid - GRID_LEVEL <= GRID_LAST - GRID_LEVEL)
+                clear_dma(0, 0, FB_W, LV_H);
+            prev_grid = (uint8_t)m;
+        }
+        stock_grid_draw(arg);
+        return;
+    }
+    if (stock_ui_screen_id() != SCREEN_LV || stock_lv_active() != 1u) return;
+    if (m != prev_grid) {
         if (prev_grid - GRID_LEVEL <= GRID_LAST - GRID_LEVEL && !is_full_frame_grid(m))
             clear_dma(0, 0, FB_W, LV_H);
         prev_grid = (uint8_t)m;
     }
-    if (m - GRID_LEVEL > GRID_LAST - GRID_LEVEL) {
-        stock_grid_draw(arg);
-        return;
-    }
-    if (in_lv) grid_draw(m);
+    grid_draw(m);
 }
 HOOK_CALL(0xA016C708, grid_draw_hook, 0xA004C3EC);
 HOOK_CALL(0xA004C5AE, grid_draw_hook, 0xA004C3EC);

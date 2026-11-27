@@ -56,7 +56,7 @@ From `crates/dp2m/src/catalog.rs` and `src/m6m/hud.c` (stock grids are `0..6`):
 | `10` | `square-1x1` | 1:1 Square + Level | vert 107 px matte + level |
 | `11` | `peaking` | Focus Peaking | 2×2 edge pass (`NV_PEAKCOL`, `NV_PEAKSENS`) |
 | `12` | `peaking-level` | Peaking + Level | peaking + level |
-| `13` | `zebras` | Zebras (95% IRE) | 2×2 animated stripe pass (`NV_ZEBRALVL`) |
+| `13` | `zebras` | Zebras | 2×2 animated stripe pass (`NV_ZEBRALVL`) |
 | `14` | `rgb-hist` | RGB Hist + Level | level + 64-bin RGB histogram |
 | `15` | `frame-7x6` | 7:6 + Level | vert 70 px matte + level |
 | `16` | `frame-4x3` | 4:3 + Level | vert 37 px matte + level |

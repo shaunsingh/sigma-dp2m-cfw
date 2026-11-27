@@ -68,7 +68,7 @@ fn full_dual_cpu_camera_flow() {
     cam.cpu_mut().w8(0xA093_9689, 1);  // 3D spectral engine ON
     cam.cpu_mut().w8(0xA093_968D, 1);  // grain ON
     cam.cpu_mut().w8(0xA093_968E, 1);  // halation ON
-    cam.cpu_mut().w8(0xA093_968A, 1);  // X3 Fill +0.3
+    cam.cpu_mut().w8(0xA093_968A, 1);  // X3 Fill level 1
     cam.set_color_mode(19);
 
     // Exercise custom HUD overlays (7=Level, 8=XPan+Level, 11=Peaking, 13=Zebras, 14=RGB Histogram, 17=False Color)
@@ -154,7 +154,7 @@ fn full_dual_cpu_camera_flow() {
 }
 
 #[test]
-fn unicorn_bit_exact_film_menu_osd() {
+fn film_menu_osd_golden() {
     let pkg = pkg_bytes();
     let mut cam = Camera::from_package(pkg).expect("boot DP2M simulator");
     cam.press(Key::Menu);
@@ -167,7 +167,7 @@ fn unicorn_bit_exact_film_menu_osd() {
         fnv = fnv.wrapping_mul(0x0000_0100_0000_01b3);
     }
     println!("arm9 OSD FNV1a64 = {fnv:#018x}");
-    assert_eq!(fnv, 0x16a0_6c94_433a_64d3, "arm9 OSD must be 100% bit-exact with Unicorn");
+    assert_eq!(fnv, 0x16a0_6c94_433a_64d3, "Film menu OSD plane differs from the golden hash");
 
     // Closing Menu via 2D DMA rect fill must clear the menu backdrop back to Live View OSD
     let menu_nz = osd.iter().filter(|&&b| b != 0).count();

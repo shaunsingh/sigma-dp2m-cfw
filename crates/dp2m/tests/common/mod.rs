@@ -25,7 +25,7 @@ pub fn with_fresh_build<T>(f: impl FnOnce(&Path, &Path) -> T) -> T {
     )));
     std::fs::create_dir(&out.0).expect("create private test build directory");
     // Cargo supplies the matching builder executable. Never consume a user's out/
-    // or local dp2m.fnl: integration suites and Unicorn goldens target dp2m.example.fnl.
+    // or local dp2m.fnl: integration suites and golden hashes target dp2m.example.fnl.
     let result = Command::new(env!("CARGO_BIN_EXE_dp2m"))
         .current_dir(&root)
         .args(["build", "--config", "dp2m.example.fnl", "--out"])

@@ -1,6 +1,6 @@
 # Build metrics & emulator benchmarks
 
-All performance numbers below were measured in the built-in ARM9 and FR80 emulators (`dp2m-emu`). Nothing in the current tree has been run on a real camera.
+All performance numbers below were measured in the built-in ARM9 and FR80 emulators (`dp2m-emu`). Build `a441ed3` was installed on a DP2 Merrill and used by hand (film captures with the expected MakerNote tags, menus, live-view looks, DOOM). Nothing has been measured on the camera.
 
 ## 1. Hardware & build invariants
 
@@ -32,7 +32,7 @@ Default config (`dp2m.example.fnl`: `24/36` films, `11/11` grids, DOOM enabled):
 | `10` | 1:1 Square + Level | `65,262` | `65,262` | `65,262` |
 | `11` | Focus Peaking | `626,068` | `368,622` | `368,622` |
 | `12` | Peaking + Level | `636,940` | `379,494` | `379,494` |
-| `13` | Zebras (95% IRE) | `150,312` | `411,114` | `241,726` |
+| `13` | Zebras | `150,312` | `411,114` | `241,726` |
 | `14` | RGB Hist + Level | `155,313` | `150,437` | `150,437` |
 | `17` | False Color (IRE) | `331,438` | `458,094` | `458,094` |
 

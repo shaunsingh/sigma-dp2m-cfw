@@ -31,7 +31,7 @@ const DIMS: &[(&str, usize, usize, &[u32])] = &[
 
 const NAMES: &[&str] = &[
     "Velvia 100", "FOV Classic Yellow", "Kodak Tri-X 400", "Teal & Orange", "Cinema", "Portra 800 +2",
-    "Mono Orange #21", "SD Custom LUT", "Rollei Retro 80S", "Fujicolor C200", "Zebras (95% IRE)",
+    "Mono Orange #21", "SD Custom LUT", "Rollei Retro 80S", "Fujicolor C200", "Zebras",
     "Fill -0.5 (Contrast)",
 ];
 const QS_ITEMS: &[&str] = &["Print Paper", "Film Engine", "Film Grain", "Halation", "X3 Fill Light"];

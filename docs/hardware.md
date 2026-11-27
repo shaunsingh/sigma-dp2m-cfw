@@ -1,6 +1,6 @@
 # Sigma DP2 Merrill (C78) hardware and firmware reference
 
-Static analysis of stock `DP2MV105.bin` (1.05, May 2013) and emulator verification. Nothing in the current tree has been run on a real camera. Detailed evidence and addresses are in [research/](research/).
+Static analysis of stock `DP2MV105.bin` (1.05, May 2013) and emulator verification. Build `a441ed3` was installed on a DP2 Merrill and used by hand (film captures with the expected MakerNote tags, menus, live-view looks, DOOM). Nothing has been measured on the camera; later commits have only run in the emulators. Detailed evidence and addresses are in [research/](research/).
 
 | Chip | Image | CPU | Role |
 | --- | --- | --- | --- |
@@ -285,10 +285,10 @@ The packed mode follows `packed_mode` in `crates/dp2m/src/catalog.rs` (film orde
 
 ## 4. Verification & hardware status
 
-Verified in emulation (`dp2m build`, `dp2m verify out`, `dp2m verify-m5 out/Firm.bin`, `dp2m-emu::sim` integration tests). Nothing in the current tree has run on a real camera; on-camera validation remains:
+Verified in emulation (`dp2m build`, `dp2m verify out`, `dp2m verify-m5 out/Firm.bin`, `dp2m-emu::sim` integration tests). Build `a441ed3` installed from 1.05 and ran on a camera (see the top of this file); still to check there:
 
-- Full `DP2MV200.bin` install from 1.05 and reinstall of stock 1.05.
-- Runtime label icons (QS, OSD, MODE, LV status, playback info) and film names in playback info / Sigma Photo Pro for `"Film NN"` JPG and X3F files.
+- Reinstall of stock 1.05.
+- Film names in playback info / Sigma Photo Pro for `"Film NN"` JPG and X3F files.
 - Custom QS film items, F1/F2 NOR persistence across power cycles, and payload `.bss` window `0xA1C00000..0xA1E00000` under LV, capture, playback, movie, and USB.
 - Actual on-camera M5 write times per `fx` combination and M6M overlay / DOOM frame rates.
 

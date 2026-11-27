@@ -1,4 +1,4 @@
-//! One-pass S3 xref indexer & static Thumb NVRAM register-tracking scanner (replaces `tools/re/{xref,nvram}.py`).
+//! One-pass S3 xref indexer & static Thumb NVRAM register-tracking scanner.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -244,7 +244,7 @@ pub struct NvCall {
     pub args: [Option<u32>; 3],
 }
 
-/// Native Thumb register-tracking NVRAM coverage scanner (no Capstone dependency).
+/// Thumb register-tracking NVRAM coverage scanner.
 pub fn nvram_scan(img: &Image, lo: u32, hi: u32, idx: &XrefIndex, maxn: usize) -> (Vec<NvAccess>, Vec<NvCall>) {
     let mut acc = Vec::new();
     let mut calls = Vec::new();

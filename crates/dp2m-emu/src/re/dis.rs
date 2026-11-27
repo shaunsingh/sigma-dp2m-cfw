@@ -1,4 +1,4 @@
-//! Native big-endian Thumb-1 & ARMv5TE disassembler with literal/call/string annotation (zero Capstone).
+//! Big-endian Thumb-1 & ARMv5TE disassembler with literal/call/string annotation.
 
 use std::collections::HashMap;
 

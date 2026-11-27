@@ -1,4 +1,4 @@
-//! Sigma Merrill X3F Type-4 Huffman CAMF decompressor and CMbT/CMbP/CMbM parser (`tools/x3f_camf.py`).
+//! Sigma Merrill X3F Type-4 Huffman CAMF decompressor and CMbT/CMbP/CMbM parser.
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum MatrixVals {

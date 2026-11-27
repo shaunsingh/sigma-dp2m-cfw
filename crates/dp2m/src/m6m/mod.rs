@@ -118,7 +118,7 @@ impl Toolchain<'_> {
 
     fn compile(&self, file: &Path) -> Result<std::path::PathBuf, String> {
         let name = file.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let opt = if matches!(name, "rt" | "hud" | "lv") { "-O2" } else { "-Os" };
+        let opt = if matches!(name, "rt" | "hud") { "-O2" } else { "-Os" };
         let obj = self.work.join(file.file_name().unwrap()).with_extension("o");
         Self::run(
             Command::new("clang")

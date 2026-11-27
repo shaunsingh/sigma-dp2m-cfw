@@ -147,7 +147,7 @@ pub const GRIDS: &[Grid] = &[
     Grid { slug: "square-1x1", label: "1:1 Square + Level" },
     Grid { slug: "peaking", label: "Focus Peaking" },
     Grid { slug: "peaking-level", label: "Peaking + Level" },
-    Grid { slug: "zebras", label: "Zebras (95% IRE)" },
+    Grid { slug: "zebras", label: "Zebras" },
     Grid { slug: "rgb-hist", label: "RGB Hist + Level" },
     Grid { slug: "frame-7x6", label: "7:6 + Level" },
     Grid { slug: "frame-4x3", label: "4:3 + Level" },

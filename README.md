@@ -9,7 +9,7 @@ The camera has two processors, both updated from one package:
 
 dp2m starts from the stock 1.05 package (`DP2MV105.bin`). It assembles FR80 code into free M5 flash, compiles a C/asm payload and links it into unused parts of the M6M image, and writes a new package for the stock updater.
 
-> **Status**: Nothing in the current tree has been run on a real camera. All verification suites, integration tests, and performance numbers are measured in the built-in ARM9 and FR80 emulators.
+> **Status**: Build `a441ed3` was installed on a DP2 Merrill and used by hand (film captures with the expected MakerNote tags, menus, live-view looks, DOOM). Nothing has been measured on the camera: all verification suites, integration tests, and performance numbers come from the built-in ARM9 and FR80 emulators.
 
 ## Features
 

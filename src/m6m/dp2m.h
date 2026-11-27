@@ -51,11 +51,10 @@ void stock_osd_commit(void);
 void stock_argb_clear(void);
 void stock_argb_commit(void);
 
-/* Clean 16 KB L1 D-cache by index, drain WB, invalidate D-cache via ITCM SWI 10 (ITCM 0x248 / image 0xA07FBE64;
- * I-cache untouched). Silicon restores r0-r2, banks lr_svc, and restores flags via movs pc, lr;
- * r0 stays in the clobber list only because crates/dp2m-emu/src/arm9.rs zeroes r0 on all Thumb svc #imm8. */
+/* ITCM SWI 10 (0x248, image 0xA07FBE64): clean the 16 KB D-cache by index, drain the write buffer, invalidate the
+ * D-cache; the I-cache is untouched. The handler restores r0-r2 and the flags; svc overwrites lr in SVC mode. */
 static inline void hw_dcache_sync(void) {
-    __asm__ volatile("svc #10" ::: "r0", "memory");
+    __asm__ volatile("svc #10" ::: "lr", "memory");
 }
 
 #define REG8(a)  (*(volatile uint8_t *)(a))

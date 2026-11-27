@@ -1,5 +1,4 @@
-//! Native Rust M6M verification suites (`m6m`, `custom`, `labels`) running directly on `arm9::Cpu`.
-//! Replaces Python+Unicorn `tools/verify/` (~40-50x faster, zero external deps).
+//! M6M verification suites (`m6m`, `custom`, `labels`) running the built image on `arm9::Cpu`.
 
 pub mod custom;
 pub mod labels;

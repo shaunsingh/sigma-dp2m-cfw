@@ -1,4 +1,4 @@
-//! Recursive-descent M6M code map, function liveness, and dead-region finder (`tools/re/liveness.py`).
+//! Recursive-descent M6M code map, function liveness, and dead-region finder.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 

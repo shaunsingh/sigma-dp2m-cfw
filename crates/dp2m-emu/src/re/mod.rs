@@ -1,4 +1,4 @@
-//! Native Rust M6M reverse-engineering engine (replaces Python `tools/re/`).
+//! M6M reverse-engineering engine behind `dp2m re`.
 
 pub mod dis;
 pub mod liveness;

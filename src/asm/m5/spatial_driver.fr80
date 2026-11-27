@@ -125,13 +125,17 @@ load_sd_lut:
     ldi:32  #SCRATCH_SD_NREAD, r0 ; ld @r0, r0 ; ldi:20 #0x1040, r1 ; cmp r1, r0 ; bne meta_done
     ldi:32  #SCRATCH_SD_LUT, r8
     ld      @r8, r0 ; ldi:32 #0x44324D4C, r1 ; cmp r1, r0 ; bne meta_done
-    ldi:8   #5, r13 ; ldub @(r13, r8), r0 ; st_ctx 48, r0
     ldi:8   #6, r13 ; ldub @(r13, r8), r0
     cmp     #2, r0 ; bhi meta_done
     ldi:8   #1, r1 ; cmp #2, r0 ; bne sd_cd ; ldi:8 #0, r1
 sd_cd:
     st_ctx  52, r1
     lsl     #8, r0 ; ldi:32 #VA_GRAIN_ENVS, r1 ; add r1, r0 ; st_ctx 44, r0
+    // clamp grain_amp <= 64 so ftg_enter (1024 - 15*scale) stays >= 0 and VA_CLAMP_CENTER stays in bounds
+    ldi:8   #5, r13 ; ldub @(r13, r8), r0
+    ldi:8   #64, r1 ; cmp r1, r0 ; bls sd_ga_ok ; mov r1, r0
+sd_ga_ok:
+    st_ctx  48, r0
     ldi:8   #7, r13 ; ldub @(r13, r8), r0 ; st_ctx 56, r0
     ldi:8   #8, r13 ; ldub @(r13, r8), r0 ; st_ctx 60, r0
     ld      @(r14, #-24), r0 ; ldi:8 #1, r1 ; and r1, r0 ; beq meta_done

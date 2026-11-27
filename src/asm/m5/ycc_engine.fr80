@@ -77,8 +77,13 @@
     ldi:32  #0x13579BDF, r0 ; st r0, @(r14, #-16)
 
     ldi:8   #12, r13 ; ld @(r13, r12), r0 ; ldi:8 #0xFC, r1 ; extsb r1 ; and r1, r0 ; st r0, @(r14, #-56)
+    cmp     #0, r0 ; ble early_ret
     lsr     #1, r0 ; st r0, @(r14, #-112)
     ldi:8   #16, r13 ; ld @(r13, r12), r0 ; ldi:8 #0xFE, r1 ; extsb r1 ; and r1, r0 ; st r0, @(r14, #-60)
+    cmp     #0, r0 ; bgt dims_ok
+early_ret:
+    jmp.far sub_ret
+dims_ok:
     ldi:8   #20, r13 ; ld @(r13, r12), r0 ; st r0, @(r14, #-64)
     ldi:8   #24, r13 ; ld @(r13, r12), r0 ; st r0, @(r14, #-68)
     ldi:8   #36, r13 ; ld @(r13, r12), r0 ; st r0, @(r14, #-76)
@@ -466,11 +471,10 @@ tile_3d_grain:
     st      r0, @(r14, #-52)
     mov     r6, r0 ; extsh r0 ; st r0, @(r14, #-48)
     asr2    #16, r6 ; st r6, @(r14, #-44)
-    ld      @(r14, #-20), r0 ; add r6, r0
-    ldi:8   #48, r1 ; sub r1, r0
-    ldi:8   #160, r1 ; cmp r1, r0 ; bhs t3g_slow_m
-    ldi:8   #31, r1 ; cmp r1, r6 ; bgt t3g_slow_m
+    // fast SWAR grain needs 1 <= 32 - dY <= 64 (-32 <= dY <= 31) so any borrow in r5 - r4 lands in 0xC0..0xFF
     ldi:8   #32, r4 ; sub r6, r4
+    mov     r4, r1 ; add2 #-1, r1
+    ldi:8   #64, r0 ; cmp r0, r1 ; bhs t3g_slow_m
     ldi:32  #0x01010101, r1 ; mul r1, r4 ; mov MDL, r4
     bra     ftg_enter
 t3g_slow_m:
@@ -508,7 +512,7 @@ tn3_nog:
 tn3_grain:
     ldi:8   #0, r0
     st      r0, @(r14, #-44) ; st r0, @(r14, #-48) ; st r0, @(r14, #-52)
-    ldi:8   #1, r4
+    ldi:32  #0x20202020, r4
 ftg_enter:
     ldi:32  #VA_CLAMP_CENTER, r3
     ld      @(r14, #-44), r0 ; add r0, r3
@@ -538,20 +542,16 @@ ftg_row:
 
     mov     r0, r6
     ld      @r7, r5
-    // r4: 0 = clamp_4, 1 = chk_mid (dY==0), >= 0x01010101 (unsigned) = fast SWAR sub
-    cmp     #1, r4 ; blo ftg_clamp_4 ; beq ftg_chk_mid
-    sub     r4, r5 ; add r0, r5 ; st r5, @r7
+    // r4: 0 = clamp_4, else (32 - dY) * 0x01010101 (1..64); verify all 4 bytes of r5 - r4 are in 0..191
+    cmp     #0, r4 ; beq ftg_clamp_4
+    mov     r5, r1 ; sub r4, r1
+    mov     r1, r12 ; lsl #1, r12 ; and r1, r12
+    ldi:32  #0x80808080, r13 ; and r13, r12 ; bne ftg_clamp_4
+    add     r0, r1 ; st r1, @r7
 ftg_row_next:
     cmp     r8, r7 ; bne ftg_luma_done
     ld      @(r14, #-64), r0 ; add r0, r7
     bra     ftg_row
-
-ftg_chk_mid:
-    mov     r5, r1 ; lsl #1, r1 ; eor r5, r1
-    mov     r1, r12 ; lsl #1, r12 ; or r12, r1
-    ldi:32  #0x80808080, r12 ; and r12, r1 ; cmp r12, r1 ; bne ftg_clamp_4
-    lsr     #2, r12 ; sub r12, r5 ; add r0, r5 ; st r5, @r7
-    bra     ftg_row_next
 
 ftg_clamp_4:
     st      r4, @(r14, #-20)

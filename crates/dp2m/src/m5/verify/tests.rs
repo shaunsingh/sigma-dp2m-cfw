@@ -29,6 +29,120 @@ fn pack_swar_signed_deltas() {
     }
 }
 
+#[test]
+fn tile_3d_grain_saturates_odd_pixels_without_cross_lane_borrow_or_carry() {
+    let s2 = firm();
+    // 64x32 aligned frame: even Y=128 (passes 4x2 coherence), odd Y in {0, 128, 255} (unchecked by check_4x2_coherence).
+    // Test dY in {0, +31, +32, -32, -33} (covers SWAR range boundaries [-32..=31] and clamp fallback):
+    // odd=0 must saturate to 0 without wrapping or borrowing -1 from the adjacent even pixel,
+    // and odd=255 must saturate to 255 without wrapping or carrying +1 into the adjacent even pixel.
+    for dy_lsb in [0i8, 31, 32, -32, -33] {
+        let mut sd = vec![0u8; D2ML_LEN];
+        sd[..16].copy_from_slice(b"D2ML\x01\x30\x00\x00\x00oddtest"); // grain_amp=48, profile=0 (neg), halo=0
+        let dy_q1 = (dy_lsb * 2) as u8;
+        for v in 0..(17 * 9 * 9) {
+            sd[0x10 + v * 3] = dy_q1;
+        }
+        for odd_y in [0u8, 128u8, 255u8] {
+            let mut img = Ycc { w: 64, h: 32, p: [vec![128; 64 * 32], vec![128; 32 * 32], vec![128; 32 * 32]] };
+            for r in 0..32usize {
+                for x in (1..64usize).step_by(2) {
+                    img.p[0][r * 64 + x] = odd_y;
+                }
+            }
+            let shot = run_driver(&s2, 191, (3 << 2) | 1, &img, Some(&sd), true).unwrap();
+            let call = shot.call.as_ref().expect("ycc pass ran");
+            let y00_post = (128 + i32::from(dy_lsb)).clamp(0, 255) as u32;
+            let env = s2[va_off(call.ctx[11] + y00_post)];
+            let scale = ((u32::from(env) * call.ctx[12]) >> 8) as i32;
+            assert!(scale > 10, "expected active grain scale, got {scale}");
+
+            // Exact scalar replay of ftg_row's xorshift32 (seed 0x1357_9BDF) with per-pixel saturation.
+            let mut prng = 0x1357_9BDFu32;
+            let mut expected_y = img.p[0].clone();
+            for by in (0..32usize).step_by(2) {
+                for bx in (0..64usize).step_by(4) {
+                    for dy in 0..2usize {
+                        prng ^= prng << 13;
+                        prng ^= prng >> 17;
+                        prng ^= prng << 5;
+                        for lane in 0..4usize {
+                            let byte = (prng >> (24 - lane * 8)) & 0xFF;
+                            let tri = ((byte & 0xF) + (byte >> 4)) as i32 - 15;
+                            let g = (scale * tri).div_euclid(32);
+                            let idx = (by + dy) * 64 + bx + lane;
+                            expected_y[idx] = (i32::from(img.p[0][idx]) + i32::from(dy_lsb) + g).clamp(0, 255) as u8;
+                        }
+                    }
+                }
+            }
+            assert_eq!(shot.out.p[0], expected_y, "dy={dy_lsb} odd_y={odd_y}: odd-pixel grain wrapped or contaminated adjacent even pixel");
+        }
+    }
+}
+
+#[test]
+fn sd_lut_clamps_grain_amp_and_rejects_bad_profile_atomically() {
+    let s2 = firm();
+    let img = Ycc { w: 64, h: 32, p: [vec![128; 64 * 32], vec![128; 32 * 32], vec![128; 32 * 32]] };
+
+    // Valid baseline at max documented grain_amp = 64.
+    let mut sd_max = vec![0u8; D2ML_LEN];
+    sd_max[..16].copy_from_slice(b"D2ML\x01\x40\x00\x00\x00maxamp\0");
+    let baseline = run_driver(&s2, 191, (3 << 2) | 1, &img, Some(&sd_max), true).unwrap();
+
+    // Out-of-range grain_amp (70 crosses 1024 - 15*scale < 0; 255 is max u8) must clamp to 64 at load time.
+    for bad_amp in [70u8, 255u8] {
+        let mut sd_bad = sd_max.clone();
+        sd_bad[5] = bad_amp;
+        let shot = run_driver(&s2, 191, (3 << 2) | 1, &img, Some(&sd_bad), true).unwrap();
+        let ctx = shot.call.as_ref().expect("ycc pass ran").ctx;
+        assert_eq!(ctx[12], 64, "grain_amp={bad_amp} was not clamped to 64");
+        assert_eq!(shot.out.p, baseline.out.p, "grain_amp={bad_amp} output diverged from clamped 64");
+    }
+
+    // Invalid grain_profile (> 2) must reject the SD header without leaving ctx+48 (grain_amp) clobbered.
+    let mut sd_bad_prof = sd_max.clone();
+    sd_bad_prof[5] = 55;
+    sd_bad_prof[6] = 9;
+    let shot = run_driver(&s2, 191, (2 << 2) | 1, &img, Some(&sd_bad_prof), false).unwrap();
+    let ctx = shot.call.as_ref().expect("ycc pass ran").ctx;
+    let default_amp = u32::from(Config::default().m5.sd_lut_defaults.meta()[0]);
+    assert_eq!(ctx[12], default_amp, "invalid grain_profile clobbered default grain_amp");
+}
+
+#[test]
+fn ycc_engine_zero_or_subtile_dims_do_not_write_outside_buffer() {
+    let s2 = firm();
+    let sample = Ycc::synth(64, 32);
+    // Exercise all four ycc_engine dispatch paths: Path A (3D), Path T (B&W toner), Path F (fill), Path B (general).
+    let cases = [
+        ("path_a_3d", COLOR_TEST_MODE, (1 << 2) | 1),
+        ("path_t_toner", BW_TEST_MODE, 1),
+        ("path_f_fill", COLOR_TEST_MODE, (1 << 5) | 1),
+        ("path_b_gen", COLOR_TEST_MODE, (1 << 5) | (7 << 2) | 1),
+    ];
+    for (name, cm, p1d) in cases {
+        let call = run_driver(&s2, cm, p1d, &sample, None, false).unwrap().call.expect("captured ctx");
+        for (w, h) in [(0u32, 0u32), (0, 8), (8, 0), (2, 8), (8, 1)] {
+            let sentinel = Ycc { w: 16, h: 8, p: [vec![0x5A; 16 * 8], vec![0x6B; 8 * 8], vec![0x7C; 8 * 8]] };
+            let (mut e, planes, si) = emu_job(&s2, &sentinel);
+            e.sdram[si].data.copy_from_slice(&call.scratch);
+            // Set V=true on entry to verify entry guard does not rely on stale V after `and`.
+            e.flags = (false, false, true, false);
+            let hdr = [IMG_VA[0], IMG_VA[1], IMG_VA[2], w, h, 16, 8];
+            for (i, v) in hdr.into_iter().chain(call.ctx[7..].iter().copied()).enumerate() {
+                e.w32(EMU_CTX + 4 * i as u32, v);
+            }
+            e.r[4] = EMU_CTX;
+            e.run(VA_YCC_SUB, 100_000).unwrap();
+            assert_eq!(e.r[15], EMU_SP, "{name} ({w}x{h}): stack imbalance");
+            let out = emu_out(&e, planes, &sentinel).unwrap();
+            assert_eq!(out.p, sentinel.p, "{name} ({w}x{h}): wrote outside zero/sub-tile buffer");
+        }
+    }
+}
+
 /// ycc engine insns & SDRAM / ROM data accesses per pixel pair for every fx x fill combo; `s/L` = engine
 /// seconds for a 4704x3136 capture at ~70M insns/s. `DP2M_REF_ASM=<dir>` (e.g. `git archive <rev> src/asm/m5`)
 /// also runs that engine & driver on the same ctx / input and diffs them; `DP2M_PROF=1` prints insns/pair per

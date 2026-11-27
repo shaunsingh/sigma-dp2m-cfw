@@ -266,3 +266,20 @@ fn qs_strip_hook
 1:  bx   lr
     .ltorg
     hook HOOK_BL, 0xA0043E9C, qs_strip_hook, 0x49F36940
+
+// QS scroll call 0xA0043EAA: ISO and Colour Mode share QS_STATE+6, but only the ISO
+// setter resets it. Clamp a foreign scroll before the stock 8-tile loop indexes rows.
+fn qs_scroll_clamp
+    cmp  r1, #8
+    bhs  1f
+    movs r2, #0
+    b    2f
+1:  movs r3, r1
+    subs r3, #8
+    cmp  r2, r3
+    bls  2f
+    movs r2, r3
+2:  ldr  r3, =0xA0043CC7
+    bx   r3
+    .ltorg
+    hook HOOK_BL, 0xA0043EAA, qs_scroll_clamp, 0xF7FFFF0C

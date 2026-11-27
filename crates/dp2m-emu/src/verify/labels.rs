@@ -1,4 +1,4 @@
-//! labels suite (138 checks): runtime-rendered BP4 label icons across all 6 classes,
+//! labels suite (146 checks): runtime-rendered BP4 label icons across all 6 classes,
 //! arena allocation & reset, stray-write hygiene, QS strip routing, LV status/info/menu icons.
 
 use std::cell::RefCell;
@@ -148,7 +148,11 @@ pub(crate) fn run_with_artifacts(b: &Build, r: &mut Report, artifacts: Option<&P
     if !b.has_all(&["label_icon", "cache", "arena", "lv_status_cm"]) {
         return Ok(false);
     }
-    for (site, sym) in [(stock::ICON_GET + 2, "icon_hook"), (stock::QS_STRIP_CHECK, "qs_strip_hook")] {
+    for (site, sym) in [
+        (stock::ICON_GET + 2, "icon_hook"),
+        (stock::QS_STRIP_CHECK, "qs_strip_hook"),
+        (0xA004_3EAA, "qs_scroll_clamp"),
+    ] {
         if b.syms.contains_key(sym) {
             r.eq(b.img.bl_target(site), Some(b.sym(sym)), format!("BL @ {site:#x} -> {sym}"));
         }
@@ -381,7 +385,11 @@ pub(crate) fn run_with_artifacts(b: &Build, r: &mut Report, artifacts: Option<&P
     let strip = |m: &mut Machine, slot: (u32, u32), cm: u32| -> Result<(u16, Vec<[u32; 7]>), String> {
         m.w16(stock::QS_STATE + 4, slot.0 as u16);
         m.w16(stock::QS_STATE + 8 + 2 * slot.0, slot.1 as u16);
-        m.w8(stock::NV_CM, cm as u8);
+        match slots[&slot].1 {
+            GET_CM => m.w8(stock::NV_CM, cm as u8),
+            GET_ISO => m.w8(stock::NV_ISO, cm as u8),
+            _ => {}
+        }
         m.wr(stock::OSD, &vec![0u8; 640 * 480]);
         blits.borrow_mut().clear();
         m.call_ext(stock::QS_STRIP, &[], &[], 200_000_000)?;
@@ -396,10 +404,73 @@ pub(crate) fn run_with_artifacts(b: &Build, r: &mut Report, artifacts: Option<&P
         let (scroll, bl) = strip(&mut m, cm_slot, values[sel])?;
         let tiles = bl.iter().filter(|x| x[3] == 54).count();
         r.check(
-            scroll as usize <= sel && sel <= scroll as usize + 7 && tiles == exp_tiles,
+            scroll as usize <= sel
+                && sel <= scroll as usize + 7
+                && scroll as usize + 8 <= n_rows
+                && tiles == exp_tiles,
             format!("QS strip cm {} (row {sel}/{n_rows}): scroll {scroll}, {tiles} tiles", values[sel]),
         );
     }
+
+    // Every scroll-routed table must have eight drawable rows and a null getter after its terminator.
+    for (&slot, &(initial_rows, getter)) in slots.iter().filter(|&(_, &(_, g))| g == GET_CM || g == GET_ISO) {
+        for step in if getter == GET_ISO { &[0u8, 1][..] } else { &[0u8][..] } {
+            m.w8(stock::NV_ISO_STEP, *step);
+            let rows = if getter == GET_ISO { m.call(stock::QS_SLOT_ROWS, &[slot.0, slot.1])? } else { initial_rows };
+            let n = m.call(stock::MENU_ROW_COUNT, &[rows])? as usize;
+            r.check(
+                n >= 8 && m.u32(rows + 32 * (n as u32 - 1) + 0x14) != 0 && m.u32(rows + 32 * n as u32 + 0x14) == 0,
+                format!("QS slot {slot:?} step {step}: {n} rows, valid last getter and null terminator"),
+            );
+        }
+    }
+
+    // Colour Mode leaves its long-list scroll in shared state. Focusing ISO must clamp it before
+    // the stock eight-iteration draw loop reaches the shorter table's null getter (blx 0).
+    let iso_slot = slots.iter().find(|&(_, &(_, g))| g == GET_ISO).map(|(&k, _)| k);
+    if !r.check(iso_slot.is_some(), "QS ISO slot found") {
+        return Ok(true);
+    }
+    let iso_slot = iso_slot.unwrap();
+    for (step, sel) in [(0u8, 2usize), (1, 19)] {
+        m.w8(stock::NV_ISO_STEP, step);
+        m.w16(stock::QS_STATE + 6, 0);
+        let (cm_scroll, _) = strip(&mut m, cm_slot, values[n_rows - 1])?;
+        let iso_rows = m.call(stock::QS_SLOT_ROWS, &[iso_slot.0, iso_slot.1])?;
+        let iso_n = m.call(stock::MENU_ROW_COUNT, &[iso_rows])? as usize;
+        let iso_value = m.u32(iso_rows + 32 * sel as u32 + 0x10);
+        let result = strip(&mut m, iso_slot, iso_value);
+        let ok = match result {
+            Ok((scroll, bl)) => {
+                let tiles = bl.iter().filter(|x| x[3] == 54).count();
+                scroll as usize <= sel
+                    && sel <= scroll as usize + 7
+                    && scroll as usize + 8 <= iso_n
+                    && tiles == 8
+            }
+            Err(_) => false,
+        };
+        r.check(
+            cm_scroll as usize + 8 == n_rows && ok,
+            format!("QS Colour Mode last row -> ISO step {step} row {sel}/{iso_n} stays in range"),
+        );
+    }
+
+    m.w8(stock::NV_ISO_STEP, 0);
+    let iso_rows = m.call(stock::QS_SLOT_ROWS, &[iso_slot.0, iso_slot.1])?;
+    let iso_value = m.u32(iso_rows + 32 * 2 + 0x10);
+    let mut stale_ok = true;
+    for stale in [2u16, 3, u16::MAX] {
+        m.w16(stock::QS_STATE + 6, stale);
+        match strip(&mut m, iso_slot, iso_value) {
+            Ok((scroll, bl)) => {
+                stale_ok &= scroll <= 1 && bl.iter().filter(|x| x[3] == 54).count() == 8;
+            }
+            Err(_) => stale_ok = false,
+        }
+    }
+    r.check(stale_ok, "QS ISO strip clamps stale scroll values 2, 3, and 0xffff");
+
     if let Some(&other) = slots.iter().find(|&(_, &(_, g))| g != GET_CM && g != GET_ISO).map(|(k, _)| k) {
         m.w16(stock::QS_STATE + 6, 0);
         let (_, bl) = strip(&mut m, other, values[0])?;

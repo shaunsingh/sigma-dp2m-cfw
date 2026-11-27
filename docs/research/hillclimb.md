@@ -13,10 +13,10 @@ All performance numbers below were measured in the built-in ARM9 and FR80 emulat
 
 Default config (`dp2m.example.fnl`: `24/36` films, `11/11` grids, DOOM enabled):
 
-### M5Slave FR80 (`Firm.bin`, checksum `0x32b300c0`)
-- **Code sizes**: `matrix=242 B`, `lutsel=56 B`, `mcas=140 B`, `ipc/exif=90 B`, `ycc_engine=3,974 B` (fits inside the 4 KB FR80 I-cache), `spatial_driver=2,494 B`.
-- **`dp2m verify-m5`**: 198 modes × 2 CS, signed CCMatrix, IPC/EXIF, `4704×3136` pyramid (`754,794` emulated insns), `4704×8` `fx 0..7` (`fx=7 fill=1`: `144` insns/pair, `18` SDRAM/pair), 256 `fx × fill × CS` stage runs, zero-collision `0x80100000`.
-- **`ycc_bench` (FR80 emulator)**: see [../hardware.md](../hardware.md#25-color-pipeline--d2ml-sd-card-3d-lut-format) for per-stage insns/pair (`B&W toner fx=0/1`: `23.0` insns/pair on `4704×8`; `fill=1 fx=0`: `29.9`; `fx=1`: `65.4`; `fx=7 fill=1`: `147.6`).
+### M5Slave FR80 (`Firm.bin`, checksum `0x32b2fb50`)
+- **Code sizes**: `matrix=242 B`, `lutsel=56 B`, `mcas=140 B`, `ipc/exif=90 B`, `ycc_engine=3,966 B` (fits inside the 4 KB FR80 I-cache), `spatial_driver=2,502 B`.
+- **`dp2m verify-m5`**: 198 modes × 2 CS, signed CCMatrix, IPC/EXIF, `4704×3136` pyramid (`754,794` emulated insns), `4704×8` `fx 0..7` (`fx=7 fill=1`: `146` insns/pair, `18` SDRAM/pair), 256 `fx × fill × CS` stage runs, zero-collision `0x80100000`.
+- **`ycc_bench` (FR80 emulator)**: see [../hardware.md](../hardware.md#25-color-pipeline--d2ml-sd-card-3d-lut-format) for per-stage insns/pair (`B&W toner fx=0/1`: `23.0` insns/pair on `4704×8`; `fill=1 fx=0`: `29.7`; `fx=1`: `65.2`; `fx=7 fill=1`: `146.3`).
 
 ### M6M ARM946E-S BE (`C78FRM.bin`)
 - **Payload**: `126` hooks, `118` strings, `42` menus, `431` rows (`codegen_all_36_films_and_subset_grids` also verifies `36/36` films + `11/11` grids link within budget).

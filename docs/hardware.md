@@ -54,8 +54,8 @@ See [research/updater.md](research/updater.md).
 | VA | Content |
 | --- | --- |
 | `0x005D0000..0x005D03C0` | hook stubs (table in 2.4) |
-| `0x005D03C0` | YCC engine (`src/asm/m5/ycc_engine.fr80`, `4,028` B) |
-| `0x005D1600` | spatial driver (`src/asm/m5/spatial_driver.fr80`, `2,510` B) |
+| `0x005D03C0` | YCC engine (`src/asm/m5/ycc_engine.fr80`, `3,966` B) |
+| `0x005D1600` | spatial driver (`src/asm/m5/spatial_driver.fr80`, `2,502` B) |
 | `0x005D2000` / `0x005D2100` | halation LUT / grain envelopes |
 | `0x005D2400` / `0x005D2800` / `0x005D2900` | per-mode meta / mono table / MCAS identity |
 | `0x005D2B00` / `0x005D2C00` | SD LUT path template / clamp LUT |

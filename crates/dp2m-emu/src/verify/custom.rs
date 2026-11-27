@@ -1,4 +1,4 @@
-//! custom suite (130 checks): F1/F2 custom exposure modes, NOR persistence, setter transitions,
+//! custom suite (133 checks): F1/F2 custom exposure modes, NOR persistence, setter transitions,
 //! slot save/compare/reload, LV widget 0x2E, menu 0x05, MODE screen 23, Custom Mode Setting screen 31.
 
 use std::cell::RefCell;
@@ -340,6 +340,27 @@ pub fn run(b: &Build, r: &mut Report) -> Result<bool, String> {
         let diff = call(&mut m, 0xA016_7618, &[i as u32])?;
         r.check(same == 1 && diff == 0 && m.cpu.write_log().is_empty(), format!("compare slot {i}: same={same} diff={diff}"));
     }
+    let ptrs: Vec<u32> = [0u32, 1, 2, 3, 4, 5, 0xFF]
+        .into_iter()
+        .map(|i| call(&mut m, b.sym("slot_ptr"), &[i]))
+        .collect::<Result<_, _>>()?;
+    r.eq(
+        ptrs,
+        vec![SLOTS, SLOTS + SZ as u32, SLOTS + 2 * SZ as u32, cs + 4, cs + 4 + SZ as u32, cs + 4, cs + 4],
+        "slot_ptr(0..4) exact; out-of-range indices 5 & 0xff clamp to cs.slot[0]",
+    );
+    let mut oob_save_clean = true;
+    for bad in [5u32, 0xFF] {
+        call(&mut m, b.sym("slot_save"), &[bad])?;
+        oob_save_clean &= m.cpu.write_log().is_empty();
+    }
+    r.check(oob_save_clean, "slot_save(5 / 0xff) performs zero writes");
+    m.wr(stock::NV_CUR, &slot_rd(&m, 3));
+    let oob_cmp = call(&mut m, 0xA016_7618, &[5])?;
+    r.check(
+        oob_cmp == 1 && m.cpu.write_log().is_empty(),
+        format!("compare slot 5 stays in bounds via clamped slot_ptr (ret={oob_cmp})"),
+    );
 
     // LV widget 0x2E
     for mode in 0..11u32 {

@@ -1,7 +1,7 @@
-//! labels suite (146 checks): runtime-rendered BP4 label icons across all 6 classes,
+//! labels suite (160 checks): runtime-rendered BP4 label icons across all 6 classes,
 //! arena allocation & reset, stray-write hygiene, QS strip routing, LV status/info/menu icons.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::BufWriter;
@@ -152,11 +152,13 @@ pub(crate) fn run_with_artifacts(b: &Build, r: &mut Report, artifacts: Option<&P
         (stock::ICON_GET + 2, "icon_hook"),
         (stock::QS_STRIP_CHECK, "qs_strip_hook"),
         (0xA004_3EAA, "qs_scroll_clamp"),
+        (0xA004_3D06, "qs_sel_clamp"),
     ] {
         if b.syms.contains_key(sym) {
             r.eq(b.img.bl_target(site), Some(b.sym(sym)), format!("BL @ {site:#x} -> {sym}"));
         }
     }
+    r.eq(b.img.u16(0xA004_D51A), 0xE001, "0xA004D51A stays stock (0xA004D4F0 returns n on no-match)");
 
     let mut m = Machine::new(&b.img, 0);
     let arena = b.sym_info("arena");
@@ -354,6 +356,8 @@ pub(crate) fn run_with_artifacts(b: &Build, r: &mut Report, artifacts: Option<&P
     m.stub(stock::STRIP_BG_CLEAR, None);
     let in_arena = |p: u32| p >= a0 && p < a1;
     let blits: Rc<RefCell<Vec<[u32; 7]>>> = Rc::new(RefCell::new(Vec::new()));
+    let fills: Rc<RefCell<Vec<[u16; 4]>>> = Rc::new(RefCell::new(Vec::new()));
+    let null_calls = Rc::new(Cell::new(0u32));
     {
         let bl = blits.clone();
         m.watch(stock::BLIT, move |c| {
@@ -361,6 +365,21 @@ pub(crate) fn run_with_artifacts(b: &Build, r: &mut Report, artifacts: Option<&P
                 c.r[0], c.r[1], c.r[2], c.r[3],
                 c.r32(c.r[13]), c.r32(c.r[13] + 4), c.r32(c.r[13] + 8),
             ]);
+        });
+    }
+    {
+        let fl = fills.clone();
+        m.watch(stock::FILL_BOX, move |c| {
+            let p = c.r[0];
+            fl.borrow_mut().push(core::array::from_fn(|k| c.r16_be(p + (2 * k) as u32)));
+        });
+    }
+    {
+        let nc = null_calls.clone();
+        m.watch(0xA004_3D62, move |c| {
+            if c.r[0] == 0 {
+                nc.set(nc.get() + 1);
+            }
         });
     }
 
@@ -392,6 +411,8 @@ pub(crate) fn run_with_artifacts(b: &Build, r: &mut Report, artifacts: Option<&P
         }
         m.wr(stock::OSD, &vec![0u8; 640 * 480]);
         blits.borrow_mut().clear();
+        fills.borrow_mut().clear();
+        null_calls.set(0);
         m.call_ext(stock::QS_STRIP, &[], &[], 200_000_000)?;
         Ok((m.u16(stock::QS_STATE + 6), blits.borrow().clone()))
     };
@@ -470,6 +491,146 @@ pub(crate) fn run_with_artifacts(b: &Build, r: &mut Report, artifacts: Option<&P
         }
     }
     r.check(stale_ok, "QS ISO strip clamps stale scroll values 2, 3, and 0xffff");
+
+    // Narrow QS strip clamp at 0xA0043D06 (`qs_sel_clamp`): stock 0xA004D4F0 stays unmodified
+    // (returning row count n on no-match for callers like QS slot icons at 0xA00439C4), while
+    // the strip clamps sel >= n to n-1 so the 8-tile loop never dereferences the terminator.
+    const MENU_SEL: u32 = 0xA004_D4F0;
+    const QS_SLOT_ICONS: u32 = 0xA004_3976;
+    let qs_sel_clamp = b.sym("qs_sel_clamp");
+    m.w8(stock::NV_CM, values[mid_idx] as u8);
+    r.eq(m.call(MENU_SEL, &[rows])?, mid_idx as u32, "0xA004D4F0 matches valid Colour Mode row");
+    r.eq(m.call(MENU_SEL, &[0])?, u32::MAX, "0xA004D4F0(NULL) keeps stock -1 return");
+    r.eq(
+        (m.call(qs_sel_clamp, &[0])?, m.call(qs_sel_clamp, &[rows])?),
+        (u32::MAX, mid_idx as u32),
+        "qs_sel_clamp preserves -1 on NULL and passes through valid selection",
+    );
+
+    // Valid selections (first, middle, last row) keep exact stock scroll and highlight the right tile.
+    for sel in [0usize, mid_idx, n_rows - 1] {
+        let mut ok = true;
+        for init_scroll in [0u16, (n_rows - 8) as u16] {
+            m.w16(stock::QS_STATE + 6, init_scroll);
+            let (scroll, bl) = strip(&mut m, cm_slot, values[sel])?;
+            let tiles: Vec<[u32; 7]> = bl.into_iter().filter(|x| x[3] == 54).collect();
+            let exp_scroll = if sel < init_scroll as usize {
+                sel as u16
+            } else if init_scroll as usize + 7 < sel {
+                (sel - 7) as u16
+            } else {
+                init_scroll
+            };
+            let hl = fills.borrow();
+            let tile_idx = sel.wrapping_sub(scroll as usize);
+            ok &= scroll == exp_scroll
+                && tiles.len() == 8
+                && null_calls.get() == 0
+                && hl.len() == 1
+                && tile_idx < tiles.len()
+                && hl[0][0] as u32 + 2 == tiles[tile_idx][1];
+        }
+        r.check(
+            ok,
+            format!("QS strip valid cm {} (row {sel}/{n_rows}) keeps stock scroll and highlights exact tile", values[sel]),
+        );
+    }
+
+    // No-match values (out-of-range NVRAM and disabled catalog film absent from m_9) leave
+    // 0xA004D4F0 returning n, clamp strip scroll to n-8 with 8 tiles, no null call, no highlight.
+    let disabled_cm = b.catalog.films.iter().map(|f| f.cm).find(|cm| !values.contains(cm));
+    for (tag, bad_cm) in [
+        ("corrupt NVRAM", 0x63u32),
+        ("corrupt NVRAM", 0xFF),
+    ]
+    .into_iter()
+    .chain(disabled_cm.map(|cm| ("disabled catalog film", cm)))
+    {
+        m.w8(stock::NV_CM, bad_cm as u8);
+        let sel = m.call(MENU_SEL, &[rows])?;
+        let clamped = m.call(qs_sel_clamp, &[rows])?;
+        let mut strip_ok = true;
+        for init_scroll in [0u16, (n_rows - 8) as u16] {
+            m.w16(stock::QS_STATE + 6, init_scroll);
+            match strip(&mut m, cm_slot, bad_cm) {
+                Ok((scroll, bl)) => {
+                    strip_ok &= scroll == (n_rows - 8) as u16
+                        && bl.iter().filter(|x| x[3] == 54).count() == 8
+                        && fills.borrow().is_empty()
+                        && null_calls.get() == 0;
+                }
+                Err(_) => strip_ok = false,
+            }
+        }
+        r.check(
+            sel == n_rows as u32 && clamped == (n_rows - 1) as u32 && strip_ok,
+            format!("QS Colour Mode {tag} ({bad_cm:#x}): 0xA004D4F0={sel}, clamped={clamped}, 8 tiles, no highlight"),
+        );
+    }
+
+    m.w8(stock::NV_ISO_STEP, 1);
+    let iso3_rows = m.call(stock::QS_SLOT_ROWS, &[iso_slot.0, iso_slot.1])?;
+    let iso3_n = m.call(stock::MENU_ROW_COUNT, &[iso3_rows])? as usize;
+    for bad_iso in [0x19u32, 0xFF] {
+        m.w8(stock::NV_ISO, bad_iso as u8);
+        let sel = m.call(MENU_SEL, &[iso3_rows])?;
+        let clamped = m.call(qs_sel_clamp, &[iso3_rows])?;
+        let mut strip_ok = true;
+        for init_scroll in [0u16, (iso3_n - 8) as u16] {
+            m.w16(stock::QS_STATE + 6, init_scroll);
+            match strip(&mut m, iso_slot, bad_iso) {
+                Ok((scroll, bl)) => {
+                    strip_ok &= scroll == (iso3_n - 8) as u16
+                        && bl.iter().filter(|x| x[3] == 54).count() == 8
+                        && fills.borrow().is_empty()
+                        && null_calls.get() == 0;
+                }
+                Err(_) => strip_ok = false,
+            }
+        }
+        r.check(
+            sel == iso3_n as u32 && clamped == (iso3_n - 1) as u32 && strip_ok,
+            format!("QS ISO 1/3-EV no-match {bad_iso:#x}: 0xA004D4F0={sel}, clamped={clamped}, 8 tiles, no highlight"),
+        );
+    }
+
+    // QS slot icon path 0xA00439C4 stays stock on no-match: zero terminator yields icon 0 -> no blit.
+    m.load_nv_defaults();
+    m.w16(stock::QS_STATE + 4, 0);
+    let slot0_xy = (m.u16(stock::QS_STATE + 0x5C) as u32, m.u16(stock::QS_STATE + 0x5E) as u32);
+    blits.borrow_mut().clear();
+    m.call_ext(QS_SLOT_ICONS, &[], &[], 100_000_000)?;
+    let def_slot_blits: Vec<[u32; 4]> = blits.borrow().iter().map(|x| [x[1], x[2], x[3], x[4]]).collect();
+    let t_e8 = m.call(stock::GET_MENU_TABLE, &[0xE8])?;
+    let slot0_set = m.u32(t_e8 + 0x18) & !1;
+    m.call(slot0_set, &[0xFFFF])?;
+    blits.borrow_mut().clear();
+    m.call_ext(QS_SLOT_ICONS, &[], &[], 100_000_000)?;
+    let nomatch_slot_blits: Vec<[u32; 4]> = blits.borrow().iter().map(|x| [x[1], x[2], x[3], x[4]]).collect();
+    let mut stock_m = Machine::new(&b.stock, 0);
+    stock_m.load_nv_defaults();
+    let stock_blits: Rc<RefCell<Vec<[u32; 4]>>> = Rc::new(RefCell::new(Vec::new()));
+    {
+        let sb = stock_blits.clone();
+        stock_m.watch(stock::BLIT, move |c| {
+            sb.borrow_mut().push([c.r[1], c.r[2], c.r[3], c.r32(c.r[13])]);
+        });
+    }
+    stock_m.w16(stock::QS_STATE + 4, 0);
+    stock_m.call(slot0_set, &[0xFFFF])?;
+    stock_m.call_ext(QS_SLOT_ICONS, &[], &[], 100_000_000)?;
+    r.check(
+        def_slot_blits.len() == 4
+            && def_slot_blits.iter().any(|b| (b[0], b[1]) == slot0_xy)
+            && nomatch_slot_blits.len() == 3
+            && !nomatch_slot_blits.iter().any(|b| (b[0], b[1]) == slot0_xy)
+            && nomatch_slot_blits == *stock_blits.borrow(),
+        format!(
+            "QS slot icons (0xA00439C4): default draws 4, no-match draws {} without slot 0 (matches stock)",
+            nomatch_slot_blits.len()
+        ),
+    );
+    m.load_nv_defaults();
 
     if let Some(&other) = slots.iter().find(|&(_, &(_, g))| g != GET_CM && g != GET_ISO).map(|(k, _)| k) {
         m.w16(stock::QS_STATE + 6, 0);

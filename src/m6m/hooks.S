@@ -283,3 +283,22 @@ fn qs_scroll_clamp
     bx   r3
     .ltorg
     hook HOOK_BL, 0xA0043EAA, qs_scroll_clamp, 0xF7FFFF0C
+
+// QS strip selection call 0xA0043D06 (`bl 0xA004D4F0`): stock 0xA004D4F0 returns row count n
+// on no-match; clamp sel >= n (signed, keeping -1) to n-1 so the 8-tile loop stays in bounds
+// without altering 0xA004D4F0 for other callers (e.g. QS slot icons at 0xA00439C4).
+fn qs_sel_clamp
+    push {r1, r2, r3, r4, r5, lr}
+    movs r4, r0
+    ldr  r3, =0xA004D4D7
+    blx  r3
+    movs r5, r0
+    movs r0, r4
+    ldr  r3, =0xA004D4F1
+    blx  r3
+    cmp  r0, r5
+    blt  1f
+    subs r0, r5, #1
+1:  pop  {r1, r2, r3, r4, r5, pc}
+    .ltorg
+    hook HOOK_BL, 0xA0043D06, qs_sel_clamp, 0xF009FBF3

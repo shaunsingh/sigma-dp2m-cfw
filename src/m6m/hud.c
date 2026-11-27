@@ -314,16 +314,22 @@ static void peaking_pair_slow(const uint8_t * restrict r0, uint32_t * restrict o
     const uint8_t * restrict r2 = r0 + 4u * FB_W;
     const uint8_t * restrict r3 = r0 + 6u * FB_W;
     uint32_t * restrict o0b = o0a + FB_W;
-    int32_t c_m = r1[-4], c0 = r1[-2], c1 = r1[0], c2 = r1[2], c3 = r1[4], c_p = r1[6];
-    int32_t d_m = r2[-4], d0 = r2[-2], d1 = r2[0], d2 = r2[2], d3 = r2[4], d_p = r2[6];
-    peak_store(c_m - c1, (int32_t)r0[-2] - d0, o0a + 0, on, thresh);
-    peak_store(c0  - c2, (int32_t)r0[0]  - d1, o0a + 1, on, thresh);
-    peak_store(c1  - c3, (int32_t)r0[2]  - d2, o0a + 2, on, thresh);
-    peak_store(c2  - c_p,(int32_t)r0[4]  - d3, o0a + 3, on, thresh);
-    peak_store(d_m - d1, c0 - (int32_t)r3[-2], o0b + 0, on, thresh);
-    peak_store(d0  - d2, c1 - (int32_t)r3[0],  o0b + 1, on, thresh);
-    peak_store(d1  - d3, c2 - (int32_t)r3[2],  o0b + 2, on, thresh);
-    peak_store(d2  - d_p,c3 - (int32_t)r3[4],  o0b + 3, on, thresh);
+    /* Adjacent calls share two samples, keeping cross-group bytes live for at most three calls. */
+    int32_t c_m = r1[-4], c1 = r1[0], d0 = r2[-2];
+    peak_store(c_m - c1, (int32_t)r0[-2] - d0, o0a + 0, on, thresh);       /* A0 */
+    int32_t d2 = r2[2];
+    peak_store(d0  - d2, c1 - (int32_t)r3[0],  o0b + 1, on, thresh);       /* B1 */
+    int32_t c3 = r1[4];
+    peak_store(c1  - c3, (int32_t)r0[2] - d2,  o0a + 2, on, thresh);       /* A2 */
+    int32_t d_p = r2[6];
+    peak_store(d2  - d_p, c3 - (int32_t)r3[4], o0b + 3, on, thresh);       /* B3 */
+    int32_t c0 = r1[-2], c2 = r1[2], d1 = r2[0];
+    peak_store(c0  - c2, (int32_t)r0[0] - d1,  o0a + 1, on, thresh);       /* A1 */
+    int32_t d_m = r2[-4];
+    peak_store(d_m - d1, c0 - (int32_t)r3[-2], o0b + 0, on, thresh);       /* B0 */
+    int32_t c_p = r1[6], d3 = r2[4];
+    peak_store(c2  - c_p,(int32_t)r0[4] - d3,  o0a + 3, on, thresh);       /* A3 */
+    peak_store(d1  - d3, c2 - (int32_t)r3[2],  o0b + 2, on, thresh);       /* B2 */
 }
 
 // per-frame overlays run in ARM mode on a DMA-zeroed ARGB back-buffer; only active edge/zebra pixels write SDRAM
@@ -581,8 +587,8 @@ static void draw_zebras_dual_c(const uint8_t *Y, uint32_t phase, uint32_t hi_thr
 }
 
 __attribute__((noinline, target("arm")))
-static void draw_zebras_dual_arm(const uint8_t *Y, uint32_t phase, uint32_t hi_thresh) {
-    uint32_t addh = 256u - hi_thresh;
+static void draw_zebras_dual_arm(const uint8_t *Y, uint32_t phase) {
+    uint32_t addh = 256u - ZEBRA_THRESH;
     uint32_t add_hi = (addh << 16) | addh;
     const uint32_t *rw = (const uint32_t *)(const void *)Y;
     uint32_t *f0 = (uint32_t *)(void *)ARGB_FB;
@@ -747,7 +753,7 @@ static void draw_zebras(const uint8_t *Y) {
     if (lvl > 3u) lvl = 0u;
     uint32_t phase = lv_planes.fcnt & 7u;
     if (lvl == 3u) {
-        draw_zebras_dual_arm(Y, phase, ZEBRA_THRESH);
+        draw_zebras_dual_arm(Y, phase);
         return;
     }
     uint32_t thresh = lvl == 1u ? 230u : lvl == 2u ? 252u : ZEBRA_THRESH;
@@ -774,7 +780,8 @@ static const uint32_t fc_lut32[64] = {
     0xFE1CFE1Cu, 0xFE1CFE1Cu, 0xFE1CFE1Cu, 0xFE1CFE1Cu, 0xF11EF11Eu, 0xF11EF11Eu, 0xF11EF11Eu, 0xF11EF11Eu,
 };
 
-// 4-word (16 LCD px) ldmia false-color pass with midtone zero-block skip on DMA-zeroed ARGB_FB
+// 4-word (16 LCD px) false-color pass: skip all-zero LUT blocks and burst-store every word
+// in nonzero blocks. The caller's DMA-zeroed ARGB_FB makes writes of zero LUT words exact.
 __attribute__((noinline, target("arm"), section(".lv_text.fc")))
 static void draw_false_color_arm(const uint8_t *Y) {
     const uint32_t *rw = (const uint32_t *)(const void *)Y;
@@ -784,71 +791,52 @@ static void draw_false_color_arm(const uint8_t *Y) {
         register uint32_t r_rp   __asm__("r11") = (uint32_t)(uintptr_t)rw;
         register uint32_t r_o0   __asm__("r8")  = (uint32_t)(uintptr_t)f0;
         register uint32_t r_n    __asm__("lr")  = FB_W / 16u;
-        register uint32_t r_mask __asm__("r6")  = mask;
-        register uint32_t r_lut  __asm__("r7")  = (uint32_t)(uintptr_t)fc_lut32;
+        register uint32_t r_lut  __asm__("r9")  = (uint32_t)(uintptr_t)fc_lut32;
+        register uint32_t r_mask __asm__("r10") = mask;
         __asm__ volatile(
             "1:\n\t"
             "ldmia r11!, {r0, r1, r2, r3}\n\t"
-            "and r4, r6, r0, lsr #8\n\t"
-            "and r0, r6, r0, lsr #24\n\t"
-            "ldr r0, [r7, r0]\n\t"
-            "ldr r4, [r7, r4]\n\t"
-            "and r5, r6, r1, lsr #8\n\t"
-            "and r1, r6, r1, lsr #24\n\t"
-            "ldr r1, [r7, r1]\n\t"
-            "ldr r5, [r7, r5]\n\t"
-            "and r9, r6, r2, lsr #8\n\t"
-            "and r2, r6, r2, lsr #24\n\t"
-            "ldr r2, [r7, r2]\n\t"
-            "ldr r9, [r7, r9]\n\t"
-            "and r10, r6, r3, lsr #8\n\t"
-            "and r3, r6, r3, lsr #24\n\t"
-            "ldr r3, [r7, r3]\n\t"
-            "ldr r10, [r7, r10]\n\t"
-            "orr r12, r0, r4\n\t"
+            "and r12, r10, r0, lsr #24\n\t"
+            "ldr r4, [r9, r12]\n\t"
+            "and r12, r10, r0, lsr #8\n\t"
+            "ldr r5, [r9, r12]\n\t"
+            "and r12, r10, r1, lsr #24\n\t"
+            "ldr r6, [r9, r12]\n\t"
+            "and r12, r10, r1, lsr #8\n\t"
+            "ldr r7, [r9, r12]\n\t"
+            "and r12, r10, r2, lsr #24\n\t"
+            "ldr r0, [r9, r12]\n\t"
+            "and r12, r10, r2, lsr #8\n\t"
+            "ldr r1, [r9, r12]\n\t"
+            "and r12, r10, r3, lsr #24\n\t"
+            "ldr r2, [r9, r12]\n\t"
+            "and r12, r10, r3, lsr #8\n\t"
+            "ldr r3, [r9, r12]\n\t"
+            "orr r12, r4, r5\n\t"
+            "orr r12, r12, r6\n\t"
+            "orr r12, r12, r7\n\t"
+            "orr r12, r12, r0\n\t"
             "orr r12, r12, r1\n\t"
-            "orr r12, r12, r5\n\t"
             "orr r12, r12, r2\n\t"
-            "orr r12, r12, r9\n\t"
-            "orr r12, r12, r3\n\t"
-            "orrs r12, r12, r10\n\t"
+            "orrs r12, r12, r3\n\t"
             "bne 2f\n\t"
             "add r8, r8, #32\n\t"
             "subs lr, lr, #1\n\t"
             "bne 1b\n\t"
             "b 3f\n\t"
             "2:\n\t"
-            "cmp r0, #0\n\t"
-            "strne r0, [r8, #0]\n\t"
-            "strne r0, [r8, #0x500]\n\t"
-            "cmp r4, #0\n\t"
-            "strne r4, [r8, #4]\n\t"
-            "strne r4, [r8, #0x504]\n\t"
-            "cmp r1, #0\n\t"
-            "strne r1, [r8, #8]\n\t"
-            "strne r1, [r8, #0x508]\n\t"
-            "cmp r5, #0\n\t"
-            "strne r5, [r8, #12]\n\t"
-            "strne r5, [r8, #0x50c]\n\t"
-            "cmp r2, #0\n\t"
-            "strne r2, [r8, #16]\n\t"
-            "strne r2, [r8, #0x510]\n\t"
-            "cmp r9, #0\n\t"
-            "strne r9, [r8, #20]\n\t"
-            "strne r9, [r8, #0x514]\n\t"
-            "cmp r3, #0\n\t"
-            "strne r3, [r8, #24]\n\t"
-            "strne r3, [r8, #0x518]\n\t"
-            "cmp r10, #0\n\t"
-            "strne r10, [r8, #28]\n\t"
-            "strne r10, [r8, #0x51c]\n\t"
-            "add r8, r8, #32\n\t"
+            /* Ascending register lists are output order: r4-r7 then r0-r3. */
+            "add r12, r8, #0x500\n\t"
+            "stmia r8!, {r4, r5, r6, r7}\n\t"
+            "stmia r8!, {r0, r1, r2, r3}\n\t"
+            "stmia r12!, {r4, r5, r6, r7}\n\t"
+            "stmia r12, {r0, r1, r2, r3}\n\t"
             "subs lr, lr, #1\n\t"
             "bne 1b\n\t"
             "3:\n\t"
             : "+r"(r_rp), "+r"(r_o0), "+r"(r_n)
-            : "r"(r_mask), "r"(r_lut)
-            : "r0", "r1", "r2", "r3", "r4", "r5", "r9", "r10", "r12", "cc", "memory");
+            : "r"(r_lut), "r"(r_mask)
+            : "r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7", "r12", "cc", "memory");
     }
 }
 

@@ -1,4 +1,4 @@
-//! m6m suite (286 checks): invariants, hooks, menus, strings, NVRAM settings, bracketing,
+//! m6m suite (299 checks): invariants, hooks, menus, strings, NVRAM settings, bracketing,
 //! auto-ISO min shutter, IPC packing, makernotes, Live View B2Y, Y-cap, HUD overlays, updater & package.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1143,6 +1143,85 @@ fn check_hud(b: &Build, r: &mut Report, peakcol_addr: u32, peaksens_addr: u32, z
         med_ok && high_ok && low_ok && auto_1x && auto_mf,
         "grid 11 peaking sensitivity: Med(44)/High(24)/Low(72) & Auto MF-magnify boost",
     );
+    // Independent scalar full-frame peaking oracle, including the four odd-parity border
+    // stores and both even-parity block groups. The reorder must preserve every byte.
+    let peak_expected = |y: &[u8], on: u16, thresh: u32| {
+        let mut out = vec![0u8; 640 * 424 * 2];
+        let mut paint = |row: usize, word: usize| {
+            for rr in [row, row + 1] {
+                for x in [2 * word, 2 * word + 1] {
+                    let o = (rr * 640 + x) * 2;
+                    out[o..o + 2].copy_from_slice(&on.to_be_bytes());
+                }
+            }
+        };
+        let hit = |gx: i32, gy: i32| (gx.abs() + gy.abs()) as u32 >= thresh;
+        for s in 0..105usize {
+            let (row0, row2, row4, row6) = (4 * s * 640, (4 * s + 2) * 640, (4 * s + 4) * 640, (4 * s + 6) * 640);
+            let borders = [
+                (2 + 4 * s, 1, i32::from(y[row2 + 1]) - i32::from(y[row2 + 5]), i32::from(y[row0 + 2]) - i32::from(y[row4 + 2])),
+                (2 + 4 * s, 2, i32::from(y[row2 + 2]) - i32::from(y[row2 + 6]), i32::from(y[row0 + 5]) - i32::from(y[row4 + 5])),
+                (4 + 4 * s, 1, i32::from(y[row4 + 1]) - i32::from(y[row4 + 5]), i32::from(y[row2 + 2]) - i32::from(y[row6 + 2])),
+                (4 + 4 * s, 2, i32::from(y[row4 + 2]) - i32::from(y[row4 + 6]), i32::from(y[row2 + 5]) - i32::from(y[row6 + 5])),
+            ];
+            for (row, word, gx, gy) in borders {
+                if hit(gx, gy) {
+                    paint(row, word);
+                }
+            }
+            for i in 0..79usize {
+                let base = 4 * s * 640 + 8 + 8 * i;
+                for k in 0..4usize {
+                    let word = 3 + 4 * i + k;
+                    let gx_a = i32::from(y[base - 4 + 2 * k + 1280]) - i32::from(y[base + 2 * k + 1280]);
+                    let gy_a = i32::from(y[base - 2 + 2 * k]) - i32::from(y[base - 2 + 2 * k + 2560]);
+                    if hit(gx_a, gy_a) {
+                        paint(2 + 4 * s, word);
+                    }
+                    let gx_b = i32::from(y[base - 4 + 2 * k + 2560]) - i32::from(y[base + 2 * k + 2560]);
+                    let gy_b = i32::from(y[base - 2 + 2 * k + 1280]) - i32::from(y[base - 2 + 2 * k + 3840]);
+                    if hit(gx_b, gy_b) {
+                        paint(4 + 4 * s, word);
+                    }
+                }
+            }
+        }
+        out
+    };
+    let dense_y: Vec<u8> = (0..424)
+        .flat_map(|y| (0..640).map(move |x| {
+            let mut n = (x as u32).wrapping_mul(0x045D_9F3B) ^ (y as u32).wrapping_mul(0x27D4_EB2D);
+            n ^= n >> 16;
+            n as u8
+        }))
+        .collect();
+    let boundary_y = |th: u8| {
+        let mut y = vec![80u8; 640 * 424];
+        for row in y.as_chunks_mut::<640>().0 {
+            row[160..200].fill(80 + th - 1);
+            row[320..360].fill(80 + th);
+        }
+        y
+    };
+    let boundary24_y = boundary_y(24);
+    let boundary72_y = boundary_y(72);
+    let peak_cases: [(&str, &Vec<u8>, u32); 3] = [
+        ("dense PRNG", &dense_y, 44),
+        ("threshold 24 boundaries", &boundary24_y, 24),
+        ("threshold 72 boundaries", &boundary72_y, 72),
+    ];
+    for (name, frame_y, thresh) in peak_cases {
+        m.wr(yv, frame_y);
+        m.cpu.fill_bytes(stock::ARGB_FB, 0, 640 * 424 * 2);
+        m.cpu.call(b.sym("draw_peaking_arm"), &[yv, 0xF11E_F11E, thresh], &[], STACK.1, 100_000_000)?;
+        let got = m.rd(stock::ARGB_FB, 640 * 424 * 2);
+        let expected = peak_expected(frame_y, 0xF11E, thresh);
+        let diff = got.iter().zip(&expected).position(|(g, e)| g != e);
+        r.check(
+            got == expected,
+            format!("Peaking {name} full-frame scalar reference; first diff {diff:?}, got {:?}, expected {:?}", diff.map(|i| got[i]), diff.map(|i| expected[i])),
+        );
+    }
     m.wr(yv, &y_plane);
 
     draw(&mut m, 12)?;
@@ -1187,7 +1266,7 @@ fn check_hud(b: &Build, r: &mut Report, peakcol_addr: u32, peaksens_addr: u32, z
     m.w8(zebralvl_addr, 0);
     r.check(z90_ok && z100_ok && zdual_ok, "grid 13 zebra levels: 90% Safe, 100% Clip & Dual Hi(orange)+Lo(cyan)");
 
-    let dual_expected = |y: &[u8], phase: u32| {
+    let dual_expected = |y: &[u8], phase: u32, hi_thresh: u8| {
         let hi = [0xF40Eu16, 0xF40E, 0x111A, 0x111A];
         let lo = [0x1DFEu16, 0x1DFE, 0x111A, 0x111A];
         let phase = phase as usize;
@@ -1197,7 +1276,7 @@ fn check_hud(b: &Build, r: &mut Report, peakcol_addr: u32, peaksens_addr: u32, z
             for sx in (0..640).step_by(2) {
                 let stripe = (sx / 2) & 3;
                 let v = y[sy * 640 + sx];
-                let px = if v >= 242 {
+                let px = if v >= hi_thresh {
                     hi[(((row + phase) & 3) + stripe) & 3]
                 } else if v <= 12 {
                     lo[(((424 - row + phase) & 3) + stripe) & 3]
@@ -1222,7 +1301,7 @@ fn check_hud(b: &Build, r: &mut Report, peakcol_addr: u32, peaksens_addr: u32, z
         draw(&mut m, 13)?;
         let mut got = vec![0u8; 640 * 424 * 2];
         m.cpu.read_bytes(stock::ARGB_FB, &mut got);
-        let expected = dual_expected(&noisy_y, phase);
+        let expected = dual_expected(&noisy_y, phase, 242);
         let diff = got.iter().zip(&expected).position(|(g, e)| g != e);
         r.check(got == expected, format!("Dual Hi+Lo full-frame reference, phase {phase}, all 256 luma values; first diff {diff:?}, got {:?}, expected {:?}", diff.map(|i| got[i]), diff.map(|i| expected[i])));
     }
@@ -1235,10 +1314,48 @@ fn check_hud(b: &Build, r: &mut Report, peakcol_addr: u32, peaksens_addr: u32, z
             draw(&mut m, 13)?;
             let mut got = vec![0u8; 640 * 424 * 2];
             m.cpu.read_bytes(stock::ARGB_FB, &mut got);
-            let expected = dual_expected(frame_y, phase);
+            let expected = dual_expected(frame_y, phase, 242);
             let diff = got.iter().zip(&expected).position(|(g, e)| g != e);
             r.check(got == expected, format!("Dual Hi+Lo {name} full-frame reference, phase {phase}; first diff {diff:?}, got {:?}, expected {:?}", diff.map(|i| got[i]), diff.map(|i| expected[i])));
         }
+    }
+    // The only C caller uses the compile-time ZEBRA_THRESH, so clang deliberately specializes
+    // the two-argument emitted routine. Extra r2 values are ignored, not runtime thresholds.
+    m.wr(yv, &noisy_y);
+    let expected_specialized = dual_expected(&noisy_y, 3, 242);
+    let mut specialized_ok = true;
+    for ignored in [0u32, 128, 255] {
+        m.cpu.fill_bytes(stock::ARGB_FB, 0, 640 * 424 * 2);
+        m.cpu.call(b.sym("draw_zebras_dual_arm"), &[yv, 3, ignored], &[], STACK.1, 100_000_000)?;
+        let got = m.rd(stock::ARGB_FB, 640 * 424 * 2);
+        specialized_ok &= got == expected_specialized;
+    }
+    r.check(specialized_ok, "Dual Hi+Lo keeps the built ZEBRA_THRESH=242 specialization (ignored r2 = 0, 128, 255)");
+
+    // Two frames contain every ordered pair in adjacent SWAR lanes (bytes 0 and 2 of each
+    // sampled word): 33,920 pairs per frame, 65,536 total. This covers all carry/borrow and
+    // shadow/highlight boundary combinations without testing a nonexistent runtime argument.
+    for page in 0..2usize {
+        let mut pair_y = vec![80u8; 640 * 424];
+        for sy in (0..424).step_by(2) {
+            for w in 0..160usize {
+                let pair = page * 33_920 + (sy / 2) * 160 + w;
+                if pair < 65_536 {
+                    pair_y[sy * 640 + 4 * w] = (pair >> 8) as u8;
+                    pair_y[sy * 640 + 4 * w + 2] = pair as u8;
+                }
+            }
+        }
+        m.wr(yv, &pair_y);
+        m.cpu.fill_bytes(stock::ARGB_FB, 0, 640 * 424 * 2);
+        m.cpu.call(b.sym("draw_zebras_dual_arm"), &[yv, 3], &[], STACK.1, 100_000_000)?;
+        let got = m.rd(stock::ARGB_FB, 640 * 424 * 2);
+        let expected = dual_expected(&pair_y, 3, 242);
+        let diff = got.iter().zip(&expected).position(|(g, e)| g != e);
+        r.check(
+            got == expected,
+            format!("Dual Hi+Lo adjacent-luma pairs page {page}/2 (65,536 total); first diff {diff:?}, got {:?}, expected {:?}", diff.map(|i| got[i]), diff.map(|i| expected[i])),
+        );
     }
     m.w8(zebralvl_addr, 0);
 
@@ -1265,6 +1382,108 @@ fn check_hud(b: &Build, r: &mut Report, peakcol_addr: u32, peaksens_addr: u32, z
         [0x61FD, 0x17FB, 0x1E3C, 0xF7BC, 0xFE1C, 0xF11E, 0x0000, 0xF11F, 0x61FF],
         "grid 17 false color: 6 IRE zones, transparent midtones & right-edge legend bar",
     );
+    let fc_color = |bin: u8| -> u16 {
+        match bin {
+            0..=2 => 0x61FD,
+            3..=6 => 0x17FB,
+            27..=30 => 0x1E3C,
+            36..=41 => 0xF7BC,
+            56..=59 => 0xFE1C,
+            60..=63 => 0xF11E,
+            _ => 0,
+        }
+    };
+    let expected_lut: Vec<u32> = (0..64u8)
+        .map(|bin| {
+            let px = u32::from(fc_color(bin));
+            px << 16 | px
+        })
+        .collect();
+    let actual_lut: Vec<u32> = (0..64u32).map(|i| b.img.u32(b.sym("fc_lut32") + 4 * i)).collect();
+    r.eq(actual_lut, expected_lut, "false-color LUT matches the six independent IRE zone definitions");
+
+    // Direct oracle with poison: all-zero LUT blocks retain poison; every nonzero block writes
+    // all eight words, including zero-valued pixels. This pins the zeroed-FB call contract.
+    let fc_expected = |y: &[u8], poison: u8| {
+        let mut out = vec![poison; 640 * 424 * 2];
+        for sy in (0..424).step_by(2) {
+            for bx in 0..40usize {
+                let sample = |k: usize| fc_color(y[sy * 640 + bx * 16 + 2 * k] >> 2);
+                if (0..8).all(|k| sample(k) == 0) {
+                    continue;
+                }
+                for k in 0..8 {
+                    let sx = bx * 16 + 2 * k;
+                    let bytes = sample(k).to_be_bytes();
+                    for dy in [sy, sy + 1] {
+                        for dx in [sx, sx + 1] {
+                            let o = (dy * 640 + dx) * 2;
+                            out[o..o + 2].copy_from_slice(&bytes);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    };
+    let ramp_y: Vec<u8> = (0..640 * 424).map(|i| i as u8).collect();
+    let patterns = [
+        [20, 20, 3, 3, 20, 20, 3, 3],
+        [0, 0, 0, 0, 3, 3, 3, 3],
+        [8, 8, 10, 10, 8, 8, 10, 10],
+        [14, 14, 15, 15, 14, 14, 15, 15],
+        [20, 20, 3, 3, 10, 10, 14, 14],
+        [3, 4, 5, 6, 3, 4, 5, 6],
+    ];
+    let mut patterned_y = vec![80u8; 640 * 424];
+    for sy in (0..424).step_by(2) {
+        for bx in 0..40usize {
+            let pattern = &patterns[(bx + sy / 2) % patterns.len()];
+            for k in 0..8 {
+                patterned_y[sy * 640 + bx * 16 + 2 * k] = pattern[k] << 2 | ((bx + k + sy / 2) & 3) as u8;
+            }
+        }
+    }
+    let mut one_off_y = vec![80u8; 640 * 424];
+    for sy in (0..424).step_by(2) {
+        for bx in 0..40usize {
+            let k = (bx + sy / 2) & 7;
+            one_off_y[sy * 640 + bx * 16 + 2 * k] = 12;
+        }
+    }
+    let fc_frames = [
+        ("all 256 luma values", ramp_y),
+        ("noisy", noisy_y.clone()),
+        ("same-zone and adversarial XOR patterns", patterned_y.clone()),
+        ("one nonzero sample per block", one_off_y),
+        ("all-midtone poison preservation", vec![80; 640 * 424]),
+    ];
+    for (name, frame_y) in &fc_frames {
+        m.wr(yv, frame_y);
+        m.cpu.fill_bytes(stock::ARGB_FB, 0xA5, 640 * 424 * 2);
+        m.cpu.call(b.sym("draw_false_color_arm"), &[yv], &[], STACK.1, 100_000_000)?;
+        let mut got = vec![0u8; 640 * 424 * 2];
+        m.cpu.read_bytes(stock::ARGB_FB, &mut got);
+        let expected = fc_expected(frame_y, 0xA5);
+        let diff = got.iter().zip(&expected).position(|(g, e)| g != e);
+        r.check(
+            got == expected,
+            format!("False Color direct {name} full-frame poisoned reference; first diff {diff:?}, got {:?}, expected {:?}", diff.map(|i| got[i]), diff.map(|i| expected[i])),
+        );
+    }
+
+    m.wr(yv, &patterned_y);
+    draw(&mut m, 17)?;
+    let mut got = vec![0u8; 640 * 424 * 2];
+    m.cpu.read_bytes(stock::ARGB_FB, &mut got);
+    let expected = fc_expected(&patterned_y, 0);
+    let diff = (0..got.len()).find(|&i| {
+        let p = i / 2;
+        let (x, y) = (p % 640, p / 640);
+        let legend = (622..634).contains(&x) && (114..310).contains(&y);
+        !legend && got[i] != expected[i]
+    });
+    r.check(diff.is_none(), format!("False Color grid 17 zeroed-caller full-frame reference outside legend; first diff {diff:?}"));
     m.wr(yv, &y_plane);
 
     draw(&mut m, 14)?;

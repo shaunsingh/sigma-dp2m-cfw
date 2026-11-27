@@ -52,11 +52,16 @@ fn m6m_bench() {
     let va = |name: &str| syms.get(name).unwrap_or_else(|| panic!("payload symbol {name}")).va();
     let fcnt = va("lv_planes") + 12;
     let draw = va("grid_draw_hook") | 1;
-    let scenes: [(&str, Option<Vec<u8>>); 4] = [
+    let scenes: [(&str, Option<Vec<u8>>); 5] = [
         ("default", None),
         ("checker", Some(scene(|x, y| if ((x >> 1) ^ (y >> 1)) & 1 == 0 { [255; 3] } else { [0; 3] }))),
         ("white", Some(scene(|_, _| [255; 3]))),
         ("black", Some(scene(|_, _| [0; 3]))),
+        ("fine-detail", Some(scene(|x, y| {
+            let mut n = (x as u32).wrapping_mul(0x045D_9F3B) ^ (y as u32).wrapping_mul(0x27D4_EB2D);
+            n ^= n >> 16;
+            [n as u8; 3]
+        }))),
     ];
     println!("boot: {boot_ms:.1} ms");
     println!("overlay cost in emulated M6M instructions (host DMA fills/flushes excluded)");
@@ -78,8 +83,12 @@ fn m6m_bench() {
             println!("{name:<8} {grid:>4} {idle:>12} {per_frame:>12} {only:>12}");
         }
         let y = cam.cpu().r32_be(va("lv_planes"));
-        let dual = cam.cpu_mut().call(va("draw_zebras_dual_arm"), &[y, 0, 242], &[], CALL_SP, MAX_STEPS).expect("dual zebras").1;
+        let dual = cam.cpu_mut().call(va("draw_zebras_dual_arm"), &[y, 0], &[], CALL_SP, MAX_STEPS).expect("dual zebras").1;
         println!("{name:<8} dual draw only {dual:>12}");
+        let false_color = cam.cpu_mut().call(va("draw_false_color_arm"), &[y], &[], CALL_SP, MAX_STEPS).expect("false color").1;
+        println!("{name:<8} false-color draw only {false_color:>12}");
+        let peaking = cam.cpu_mut().call(va("draw_peaking_arm"), &[y, 0xF11E_F11E, 44], &[], CALL_SP, MAX_STEPS).expect("peaking").1;
+        println!("{name:<8} peaking draw only {peaking:>12}");
     }
     let ov_s = t_ov.elapsed().as_secs_f64();
     println!("overlay host rate: {:.1} MIPS ({:.1} ms)", ov_insns as f64 / ov_s / 1e6, ov_s * 1e3);

@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+__attribute__((noinline))
 void *memset(void *d, int c, size_t n) {
     uint8_t *p = d, b = (uint8_t)c;
     if (n >= 4) {

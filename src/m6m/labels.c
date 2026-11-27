@@ -225,9 +225,13 @@ static void finish_tile(uint8_t *t, uint32_t w, uint32_t h, uint32_t bold, uint3
     }
 }
 
+/* film label for the LV color mode icon about to be looked up; 0 = stock icon */
+static uint32_t osd_label;
+
 static void reset(void) {
     memset(&cache, 0, sizeof cache);
     cache.magic = MAGIC;
+    osd_label = 0;
 }
 
 static uint8_t *alloc(uint32_t n) {
@@ -359,21 +363,19 @@ const struct icon *label_icon(uint32_t id) {
     return ICON_RESULT;
 }
 
-// boot init 0xA01689BC: SDRAM may keep a decayed cache across a short power cycle
+// boot init 0xA01689BC: SDRAM may keep decayed .bss across a short power cycle
 void labels_boot(void) {
     reset();
+    memset((void *)&lv_planes, 0, sizeof lv_planes);
     stock_disp_init();
 }
 HOOK_CALL(0xA01689BE, labels_boot, 0xA0168D0C);
 
-/* film label for the LV color mode icon about to be looked up; 0 = stock icon */
-static uint32_t osd_label;
-
 // films take the Vivid / B&W case of the stock color mode icon switches; osd_icon then swaps in their label
 uint32_t osd_map(uint32_t cm) {
-    uint32_t f = cm - FILM_MODE0;
-    osd_label = f < dp2m_film_count ? ICON_LABEL_OSD + f : 0; /* film labels are the first strings */
-    return osd_label ? (dp2m_films[f].mono ? CM_BW : CM_VIVID) : cm;
+    const struct film_info *f = film_of(cm);
+    osd_label = f ? ICON_LABEL_OSD + (cm - FILM_MODE0) : 0; /* film labels are the first strings */
+    return f ? (f->mono ? CM_BW : CM_VIVID) : cm;
 }
 
 const struct icon *osd_icon(uint32_t id) {

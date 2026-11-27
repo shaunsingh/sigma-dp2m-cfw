@@ -2,9 +2,6 @@
 #include "dp2m.h"
 #include "catalog.h"
 
-struct lv_planes { uint32_t y, cb, cr, fcnt; };
-extern volatile struct lv_planes lv_planes;
-
 #define FB_W 640u
 #define LV_H 424u
 #define GRID_LEVEL       7u
@@ -23,7 +20,9 @@ static int is_full_frame_grid(uint32_t m) {
     return m == GRID_PEAK || m == GRID_PEAK_LVL || m == GRID_ZEBRA || m == GRID_FALSE_COLOR;
 }
 
-static int plane_ok(uint32_t a) { return !(a & 3u) && (a - 0xA0800000u <= 0x0F800000u); }
+static int plane_ok(uint32_t a) {
+    return !(a & 3u) && (a - 0xA0800000u <= 0x0F800000u - FB_W * LV_H);
+}
 
 #define RGBA4(r, g, b, a) ((uint16_t)(((r) << 12) | ((g) << 8) | ((b) << 4) | (a)))
 
@@ -36,6 +35,7 @@ static void clear_dma(uint16_t x, uint16_t y, uint16_t w, uint16_t h) {
 
 __attribute__((noinline, target("arm")))
 static void fill_argb(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint16_t px) {
+    if (!w || !h) return;
     uint16_t *row = ARGB_FB + y * FB_W + x;
     if (w == 1u) {
         for (uint32_t r = 0; r < h; r++, row += FB_W) *row = px;
@@ -48,7 +48,7 @@ static void fill_argb(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint16_t p
     }
     if (w >= 16u && !((uintptr_t)row & 2u)) {
         /* 8-word stmia bursts a full 32 B ARM926 cache line; load fill regs once across all rows */
-        uint32_t chunks = w >> 4, rem_w = (w & 15u) >> 1, odd = w & 1u, rows = h;
+        uint32_t chunks = w >> 4, rows = h;
         uint32_t step = (FB_W - (chunks << 4)) * 2u;
         __asm__ volatile(
             "mov r4, %3\n\t"
@@ -71,7 +71,7 @@ static void fill_argb(uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint16_t p
             : "+r"(row), "+r"(rows)
             : "r"(chunks), "r"(px2), "r"(step)
             : "r2", "r4", "r5", "r6", "r7", "r8", "r9", "r10", "ip", "cc", "memory");
-        if (!rem_w && !odd) return;
+        if (!(w & 15u)) return;
         row = ARGB_FB + y * FB_W + x + (chunks << 4);
         w &= 15u;
     }
@@ -267,10 +267,11 @@ static void draw_histogram_arm(const uint8_t *Yp, const uint8_t *Cb, const uint8
 }
 
 static void draw_histogram(void) {
-    if (!plane_ok(lv_planes.y)) return;
-    const uint8_t *Cb = plane_ok(lv_planes.cb) ? (const uint8_t *)lv_planes.cb : 0;
-    const uint8_t *Cr = plane_ok(lv_planes.cr) ? (const uint8_t *)lv_planes.cr : 0;
-    draw_histogram_arm((const uint8_t *)lv_planes.y, Cb, Cr);
+    uint32_t y = lv_planes.y, cb = lv_planes.cb, cr = lv_planes.cr;
+    if (!plane_ok(y)) return;
+    draw_histogram_arm((const uint8_t *)y,
+                       plane_ok(cb) ? (const uint8_t *)cb : 0,
+                       plane_ok(cr) ? (const uint8_t *)cr : 0);
     stock_flush_rect(492, 354, 492 + 136, 354 + 58);
 }
 
@@ -711,13 +712,15 @@ static void grid_draw(uint32_t m) {
         hw_dcache_sync();
         return;
     }
-    if (!plane_ok(lv_planes.y)) return;
+    uint32_t y = lv_planes.y;
+    if (!plane_ok(y)) return;
+    const uint8_t *Yp = (const uint8_t *)y;
     if (m == GRID_ZEBRA) {
-        draw_zebras((const uint8_t *)lv_planes.y);
+        draw_zebras(Yp);
     } else if (m == GRID_FALSE_COLOR) {
-        draw_false_color((const uint8_t *)lv_planes.y);
+        draw_false_color(Yp);
     } else {
-        draw_peaking((const uint8_t *)lv_planes.y);
+        draw_peaking(Yp);
         if (m == GRID_PEAK_LVL) draw_level();
     }
     hw_dcache_sync();

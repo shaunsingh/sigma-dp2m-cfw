@@ -41,7 +41,7 @@ static void cs_ready(void) {
 uint8_t *slot_ptr(uint32_t i) {
     if (i < 3u) return (uint8_t *)NV_SLOTS + i * SLOT_SZ;
     cs_ready();
-    return cs.slot[i - 3u];
+    return cs.slot[i == 4u ? 1u : 0u];
 }
 
 static void slot_load(uint32_t i) {
@@ -49,7 +49,7 @@ static void slot_load(uint32_t i) {
 }
 
 void slot_save(uint32_t i) {
-    memcpy(slot_ptr(i), (const void *)NV_CUR, SLOT_SZ);
+    if (i < 5u) memcpy(slot_ptr(i), (const void *)NV_CUR, SLOT_SZ);
 }
 HOOK_CALL(0xA0059A7E, slot_save, 0xA0167584); // Custom Mode Setting "Yes"
 
@@ -124,12 +124,14 @@ static const uint16_t widget_icons[5] = {
 };
 
 const void *widget_icon(void) {
-    return stock_icon(widget_icons[cslot(stock_get_expo_mode())]);
+    uint32_t s = cslot(stock_get_expo_mode());
+    return s < 5u ? stock_icon(widget_icons[s]) : 0;
 }
 HOOK_CALL(0xA016BC26, widget_icon, 0xA0042AAC);
 
 uint32_t widget_slot_same(void) {
-    return stock_slot_same(cslot(stock_get_expo_mode()));
+    uint32_t s = cslot(stock_get_expo_mode());
+    return s < 5u ? stock_slot_same(s) : 0;
 }
 HOOK_CALL(0xA016BBBA, widget_slot_same, 0xA0167618);
 

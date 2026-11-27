@@ -47,18 +47,18 @@ fn iso50_clamp_2
     hook HOOK_HALF, 0xA003F30A, 0xB500, 0x0001
     hook HOOK_BL, 0xA003F30C, iso50_clamp_2, 0xB5002005
 
-// UI string lookup 0xA0044AAC after `push {r4-r6,lr}`: r0 sid, r1 lang
+// UI string lookup 0xA0044AAC after `push {r4-r6,lr}` (SP 8B-aligned): r0 sid, r1 lang
 fn str_hook
-    push {r0, r1, lr}
+    push {r0, r1, r2, lr}
     bl   dp2m_str
     cmp  r0, #0
     bne  1f
-    pop  {r0, r1, r2}
-    mov  lr, r2
+    pop  {r0, r1, r2, r3}
+    mov  lr, r3
     movs r5, r0
     movs r4, r5
     bx   lr
-1:  add  sp, #12
+1:  add  sp, #16
     pop  {r4, r5, r6, pc}
     hook HOOK_BL, 0xA0044AAE, str_hook, 0x0005002C
 
@@ -112,11 +112,11 @@ fn mn_cm_hook
 fn \name
     cmp  r0, #0
     bne  1f
-    push {lr}
+    push {r1, lr}
     movs r0, \str
     bl   pb_film_cm
-    pop  {r1}
-    mov  lr, r1
+    pop  {r1, r2}
+    mov  lr, r2
 1:  strb r0, [\rec, #0x17]
     ldr  r0, [sp, #\ld]
     bx   lr
@@ -150,7 +150,7 @@ fn bkt5_hook
     mov  r6, lr
     bl   stock_get_bkt_ord
     cmp  r0, #4
-    bge  1f
+    bhs  1f
     movs r4, #0
     bx   r6
 1:  ldr  r1, =0xA07FBE5A

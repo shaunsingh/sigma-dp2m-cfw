@@ -2,7 +2,6 @@
 #include "dp2m.h"
 #include "catalog.h"
 
-struct lv_planes { uint32_t y, cb, cr, fcnt; };
 volatile struct lv_planes lv_planes; /* written by lv_ycap_hook */
 
 #define GAMMA_MAGIC 0x474D4131u
@@ -22,12 +21,15 @@ static const struct lv_look *look_of(uint32_t packed) {
 // knots at x = 0..128 step 16, 192..384 step 64, 512..1023 step 128 -> 256 BE words
 __attribute__((noinline, target("arm")))
 static void expand_knots(const uint8_t *k, uint32_t *out) {
-    static const uint8_t shift[3] = { 4, 6, 7 }, count[3] = { 8, 4, 5 };
-    for (uint32_t seg = 0; seg < 3; seg++) {
-        uint32_t sh = shift[seg], words = 1u << (sh - 2u);
-        for (uint32_t i = 0; i < count[seg]; i++, k++) {
+#pragma clang loop unroll(disable)
+    for (uint32_t seg = 0; seg < 3u; seg++) {
+        uint32_t sh = seg ? 5u + seg : 4u, words = 1u << (sh - 2u);
+        uint32_t cnt = seg == 0u ? 8u : seg == 1u ? 4u : 5u;
+#pragma clang loop unroll(disable)
+        for (uint32_t i = 0; i < cnt; i++, k++) {
             int32_t y0 = k[0], dy = (int32_t)k[1] - y0;
             int32_t acc = (y0 << sh) + (int32_t)(1u << (sh - 1u));
+#pragma clang loop unroll(disable)
             for (uint32_t w = 0; w < words; w++) {
                 uint32_t p0 = (uint8_t)(acc >> sh); acc += dy;
                 uint32_t p1 = (uint8_t)(acc >> sh); acc += dy;
@@ -63,7 +65,8 @@ HOOK_CALL(0xA0039890, lv_gamma_hook, 0xA009D940);
 // 0xA003A1E6: runs on LV mode change or color-dirty (mode/paper setters), so the tone curve follows live
 void lv_mono_hook(uint32_t lv_mode, uint32_t cm) {
     uint32_t packed = packed_cm(cm);
-    if (cm >= FILM_MODE0) cm = dp2m_films[cm - FILM_MODE0].mono ? 2u : 3u;
+    const struct film_info *f = film_of(cm);
+    if (f) cm = f->mono ? 2u : 3u;
     stock_lv_mono(lv_mode, cm);
     if (gamma.magic != GAMMA_MAGIC || packed != gamma.applied) gamma_apply(packed);
 }
@@ -76,7 +79,8 @@ void lv_cmcm_hook(uint32_t lv_mode, uint32_t cm) {
         stock_lv_cmcm(lv_mode, cm);
         return;
     }
-    uint16_t m[14] = { [9] = 0x004D, [10] = 0x0096, [11] = 0x001D, [12] = 2u << 8 };
+    uint16_t m[14];
+    m[9] = 0x004D; m[10] = 0x0096; m[11] = 0x001D; m[12] = 2u << 8; m[13] = 0;
     if (l->flags & LV_MONO_Q7) {
         for (int k = 0; k < 9; k++) m[k] = (uint16_t)l->cmcm[k] & 0x0FFFu;
     } else {
@@ -85,14 +89,17 @@ void lv_cmcm_hook(uint32_t lv_mode, uint32_t cm) {
         else stock_get_lv_ccn(raw);
         const uint16_t *rw = (const uint16_t *)(const void *)(raw + 10);
         int32_t cc[9];
+#pragma clang loop unroll(disable)
         for (int k = 0; k < 9; k++) {
             int32_t v = rw[k] & 0x0FFF;
             cc[k] = (v ^ 0x800) - 0x800;
         }
         const int16_t *r = l->cmcm;
         uint16_t *out = m;
+#pragma clang loop unroll(disable)
         for (int i = 0; i < 3; i++, r += 3) {
             int32_t r0 = r[0], r1 = r[1], r2 = r[2];
+#pragma clang loop unroll(disable)
             for (int j = 0; j < 3; j++) {
                 int32_t v = (r0 * cc[j] + r1 * cc[3 + j] + r2 * cc[6 + j] + 512) >> 10;
                 v = v > 2047 ? 2047 : v < -2047 ? -2047 : v;

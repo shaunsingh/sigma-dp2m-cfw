@@ -4,13 +4,9 @@
 
 static uint32_t film_paper(const struct film_info *f) {
     static const uint32_t slot[] = { 0, NV_COLOR_PAPER, NV_BW_PAPER, NV_LUT_SLOT };
-    if (!f->paper_cls) return 0;
+    if (f->paper_cls - 1u >= 3u) return 0;
     uint32_t p = REG8(slot[f->paper_cls]);
     return (p - 1u < 8u) ? p - 1u : f->auto_paper;
-}
-
-static const struct film_info *film_of(uint32_t cm) {
-    return (cm - FILM_MODE0 < dp2m_film_count) ? &dp2m_films[cm - FILM_MODE0] : 0;
 }
 
 uint32_t packed_cm(uint32_t cm) {
@@ -43,8 +39,10 @@ void mn_film(uint32_t cm, char *tag3d, char *tag59) {
 uint32_t pb_film_cm(const char *s) {
     for (uint32_t i = 0; i < 5u; i++)
         if (s[i] != film_tag[i]) return 0;
-    uint32_t d0 = (uint32_t)(s[5] - '0'), d1 = (uint32_t)(s[6] - '0'), f = 10u * d0 + d1;
-    return d0 < 10u && d1 < 10u && f < dp2m_film_count ? FILM_MODE0 + f : 0;
+    uint32_t d0 = (uint32_t)(unsigned char)s[5] - '0';
+    if (d0 >= 10u) return 0;
+    uint32_t d1 = (uint32_t)(unsigned char)s[6] - '0', f = 10u * d0 + d1;
+    return d1 < 10u && f < dp2m_film_count ? FILM_MODE0 + f : 0;
 }
 
 #define NV_SETTING(name, addr, max, after)                                             \

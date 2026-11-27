@@ -51,34 +51,33 @@ void stock_osd_commit(void);
 void stock_argb_clear(void);
 void stock_argb_commit(void);
 
-/* Clean + drain WB + invalidate entire 16 KB L1 D-cache via ITCM SWI 10 (0xA07FBE64) for 2D DMA coherence */
+/* Clean 16 KB L1 D-cache by index, drain WB, invalidate D-cache via ITCM SWI 10 (ITCM 0x248 / image 0xA07FBE64;
+ * I-cache untouched). Silicon restores r0-r2, banks lr_svc, and restores flags via movs pc, lr;
+ * r0 stays in the clobber list only because crates/dp2m-emu/src/arm9.rs zeroes r0 on all Thumb svc #imm8. */
 static inline void hw_dcache_sync(void) {
-    __asm__ volatile("svc #10" ::: "r0", "lr", "cc", "memory");
+    __asm__ volatile("svc #10" ::: "r0", "memory");
 }
 
 #define REG8(a)  (*(volatile uint8_t *)(a))
 #define REG16(a) (*(volatile uint16_t *)(a))
 #define REG32(a) (*(volatile uint32_t *)(a))
 
-/* NVRAM block 0xA0939684 (persisted 0x3C4 B); +0x04..+0x13 is the zero-default reserved area */
+/* NVRAM block 0xA0939684 (persisted 0x3C4 B); +0x04..+0x13 is reserved (zero defaults); +0x0F..+0x13 unused */
 #define NV_COLOR_PAPER 0xA0939688u /* 0 = film's Auto paper, 1..8 */
 #define NV_ENGINE      0xA0939689u /* 0 = HW fast, 1 = 3D spectral */
 #define NV_FILL        0xA093968Au /* X3 fill 0..3 */
 #define NV_MINSHUTTER  0xA093968Bu /* 0..6 */
-#define NV_PEAKCOL     0xA093968Cu /* 0..3 */
+#define NV_PEAKCOL     0xA093968Cu /* 0 red, 1 yellow, 2 white, 3 black */
 #define NV_GRAIN       0xA093968Du /* 0/1 */
 #define NV_HALATION    0xA093968Eu /* 0/1 */
 #define NV_BW_PAPER    0xA093968Fu /* 0 = Auto, 1..8 */
 #define NV_LUT_SLOT    0xA0939690u /* 0 = Auto, 1..8 */
-#define NV_PEAKSENS    0xA0939691u /* 0 = Med, 1 = High, 2 = Low, 3 = Auto (MF High) */
-#define NV_ZEBRALVL    0xA0939692u /* 0 = 95%, 1 = 90% Safe, 2 = 100% Clip, 3 = Dual Hi+Lo */
+#define NV_PEAKSENS    0xA0939691u /* 0 = Med (PEAKING_THRESH, def 44), 1 = High (24), 2 = Low (72), 3 = Auto (MF High / 1x Med) */
+#define NV_ZEBRALVL    0xA0939692u /* 0 = 95% (ZEBRA_THRESH, def 242), 1 = 90% Safe (230), 2 = 100% Clip (252), 3 = Dual (Hi + Lo<=12) */
 
 #define MF_SPOT_ACTIVE 0xA0939A53u /* stock MF magnification active flag (0xA0939A44 + 0xF, getter 0xA01681CA) */
 
 #define ARGB_FB        ((uint16_t *)0xA21D8C00u)
-#define BKT_STEP_IDX   0xA07FBE5Au
-#define BKT_STEP_TBL   0xA0176F14u
-#define LV_YCAP_LIT    0xA07B06F8u
 
 #define SCREEN_LV      0x15u
 #define SCREEN_DOOM    0x21u
@@ -149,6 +148,14 @@ struct dp2m_hook {
 #define HOOK_BL(site, fn, stock) DP2M_HOOK(HK_BL, site, fn, stock)
 #define HOOK_WORD(site, val, stock) DP2M_HOOK(HK_WORD, site, val, stock)
 #define HOOK_HALF(site, val, stock) DP2M_HOOK(HK_HALF, site, val, stock)
+
+/* live-view YCC plane pointers & frame count written by lv_ycap_hook (hooks.S) */
+struct lv_planes { uint32_t y, cb, cr, fcnt; };
+extern volatile struct lv_planes lv_planes;
+
+static inline const struct film_info *film_of(uint32_t cm) {
+    return (cm - FILM_MODE0 < dp2m_film_count) ? &dp2m_films[cm - FILM_MODE0] : 0;
+}
 
 const struct icon *label_icon(uint32_t id);
 uint32_t osd_map(uint32_t cm);

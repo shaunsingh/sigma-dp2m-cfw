@@ -13,6 +13,7 @@
 #define P3_NSAMP    256u     /* 1 word every 4 KiB per 1 MiB window */
 #define P6_LEN      0x10000u /* 64 KiB beyond __bss_end */
 #define LOG_CAP     12u
+#define PROBE_INIT_MAGIC 0x50524F42u /* payload .bss is not zeroed at boot */
 
 /* Linker bounds from src/m6m/m6m.ld */
 extern uint8_t __ram_start[];
@@ -887,7 +888,7 @@ static void draw_chrome(void) {
     fb_fill_rect_arm(0, 0, 640, 480, COL_BG);
     fb_fill_rect_arm(0, 0, 640, 28, COL_HDR_BG);
     fb_fill_rect_arm(0, 438, 640, 42, COL_FTR_BG);
-    p_printf(0, 0, COL_YELLOW, COL_HDR_BG, "PROBE D2EDE84 P%u/%u %s",
+    p_printf(0, 0, COL_YELLOW, COL_HDR_BG, "PROBE V2 D2EDE84 P%u/%u %s",
              pst.page + 1u, PROBE_PAGES, page_titles[pst.page]);
     draw_str(0, 24, "L/R,DIAL:PAGE  OK:ACT  MENU/PLAY:EXIT", COL_WHITE, COL_FTR_BG);
 }
@@ -1167,8 +1168,9 @@ static void probe_clear_planes(void) {
 }
 
 static void probe_ensure_init(void) {
-    if (pst.inited) return;
-    pst.inited = 1u;
+    if (pst.inited == PROBE_INIT_MAGIC) return;
+    memset(&pst, 0, sizeof(pst));
+    pst.inited = PROBE_INIT_MAGIC;
     pst.last_ms = (uint32_t)read_tick_ms();
     probe_p6_survey(&pst.p6_boot);
     probe_p3_pools();

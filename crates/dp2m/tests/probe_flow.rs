@@ -13,7 +13,7 @@ impl Drop for TempDir {
     }
 }
 
-fn build_probe_package() -> (Vec<u8>, u32, u32) {
+fn build_probe_package() -> (Vec<u8>, u32, u32, u32, u32) {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).expect("system clock").as_nanos();
     let out = TempDir(std::env::temp_dir().join(format!(
@@ -38,20 +38,21 @@ fn build_probe_package() -> (Vec<u8>, u32, u32) {
 
     let pkg = std::fs::read(out.0.join("DP2MV200.bin")).expect("read probe DP2MV200.bin");
     let syms = std::fs::read_to_string(out.0.join("m6m/m6m.syms")).expect("read probe m6m.syms");
-    let sym = |name: &str| -> u32 {
+    let sym = |name: &str| -> (u32, u32) {
         syms.lines()
             .find_map(|line| {
                 let mut it = line.split_whitespace();
-                let addr = it.next()?;
-                let _size = it.next()?;
+                let addr = u32::from_str_radix(it.next()?, 16).ok()?;
+                let size = it.next()?.parse::<u32>().ok()?;
                 let sname = it.next()?;
-                (sname == name).then(|| u32::from_str_radix(addr, 16).ok()).flatten()
+                (sname == name).then_some((addr, size))
             })
             .unwrap_or_else(|| panic!("missing symbol {name} in m6m.syms"))
     };
-    let bss_start = sym("__bss_start");
-    let bss_end = sym("__bss_end");
-    (pkg, bss_start, bss_end)
+    let (bss_start, _) = sym("__bss_start");
+    let (bss_end, _) = sym("__bss_end");
+    let (pst_addr, pst_size) = sym("pst");
+    (pkg, bss_start, bss_end, pst_addr, pst_size)
 }
 
 fn argb_pixel(cam: &Camera, x: usize, y: usize) -> u16 {
@@ -90,7 +91,7 @@ fn check_header_and_footer(cam: &Camera, label: &str) {
 
 #[test]
 fn probe_applet_all_pages_actions_write_safety_and_clean_exit() {
-    let (pkg, bss_start, bss_end) = build_probe_package();
+    let (pkg, bss_start, bss_end, pst_addr, pst_size) = build_probe_package();
     assert_eq!(bss_start, 0xA1C0_0000);
     assert!(
         bss_end + 0x10000 <= 0xA1E0_0000,
@@ -98,6 +99,10 @@ fn probe_applet_all_pages_actions_write_safety_and_clean_exit() {
     );
 
     let mut cam = Camera::from_package(&pkg).expect("boot probe firmware in simulator");
+    // Hardware powers on with arbitrary payload RAM. Poison exactly the probe state after
+    // the normal boot, preserving other modules' already-initialized state.
+    let pst_off = (pst_addr - 0xA000_0000) as usize;
+    cam.cpu_mut().sdram_mut()[pst_off..pst_off + pst_size as usize].fill(0xFF);
     assert_eq!(cam.screen_id(), 0x15);
 
     // Snapshot NVRAM before opening probe so we can prove zero NVRAM mutations
@@ -329,7 +334,7 @@ fn probe_applet_all_pages_actions_write_safety_and_clean_exit() {
 #[test]
 #[ignore]
 fn dump_probe_previews() {
-    let (pkg, _, _) = build_probe_package();
+    let (pkg, ..) = build_probe_package();
     let mut cam = Camera::from_package(&pkg).expect("boot probe firmware");
     let dir = std::env::temp_dir().join("dp2m-probe-previews");
     std::fs::create_dir_all(&dir).expect("create preview dir");

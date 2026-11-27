@@ -4,7 +4,7 @@ Custom firmware, toolchain and reverse-engineering notes for the Sigma DP2 Merri
 
 The camera has two processors, both updated from one package:
 
-- **M6M** (`C78FRM.bin`): ARM926EJ-S, big endian. UI, settings, live view, capture control.
+- **M6M** (`C78FRM.bin`): ARM946E-S, big endian. UI, settings, live view, capture control.
 - **M5Slave** (`Firm.bin`): Fujitsu FR80 ("TRUE II"), big endian. Capture ISP and the JPEG / X3F pipeline.
 
 dp2m starts from the stock 1.05 package (`DP2MV105.bin`). It assembles FR80 code into free M5 flash, compiles a C/asm payload and links it into unused parts of the M6M image, and writes a new package for the stock updater.
@@ -21,7 +21,7 @@ dp2m starts from the stock 1.05 package (`DP2MV105.bin`). It assembles FR80 code
 - Custom exposure modes C1..C3, F1, F2.
 - ISO 50, Auto-ISO lower limit down to ISO 50, 5-shot bracketing, minimum shutter speed for ISO auto.
 - 11 live-view overlays as extra grid modes (7..17): electronic level (7), aspect masks with level (21:9 XPan, 16:9 Cinema, 1:1 Square, 7:6, 4:3), focus peaking and peaking + level (runtime Medium / High / Low / Auto MF sensitivity + Red / Yellow / White / Black color), zebras (runtime 95% / 90% Safe / 100% Clip / Dual Hi+Lo), RGB histogram + level, and False Color (IRE heatmap + legend).
-- Bare-metal ARM926EJ-S **DOOM** applet (`SCREEN_DOOM`, Setup page 4): custom 2.5D sector/portal renderer (not a port of the id engine) with a hand-built 13-sector E1M1-tribute map, procedural textures, enemy sprites, weapon/HUD, automap, and clean exit back to Live View.
+- Bare-metal ARM946E-S **DOOM** applet (`SCREEN_DOOM`, Setup page 4): custom 2.5D sector/portal renderer (not a port of the id engine) with a hand-built 13-sector E1M1-tribute map, procedural textures, enemy sprites, weapon/HUD, automap, and clean exit back to Live View.
 
 ## Requirements
 
@@ -133,7 +133,7 @@ dp2m.example.fnl         config template
 flake.nix                Nix dev shell
 crates/
   dp2m-emu/              unified zero-dep emulation, simulation, RE & verification core
-    src/arm9.rs          ARM926EJ-S big-endian ARM/Thumb interpreter + write-range logger
+    src/arm9.rs          ARM946E-S big-endian ARM/Thumb interpreter + write-range logger
     src/fr80/            FR80 assembler, disassembler, emulator
     src/sim/             dual-CPU M6M + M5Slave hardware simulator (`hooks`, `m5`, `isp`)
     src/verify/          native 506-check M6M verifier (`m6m`, `custom`, `labels`)

@@ -4,7 +4,7 @@ Static analysis of stock `DP2MV105.bin` (1.05, May 2013) and emulator verificati
 
 | Chip | Image | CPU | Role |
 | --- | --- | --- | --- |
-| M6M | `C78FRM.bin` | ARM926EJ-S, big endian | UI, settings, live view, capture control |
+| M6M | `C78FRM.bin` | ARM946E-S, big endian | UI, settings, live view, capture control |
 | M5Slave | `Firm.bin` | Fujitsu FR80 ("TRUE II"), big endian | capture ISP, JPEG and X3F pipeline |
 
 ## 1. Firmware package and updater
@@ -135,7 +135,7 @@ Additional verified stock M5Slave addresses:
 
 ---
 
-## 3. M6M (`C78FRM.bin`, ARM926EJ-S big endian)
+## 3. M6M (`C78FRM.bin`, ARM946E-S big endian)
 
 ### 3.1 Memory map
 
@@ -177,7 +177,7 @@ Never write NVRAM `0xA0939774..0xA0939783`: language is at `0xA0939776` and LCD 
 
 ### 3.3 Payload and hooks
 
-The M6M payload is C and assembly in `src/m6m/`, compiled with `clang --target=armeb-none-eabi -mcpu=arm926ej-s -mthumb` (`-O2` on `rt.c`, `hud.c`, `lv.c`; `-Os` elsewhere, with ARM interworking for word-wide loops) and linked with `ld.lld --gc-sections` into dead regions of the stock image ([research/m6m-rom.md](research/m6m-rom.md)):
+The M6M payload is C and assembly in `src/m6m/`, compiled with `clang --target=armeb-none-eabi -mcpu=arm926ej-s -mthumb` (`-O2` on `rt.c`, `hud.c`, `lv.c`; `-Os` elsewhere, with ARM interworking for word-wide loops) and linked with `ld.lld --gc-sections` into dead regions of the stock image ([research/m6m-rom.md](research/m6m-rom.md)). The compiler setting selects compatible ARMv5TE code generation; the physical core is ARM946E-S, as distinguished from the MMU-based ARM926EJ-S by the CP15 MPU, ITCM, and cache operations documented above:
 
 | Region | Range | Size | Sections | Origin |
 | --- | --- | --- | --- | --- |

@@ -1,11 +1,14 @@
-//! m5slave (fujitsu fr80 BE, `Firm.bin`) fw patcher & fr80 verifier
+//! m5slave (fujitsu fr80 BE, `Firm.bin`) firmware builder
 
 use std::collections::HashMap;
 use std::path::Path;
 
-use dp2m_emu::fr80::{self, Emulator, assemble_file, assemble_sections};
+mod verify;
+pub use verify::verify_m5;
 
-use crate::catalog::MONO_FILTER_Q7;
+use dp2m_emu::fr80::{assemble_file, assemble_sections};
+
+use crate::catalog::{FILM_MODE0, MONO_FILTER_Q7, PACKED_BW0, PACKED_SD0};
 use crate::config::Config;
 use crate::pack::{build_argb_std_lut, build_mcas_struct, calibrate_lut_dp2m, rint_even, FilmPack};
 
@@ -13,19 +16,23 @@ pub const S2_OFF: usize = 0x0082_0080;
 pub const S2_LEN: usize = 0x0088_4080;
 pub const DELTA: u32 = 0x0003_BF80;
 
-const MAX_PACKED_MODE: usize = 198;
+pub const NOR_END_OFF: usize = va_off(0x0080_0000);
+const CHECKSUM_START: usize = 0x80;
+const CHECKSUM_END: usize = CHECKSUM_START + 0x80_0000;
+const CHECKSUM_FIELD: std::ops::Range<usize> = 0x4C..0x50;
+const MCAS_STRIDE: u32 = 0x200;
 const LUT3D_STRIDE: usize = 0x1028;
 
 // flash map (< 0x00800000 = 8 MB NOR limit)
-pub const VA_MATRIX_HOOK: u32 = 0x005D_0000;
-pub const VA_LUTSEL_HOOK: u32 = 0x005D_0180;
-pub const VA_MCAS_HOOK: u32 = 0x005D_0200;
-pub const VA_CS_SET_HOOK: u32 = 0x005D_0300;
-pub const VA_CS_EXF_HOOK: u32 = 0x005D_0320;
-pub const VA_IPC_UNPK_HOOK: u32 = 0x005D_0340;
-pub const VA_EXIF_CS_HOOK: u32 = 0x005D_0380;
-pub const VA_YCC_SUB: u32 = 0x005D_03C0;
-pub const VA_SPATIAL_DRV: u32 = 0x005D_1600;
+const VA_MATRIX_HOOK: u32 = 0x005D_0000;
+const VA_LUTSEL_HOOK: u32 = 0x005D_0180;
+const VA_MCAS_HOOK: u32 = 0x005D_0200;
+const VA_CS_SET_HOOK: u32 = 0x005D_0300;
+const VA_CS_EXF_HOOK: u32 = 0x005D_0320;
+const VA_IPC_UNPK_HOOK: u32 = 0x005D_0340;
+const VA_EXIF_CS_HOOK: u32 = 0x005D_0380;
+const VA_YCC_SUB: u32 = 0x005D_03C0;
+const VA_SPATIAL_DRV: u32 = 0x005D_1600;
 
 fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
     let n = std::thread::available_parallelism().map_or(1, |p| p.get()).min(items.len().max(1));
@@ -57,9 +64,7 @@ const VA_BW_TONER_40: u32 = 0x0077_5000;
 const VA_LUT3D_SRGB: u32 = 0x0077_A000;
 const VA_LUT3D_ARGB: u32 = 0x0038_0000;
 
-const SCRATCH_BASE: u32 = 0x8010_0000;
-
-fn va_off(va: u32) -> usize {
+const fn va_off(va: u32) -> usize {
     (va - DELTA) as usize
 }
 
@@ -68,8 +73,28 @@ fn ldi32_r12(dst: u32) -> [u8; 6] {
     [0x9F, 0x8C, b[0], b[1], b[2], b[3]]
 }
 
+fn byte_sum(buf: &[u8]) -> u32 {
+    buf.iter().map(|&b| b as u32).fold(0, u32::wrapping_add)
+}
+
 pub fn m5_checksum(buf: &[u8]) -> u32 {
-    buf[0x80..].iter().fold(0u32, |acc, &b| acc.wrapping_add(b as u32))
+    byte_sum(&buf[CHECKSUM_START..])
+}
+
+pub fn stored_checksum(buf: &[u8]) -> u32 {
+    u32::from_be_bytes(buf[CHECKSUM_FIELD].try_into().unwrap())
+}
+
+fn check_stock_instructions(buf: &[u8]) -> Result<(), String> {
+    for (va, expected) in [
+        (0x004D_3EC8, [0x9F, 0x85, 0x3F, 0x33, 0x33, 0x33]), // 0.70f JPEG budget (PREVIEW_Y at 0x80FB0580)
+        (0x004D_7398, [0x9F, 0x8C, 0x00, 0x4D, 0x7F, 0x9E]), // stock call to 0x4D7F9E
+    ] {
+        if buf[va_off(va)..][..expected.len()] != expected {
+            return Err(format!("stock instruction mismatch @ {va:#08x}"));
+        }
+    }
+    Ok(())
 }
 
 fn scale_meta(mut meta: [u8; 4], cfg: &Config) -> [u8; 4] {
@@ -100,13 +125,7 @@ pub fn build_m5(fw_raw: &[u8], pack: &FilmPack, asm_dir: &Path, cfg: &Config) ->
         return Err("M5Slave Bank B free flash (0x380000..0x410000) is not zero".into());
     }
 
-    // must keep stock: 0x4D3EC8 (0.70f jpeg budget < PREVIEW_Y) & 0x4D7398 (stock call 0x4D7F9E)
-    if s2[va_off(0x004D_3EC8)..va_off(0x004D_3EC8) + 6] != [0x9F, 0x85, 0x3F, 0x33, 0x33, 0x33] {
-        return Err("stock 0x4D3EC8 (0.70f) mismatch".into());
-    }
-    if s2[va_off(0x004D_7398)..va_off(0x004D_7398) + 6] != [0x9F, 0x8C, 0x00, 0x4D, 0x7F, 0x9E] {
-        return Err("stock 0x4D7398 (call 0x4D7F9E) mismatch".into());
-    }
+    check_stock_instructions(&s2)?;
 
     let sites: &[(u32, [u8; 6], u32)] = &[
         (0x004D_3782, [0x9F, 0x8C, 0x00, 0x53, 0xBE, 0xF0], VA_MATRIX_HOOK),
@@ -165,15 +184,15 @@ pub fn build_m5(fw_raw: &[u8], pack: &FilmPack, asm_dir: &Path, cfg: &Config) ->
         ("hook_matrix", VA_MATRIX_HOOK, VA_LUTSEL_HOOK, &mat_code),
         ("hook_lutsel", VA_LUTSEL_HOOK, VA_MCAS_HOOK, &lut_code),
         ("hook_mcas", VA_MCAS_HOOK, VA_CS_SET_HOOK, &mcas_code),
-        ("cs_set", VA_CS_SET_HOOK, VA_CS_EXF_HOOK, &misc["cs_set"]),
-        ("cs_exf", VA_CS_EXF_HOOK, VA_IPC_UNPK_HOOK, &misc["cs_exf"]),
-        ("ipc_unpack", VA_IPC_UNPK_HOOK, VA_EXIF_CS_HOOK, &misc["ipc_unpack"]),
-        ("exif_cs", VA_EXIF_CS_HOOK, VA_YCC_SUB, &misc["exif_cs"]),
+        ("cs_set", VA_CS_SET_HOOK, VA_CS_EXF_HOOK, misc.get("cs_set").ok_or("hook_ipc_exif.fr80: missing cs_set section")?),
+        ("cs_exf", VA_CS_EXF_HOOK, VA_IPC_UNPK_HOOK, misc.get("cs_exf").ok_or("hook_ipc_exif.fr80: missing cs_exf section")?),
+        ("ipc_unpack", VA_IPC_UNPK_HOOK, VA_EXIF_CS_HOOK, misc.get("ipc_unpack").ok_or("hook_ipc_exif.fr80: missing ipc_unpack section")?),
+        ("exif_cs", VA_EXIF_CS_HOOK, VA_YCC_SUB, misc.get("exif_cs").ok_or("hook_ipc_exif.fr80: missing exif_cs section")?),
         ("ycc_engine", VA_YCC_SUB, VA_SPATIAL_DRV, &ycc_code),
         ("spatial_driver", VA_SPATIAL_DRV, VA_HALO_OPT_LUT, &drv_code),
     ];
     for &(name, va, limit, code) in placements {
-        if va + (code.len() as u32) > limit {
+        if code.len() > (limit - va) as usize {
             return Err(format!("M5Slave {} ({} B) overflows slot 0x{:06X}..0x{:06X}", name, code.len(), va, limit));
         }
         let o = va_off(va);
@@ -193,9 +212,7 @@ pub fn build_m5(fw_raw: &[u8], pack: &FilmPack, asm_dir: &Path, cfg: &Config) ->
     for i in 0..256 {
         clamp_tbl[256 + i] = i as u8;
     }
-    for b in &mut clamp_tbl[512..1024] {
-        *b = 255;
-    }
+    clamp_tbl[512..].fill(255);
     s2[va_off(VA_CLAMP_LUT)..va_off(VA_CLAMP_LUT) + 1024].copy_from_slice(&clamp_tbl);
     s2[va_off(VA_HALO_OPT_LUT)..va_off(VA_HALO_OPT_LUT) + 256].copy_from_slice(&pack.rom_halo_lut);
     s2[va_off(VA_GRAIN_ENVS)..va_off(VA_GRAIN_ENVS) + 768].copy_from_slice(&pack.rom_grain_envs);
@@ -225,13 +242,17 @@ pub fn build_m5(fw_raw: &[u8], pack: &FilmPack, asm_dir: &Path, cfg: &Config) ->
     let ident_rec = build_mcas_struct(&ident_mck, stock_mcb, stock_mcid);
     s2[va_off(VA_MCAS_IDENT)..va_off(VA_MCAS_IDENT) + 0x1AE].copy_from_slice(&ident_rec);
 
+    let write_mcas = |s2: &mut [u8], idx: usize, s: &[u8; 0x1AE], a: &[u8; 0x1AE]| {
+        for (base, record) in [(VA_MCAS_SRGB, s), (VA_MCAS_ARGB, a)] {
+            s2[va_off(base + idx as u32 * MCAS_STRIDE)..][..record.len()].copy_from_slice(record);
+        }
+    };
+
     struct Mode<'a> {
         cmcm: [i16; 9],
         lut_s: &'a [u8],
         lut_a: &'a [u8],
         meta: [u8; 4],
-        /// 12-sector MCAS (sRGB, AdobeRGB); color modes only
-        mcas: Option<(&'a [i16; 108], &'a [i16; 108])>,
     }
     let write_mode = |s2: &mut [u8], idx: usize, m: &Mode| {
         let co = va_off(VA_CMCM_TABLE + (idx as u32) * 32);
@@ -244,36 +265,29 @@ pub fn build_m5(fw_raw: &[u8], pack: &FilmPack, asm_dir: &Path, cfg: &Config) ->
         s2[la..la + 4096].copy_from_slice(&m.lut_a[..4096]);
         let mo = va_off(VA_MODE_META + (idx as u32) * 4);
         s2[mo..mo + 4].copy_from_slice(&scale_meta(m.meta, cfg));
-        if idx < 142
-            && let Some((ms, ma)) = m.mcas
-        {
-            let mso = va_off(VA_MCAS_SRGB + (idx as u32) * 0x200);
-            let mao = va_off(VA_MCAS_ARGB + (idx as u32) * 0x200);
-            s2[mso..mso + 0x1AE].copy_from_slice(&build_mcas_struct(ms, stock_mcb, stock_mcid));
-            s2[mao..mao + 0x1AE].copy_from_slice(&build_mcas_struct(ma, stock_mcb, stock_mcid));
-        }
     };
 
-    // modes 9..13 (dp2q/sdqh) + 14..18 (optical mono)
-    let color = |cmcm, mck, meta| Mode { cmcm, lut_s: stock_std_lut, lut_a: &argb_std_lut, meta, mcas: Some((mck, mck)) };
-    let mono = |meta| Mode { cmcm: eye_q10, lut_s: stock_bw_lut, lut_a: stock_bw_lut, meta, mcas: Some((&ident_mck, &ident_mck)) };
+    let color = |cmcm, meta| Mode { cmcm, lut_s: stock_std_lut, lut_a: &argb_std_lut, meta };
+    let mono = |meta| Mode { cmcm: eye_q10, lut_s: stock_bw_lut, lut_a: stock_bw_lut, meta };
     let quattro = [
-        color(pack.dp2q_cmcm_4[0], &ident_mck, [24, 0, 48, 0]),
-        color(pack.dp2q_cmcm_4[1], &ident_mck, [30, 0, 72, 0]),
-        color(pack.dp2q_cmcm_4[2], &ident_mck, [26, 0, 88, 2]),
-        color(pack.dp2q_cmcm_4[3], &ident_mck, [26, 0, 48, 0]),
-        color(eye_q10, &pack.dp2q_to_mcas, [32, 0, 80, 0]),
+        color(pack.dp2q_cmcm_4[0], [24, 0, 48, 0]),
+        color(pack.dp2q_cmcm_4[1], [30, 0, 72, 0]),
+        color(pack.dp2q_cmcm_4[2], [26, 0, 88, 2]),
+        color(pack.dp2q_cmcm_4[3], [26, 0, 48, 0]),
+        color(eye_q10, [32, 0, 80, 0]),
         mono([38, 2, 56, 1]),
         mono([38, 2, 56, 1]),
         mono([40, 2, 60, 1]),
         mono([42, 2, 64, 1]),
         mono([36, 2, 52, 1]),
     ];
+    let teal_orange_mcas = build_mcas_struct(&pack.dp2q_to_mcas, stock_mcb, stock_mcid);
     for (idx, m) in quattro.iter().enumerate() {
         write_mode(&mut s2, idx, m);
+        let record = if idx == 4 { &teal_orange_mcas } else { &ident_rec };
+        write_mcas(&mut s2, idx, record, record);
     }
 
-    // modes 19..150 (132 color recipes)
     let color_cal = par_map(&pack.color_recipes, |r| {
         (
             calibrate_lut_dp2m(&r.lut_srgb_raw, stock_std_lut),
@@ -283,650 +297,41 @@ pub fn build_m5(fw_raw: &[u8], pack: &FilmPack, asm_dir: &Path, cfg: &Config) ->
         )
     });
     for ((c_i, r), (ls, la, ms, ma)) in pack.color_recipes.iter().enumerate().zip(&color_cal) {
-        let idx = 10 + c_i;
-        write_mode(&mut s2, idx, &Mode { cmcm: r.cmcm_q10, lut_s: ls, lut_a: la, meta: r.meta, mcas: None });
-        let mso = va_off(VA_MCAS_SRGB + (idx as u32) * 0x200);
-        let mao = va_off(VA_MCAS_ARGB + (idx as u32) * 0x200);
-        s2[mso..mso + 0x1AE].copy_from_slice(ms);
-        s2[mao..mao + 0x1AE].copy_from_slice(ma);
+        let idx = quattro.len() + c_i;
+        write_mode(&mut s2, idx, &Mode { cmcm: r.cmcm_q10, lut_s: ls, lut_a: la, meta: r.meta });
+        write_mcas(&mut s2, idx, ms, ma);
         let so = va_off(VA_LUT3D_SRGB + (c_i * LUT3D_STRIDE) as u32);
         let ao = va_off(VA_LUT3D_ARGB + (c_i * LUT3D_STRIDE) as u32);
         // the engine reads 3d lut bytes biased (s8 ^ 0x80) to skip sign extension
         for (o, lut) in [(so, &r.lut3d_srgb_q1), (ao, &r.lut3d_argb_q1)] {
-            s2[o..o + 4131].iter_mut().zip(lut).for_each(|(d, &s)| *d = s ^ 0x80);
+            s2[o..o + lut.len()].iter_mut().zip(lut).for_each(|(d, &s)| *d = s ^ 0x80);
         }
     }
 
-    // modes 151..190 (40 bw recipes)
     let bw_cal = par_map(&pack.bw_recipes, |r| {
         (calibrate_lut_dp2m(&r.lut_srgb_raw, stock_std_lut), calibrate_lut_dp2m(&r.lut_argb_raw, stock_std_lut))
     });
     for ((bw_i, r), (ls, la)) in pack.bw_recipes.iter().enumerate().zip(&bw_cal) {
-        write_mode(&mut s2, 142 + bw_i, &Mode { cmcm: r.cmcm_q10, lut_s: ls, lut_a: la, meta: r.meta, mcas: None });
+        write_mode(&mut s2, (PACKED_BW0 - FILM_MODE0) as usize + bw_i, &Mode { cmcm: r.cmcm_q10, lut_s: ls, lut_a: la, meta: r.meta });
         let to = va_off(VA_BW_TONER_40 + (bw_i * 512) as u32);
         s2[to..to + 512].copy_from_slice(&r.toner_cb_cr);
     }
 
-    // modes 191..198 (sd lut slots)
-    let sd = Mode { cmcm: eye_q10, lut_s: stock_std_lut, lut_a: &argb_std_lut, meta: cfg.m5.sd_lut_defaults.meta(), mcas: None };
+    let sd = Mode { cmcm: eye_q10, lut_s: stock_std_lut, lut_a: &argb_std_lut, meta: cfg.m5.sd_lut_defaults.meta() };
     for s_i in 0..8 {
-        write_mode(&mut s2, 182 + s_i, &sd);
+        write_mode(&mut s2, (PACKED_SD0 - FILM_MODE0) as usize + s_i, &sd);
     }
 
-    if s2[va_off(0x0080_0000)..] != s2_stock[va_off(0x0080_0000)..] {
+    if s2[NOR_END_OFF..] != s2_stock[NOR_END_OFF..] {
         return Err("CRITICAL: modified bytes at VA >= 0x800000 (exceeds 8 MB NOR flash)".into());
     }
 
     let csum = m5_checksum(&s2);
-    s2[0x4C..0x50].copy_from_slice(&csum.to_be_bytes());
-    let nor8_sum = s2[0x80..0x80_0080].iter().fold(0u32, |acc, &b| acc.wrapping_add(b as u32));
+    s2[CHECKSUM_FIELD].copy_from_slice(&csum.to_be_bytes());
+    let nor8_sum = byte_sum(&s2[CHECKSUM_START..CHECKSUM_END]);
     if csum != nor8_sum {
         return Err(format!("CRITICAL: 8 MB checksum mismatch ({:#010x} != {:#010x})", csum, nor8_sum));
     }
 
     Ok(s2)
-}
-
-const SYM_MDF_OPEN: u32 = 0x0048_AB80;
-const SYM_MDF_CLOSE: u32 = 0x0048_ABAA;
-const SYM_MDF_READ: u32 = 0x0048_ABD0;
-const SYM_STRIDE_DEFAULT: u32 = 0x0049_07CA;
-const SYM_HW_JPEG_ENCODE: u32 = 0x004D_3E82;
-const SYM_GET_IMG_DIM: u32 = 0x004D_4E56;
-const SYM_GET_JOB_CM: u32 = 0x004D_D702;
-const SYM_GET_JOB_1D: u32 = 0x004D_D72A;
-const SCRATCH_SD_LUT: u32 = 0x8010_3500;
-
-// emulated capture job: caller frame (job id @ +8), stack, {Y, Cb, Cr} table, planes, ctx for direct engine runs
-const EMU_FP: u32 = 0x8008_0200;
-const EMU_SP: u32 = 0x8008_0100;
-const EMU_PLANES: u32 = 0x8009_0000;
-const EMU_CTX: u32 = 0x8008_5000;
-const IMG_VA: [u32; 3] = [0x8200_0000, 0x8300_0000, 0x8380_0000];
-const SCRATCH_LEN: usize = 0xC800;
-// PREVIEW_Y, THUMB_Y/CB/CR & RAW buffers that must stay untouched
-const GUARDS: [(u32, usize, u8); 3] = [(0x80FB_0580, 0x1000, 0x5A), (0x8104_6580, 0x5010, 0x6B), (0x8104_B590, 0x4000, 0xA5)];
-const EMU_STEPS: u64 = 200_000_000;
-
-/// 4:2:2 planar YCbCr (luma stride `w`, chroma stride `w / 2`)
-#[derive(Clone, PartialEq)]
-pub(crate) struct Ycc {
-    pub w: u32,
-    pub h: u32,
-    pub p: [Vec<u8>; 3],
-}
-
-impl Ycc {
-    /// smooth ramps, hard-edged blocks, clipped highlights & a noisy right quarter
-    pub fn synth(w: u32, h: u32) -> Self {
-        let mut s = 0x2545_F491u32;
-        let mut p = [vec![0u8; (w * h) as usize], vec![0u8; (w / 2 * h) as usize], vec![0u8; (w / 2 * h) as usize]];
-        for r in 0..h {
-            for x in 0..w {
-                s ^= s << 13;
-                s ^= s >> 17;
-                s ^= s << 5;
-                let block = (x / 48 + r / 24) % 5 == 0;
-                let noise = if x >= w * 3 / 4 { (s >> 27) as i32 - 16 } else { 0 };
-                let y = 24 + (x * 160 / w + r * 48 / h) as i32 + if block { 64 } else { 0 } + noise;
-                p[0][(r * w + x) as usize] = if x % 640 < 48 && r % 96 < 20 { 255 } else { y.clamp(0, 255) as u8 };
-                if x % 2 == 0 {
-                    let (c, e) = ((r * (w / 2) + x / 2) as usize, if block { 24 } else { 0 });
-                    p[1][c] = (88 + (x * 80 / w) as i32 + e + noise / 2).clamp(0, 255) as u8;
-                    p[2][c] = (168 - (r * 80 / h) as i32 - e + noise / 2).clamp(0, 255) as u8;
-                }
-            }
-        }
-        Self { w, h, p }
-    }
-}
-
-pub(crate) struct EngineCall {
-    pub ctx: Vec<u32>,
-    pub scratch: Vec<u8>,
-    pub steps: u64,
-    pub mem: [u64; 2],
-}
-
-pub(crate) struct Shot {
-    pub out: Ycc,
-    pub call: Option<EngineCall>,
-    pub steps: u64,
-}
-
-fn emu_job<'a>(s2: &'a [u8], img: &Ycc) -> (Emulator<'a>, [usize; 3], usize) {
-    let mut e = Emulator::new(s2, DELTA);
-    let planes = core::array::from_fn(|i| {
-        let k = e.map_sdram(IMG_VA[i], img.p[i].len());
-        e.sdram[k].data.copy_from_slice(&img.p[i]);
-        k
-    });
-    let si = e.map_sdram(SCRATCH_BASE, SCRATCH_LEN);
-    for (va, len, fill) in GUARDS {
-        let k = e.map_sdram(va, len);
-        e.sdram[k].data.fill(fill);
-    }
-    e.r[14] = EMU_FP;
-    e.r[15] = EMU_SP;
-    (e, planes, si)
-}
-
-fn emu_out(e: &Emulator, planes: [usize; 3], img: &Ycc) -> Result<Ycc, String> {
-    if GUARDS.iter().any(|&(va, _, fill)| e.sdram.iter().find(|r| r.base == va).unwrap().data.iter().any(|&b| b != fill)) {
-        return Err("CRITICAL: M5Slave scratch touched PREVIEW, THUMB_Y, or RAW/RGB SDRAM!".into());
-    }
-    Ok(Ycc { w: img.w, h: img.h, p: planes.map(|k| e.sdram[k].data.clone()) })
-}
-
-/// runs the 0x4D738E hook as the stock caller does; `sd` serves `D:\LUTn.BIN`, `engine = false` skips the ycc pass
-pub(crate) fn run_driver(s2: &[u8], cm: u32, p1d: u32, img: &Ycc, sd: Option<&[u8]>, engine: bool) -> Result<Shot, String> {
-    use std::{cell::RefCell, rc::Rc};
-    let (mut e, planes, si) = emu_job(s2, img);
-    for (i, va) in IMG_VA.into_iter().enumerate() {
-        e.w32(EMU_PLANES + 4 * i as u32, va);
-    }
-    e.w32(EMU_FP + 8, 3);
-    e.w32(EMU_SP, 0);
-    let args = [EMU_PLANES, 0x8050_E000, 1, 1];
-    e.r[4..8].copy_from_slice(&args);
-    let (w, h) = (img.w, img.h);
-    e.set_handler(SYM_GET_JOB_1D, move |em| { em.r[4] = p1d; em.rp });
-    e.set_handler(SYM_GET_JOB_CM, move |em| { em.r[4] = cm; em.rp });
-    e.set_handler(SYM_GET_IMG_DIM, move |em| { em.r[4] = if em.r[4] == 0 { w } else { h }; em.rp });
-    e.set_handler(SYM_STRIDE_DEFAULT, move |em| { em.r[4] = w; em.rp });
-    if let Some(file) = sd {
-        let (file, name) = (file.to_vec(), format!("D:\\LUT{}.BIN\0", cm.wrapping_sub(190)));
-        e.set_handler(SYM_MDF_OPEN, move |em| {
-            let ok = name.bytes().enumerate().all(|(i, b)| em.r8(em.r[4] + i as u32) == b);
-            em.r[4] = if ok { 3 } else { u32::MAX };
-            em.rp
-        });
-        e.set_handler(SYM_MDF_READ, move |em| {
-            let n = (em.r[6] as usize).min(file.len());
-            for (i, &b) in file[..n].iter().enumerate() {
-                em.w8(em.r[5] + i as u32, b);
-            }
-            em.w32(em.r[7], n as u32);
-            em.r[4] = 0;
-            em.rp
-        });
-        e.set_handler(SYM_MDF_CLOSE, |em| { em.r[4] = 0; em.rp });
-    }
-    let call = Rc::new(RefCell::new(None::<Result<EngineCall, String>>));
-    let cc = call.clone();
-    e.set_handler(VA_YCC_SUB, move |em| {
-        let (ret, sp) = (em.rp, em.r[15]);
-        let ctx = (0..22).map(|i| em.r32(em.r[4] + i * 4)).collect();
-        let scratch = em.sdram[si].data.clone();
-        let m0 = em.mem;
-        let steps = if engine { em.run(VA_YCC_SUB, EMU_STEPS) } else { Ok(0) };
-        let mem = [em.mem[0] - m0[0], em.mem[1] - m0[1]];
-        *cc.borrow_mut() = Some(steps.and_then(|steps| {
-            if em.r[15] != sp {
-                return Err("ycc engine stack imbalance".into());
-            }
-            Ok(EngineCall { ctx, scratch, steps, mem })
-        }));
-        ret
-    });
-    let tail = Rc::new(std::cell::Cell::new(None));
-    let tc = tail.clone();
-    e.set_handler(SYM_HW_JPEG_ENCODE, move |em| {
-        tc.set(Some(([em.r[4], em.r[5], em.r[6], em.r[7]], em.r[15], em.rp)));
-        em.rp
-    });
-    let steps = e.run(VA_SPATIAL_DRV, EMU_STEPS)?;
-    if tail.get() != Some((args, EMU_SP, fr80::RETURN)) {
-        return Err(format!("cm={} p1d={:#x}: no balanced tail call into stock HW JPEG", cm, p1d));
-    }
-    let call = call.borrow_mut().take().transpose()?;
-    Ok(Shot { out: emu_out(&e, planes, img)?, call, steps })
-}
-
-/// runs the ycc engine on `img` with a captured driver ctx & scratch (planes, dims & strides rebound to `img`);
-/// `prof` receives per-halfword hits over `VA_YCC_SUB..VA_SPATIAL_DRV`
-pub(crate) fn run_engine(s2: &[u8], ctx: &[u32], scratch: &[u8], img: &Ycc, prof: Option<&mut Vec<u64>>) -> Result<(Ycc, EngineCall), String> {
-    let (mut e, planes, si) = emu_job(s2, img);
-    if prof.is_some() {
-        e.prof = Some((VA_YCC_SUB, vec![0; ((VA_SPATIAL_DRV - VA_YCC_SUB) / 2) as usize]));
-    }
-    e.sdram[si].data.copy_from_slice(scratch);
-    let mut c = ctx.to_vec();
-    c[..7].copy_from_slice(&[IMG_VA[0], IMG_VA[1], IMG_VA[2], img.w, img.h, img.w, img.w / 2]);
-    for (i, &v) in c.iter().enumerate() {
-        e.w32(EMU_CTX + 4 * i as u32, v);
-    }
-    e.r[4] = EMU_CTX;
-    let steps = e.run(VA_YCC_SUB, EMU_STEPS)?;
-    if e.r[15] != EMU_SP {
-        return Err(format!("ycc engine stack imbalance (fx={})", c[7]));
-    }
-    if let (Some(p), Some((_, hits))) = (prof, e.prof.take()) {
-        *p = hits;
-    }
-    let call = EngineCall { ctx: c, scratch: e.sdram[si].data.clone(), steps, mem: e.mem };
-    Ok((emu_out(&e, planes, img)?, call))
-}
-
-pub fn verify_m5(s2: &[u8]) -> Result<(), String> {
-    if s2.len() < 0x80_0080 {
-        return Err(format!("Firm.bin too short ({} B < 0x800080)", s2.len()));
-    }
-    let hdr_sum = u32::from_be_bytes(s2[0x4C..0x50].try_into().unwrap());
-    let full_sum = m5_checksum(s2);
-    let nor8_sum = s2[0x80..0x80_0080].iter().fold(0u32, |acc, &b| acc.wrapping_add(b as u32));
-    if hdr_sum != full_sum || hdr_sum != nor8_sum {
-        return Err(format!("checksum mismatch: hdr={:#x} full={:#x} nor8={:#x}", hdr_sum, full_sum, nor8_sum));
-    }
-    if s2[va_off(0x004D_3EC8)..va_off(0x004D_3EC8) + 6] != [0x9F, 0x85, 0x3F, 0x33, 0x33, 0x33] {
-        return Err("0x4D3EC8 is not stock 0.70f".into());
-    }
-    if s2[va_off(0x004D_7398)..va_off(0x004D_7398) + 6] != [0x9F, 0x8C, 0x00, 0x4D, 0x7F, 0x9E] {
-        return Err("0x4D7398 is not stock call 0x4D7F9E".into());
-    }
-
-    {
-        let mut e = Emulator::new(s2, DELTA);
-        e.r[14] = 0x8008_0200;
-        e.r[15] = 0x8008_0100;
-        e.w32(0x8008_0200 + 12, 116);
-        let cc_real: [i16; 9] = [320, -154, -38, -64, 243, -51, -26, -102, 256];
-        for (k, &v) in cc_real.iter().enumerate() {
-            e.w16(0x8000_CC44 + (k as u32) * 2, (v as u16) & 0x0FFF);
-        }
-        let got = std::rc::Rc::new(std::cell::RefCell::new(Vec::<i32>::new()));
-        let got_c = got.clone();
-        e.set_handler(0x004B_1F20, move |em| {
-            let mut row = Vec::with_capacity(9);
-            for k in 0..9 {
-                let raw = em.r16(em.r[4] + 2 + (k as u32) * 2) as i32;
-                row.push(if raw & 0x800 != 0 { raw - 4096 } else { raw });
-            }
-            *got_c.borrow_mut() = row;
-            em.rp
-        });
-        e.run(VA_MATRIX_HOOK, 10_000)?;
-        let m = got.borrow();
-        if m.len() != 9 || *m.iter().min().unwrap() >= -50 || *m.iter().max().unwrap() >= 400 {
-            return Err(format!("signed CCMatrix ASR failed: {:?}", *m));
-        }
-    }
-
-    for cs_val in [1u32, 2u32] {
-        for &(va_cs, orig) in &[(VA_CS_SET_HOOK, 0x0049_7674), (VA_CS_EXF_HOOK, 0x004D_4FF4)] {
-            let mut e = Emulator::new(s2, DELTA);
-            e.r[4] = (3 << 5) | (4 << 2) | cs_val;
-            let got = std::rc::Rc::new(std::cell::Cell::new(0u32));
-            let gc = got.clone();
-            e.set_handler(orig, move |em| {
-                gc.set(em.r[4]);
-                em.rp
-            });
-            e.run(va_cs, 200)?;
-            if got.get() != cs_val {
-                return Err(format!("CS mask @ {:#x} failed: {} != {}", va_cs, got.get(), cs_val));
-            }
-        }
-
-        for cm in 1..=MAX_PACKED_MODE as u32 {
-            let mut e = Emulator::new(s2, DELTA);
-            e.r[14] = 0x8008_0200;
-            e.r[15] = 0x8008_0100;
-            e.w32(0x8008_0200 + 12, cm);
-            for k in 0..9 {
-                e.w16(0x8000_CC44 + k * 2, if k == 0 || k == 4 || k == 8 { 0x0080 } else { 0 });
-            }
-            let tag = std::rc::Rc::new(std::cell::Cell::new(0u32));
-            let t1 = tag.clone();
-            let t2 = tag.clone();
-            e.set_handler(0x0053_BEF0, move |em| { t1.set(1); em.rp });
-            e.set_handler(0x004B_1F20, move |em| { t2.set(em.r16(em.r[4]) as u32); em.rp });
-            e.run(VA_MATRIX_HOOK, 10_000)?;
-            let exp = if cm <= 8 || cm >= 191 { 1 } else { 0x0200 };
-            if e.r[15] != 0x8008_0100 || tag.get() != exp {
-                return Err(format!("matrix mode {} failed (got {:#x})", cm, tag.get()));
-            }
-
-            let mut e = Emulator::new(s2, DELTA);
-            e.w32(0x8000_1B88, cs_val);
-            e.r[5] = cm;
-            let hit_stock = std::rc::Rc::new(std::cell::Cell::new(false));
-            let hs = hit_stock.clone();
-            e.set_handler(0x0049_50E0, move |em| { hs.set(true); em.rp });
-            e.run(VA_LUTSEL_HOOK, 500)?;
-            if cm <= 8 {
-                if !hit_stock.get() {
-                    return Err(format!("lutsel mode {} did not hit stock", cm));
-                }
-            } else {
-                let base = if cs_val == 2 { VA_LUTS_ARGB } else { VA_LUTS_SRGB };
-                let exp_va = base + (cm - 9) * 4096;
-                if e.r[4] != exp_va {
-                    return Err(format!("lutsel({}, cs={}): {:#x} != {:#x}", cm, cs_val, e.r[4], exp_va));
-                }
-            }
-
-            let mut e = Emulator::new(s2, DELTA);
-            e.r[14] = 0x8008_0200;
-            e.r[15] = 0x8008_0180;
-            e.w32(0x8008_0200 + 16, 1);
-            e.w32(0x8000_1B88, cs_val);
-            let sentinel: [u8; 18] = core::array::from_fn(|i| (0x11 + i) as u8);
-            for (i, &b) in sentinel.iter().enumerate() {
-                e.w8(0x8001_2E46 + i as u32, b);
-            }
-            let mcas_src = std::rc::Rc::new(std::cell::Cell::new(0u32));
-            let shadow_ok = std::rc::Rc::new(std::cell::Cell::new(false));
-            let ms = mcas_src.clone();
-            let so = shadow_ok.clone();
-            e.set_handler(0x004B_3546, |em| em.rp);
-            e.set_handler(0x004D_D702, move |em| { em.r[4] = cm; em.rp });
-            e.set_handler(0x004A_201C, move |em| {
-                let (dst, src, n) = (em.r[4], em.r[5], em.r[6]);
-                if n == 0x1AE {
-                    ms.set(src);
-                }
-                for i in 0..n {
-                    let b = em.r8(src + i);
-                    em.w8(dst + i, b);
-                }
-                em.rp
-            });
-            e.set_handler(0x004B_2088, move |em| {
-                let got: [u8; 18] = core::array::from_fn(|i| em.r8(em.r[5] + 0x14 + i as u32));
-                so.set(em.r[4] == 1 && got == sentinel);
-                em.rp
-            });
-            e.run(VA_MCAS_HOOK, 20_000)?;
-            let exp_m = if cm <= 8 || cm >= 151 {
-                VA_MCAS_IDENT
-            } else {
-                (if cs_val == 2 { VA_MCAS_ARGB } else { VA_MCAS_SRGB }) + (cm - 9) * 0x200
-            };
-            if e.r[15] != 0x8008_0180 || !shadow_ok.get() || mcas_src.get() != exp_m {
-                return Err(format!("MCAS mode {} cs={} failed", cm, cs_val));
-            }
-        }
-    }
-
-    for &(cm_v, fx_v, fill_v, cs_v) in &[
-        (1u32, 0u32, 0u32, 1u32), (8, 0, 0, 2), (22, 7, 2, 2), (124, 1, 0, 2), (198, 6, 3, 2),
-    ] {
-        let mut e = Emulator::new(s2, DELTA);
-        let cmd_va = 0x8008_1000;
-        let slot_va = 0x8008_1200;
-        let p1d = (fill_v << 5) | (fx_v << 2) | cs_v;
-        e.w8(cmd_va + 5, cm_v as u8);
-        e.w8(cmd_va + 6, p1d as u8);
-        e.w32(slot_va + 0x150, 3);
-        e.w32(slot_va + 0x14C, 1);
-        e.r[14] = 0x8008_0800;
-        e.r[15] = 0x8008_0400;
-        e.w32(0x8008_0800 + 8, cmd_va);
-        e.r[4] = 5;
-        e.r[5] = slot_va;
-        e.set_handler(0x004D_CC48, |em| em.rp);
-        e.run(VA_IPC_UNPK_HOOK, 500)?;
-        let exp_cm = if cm_v < 9 { 3 } else { cm_v };
-        if e.r32(slot_va + 0x150) != exp_cm || e.r32(slot_va + 0x14C) != p1d {
-            return Err(format!("IPC unpack failed for cm={} p1d={:#x}", cm_v, p1d));
-        }
-
-        let mut e2 = Emulator::new(s2, DELTA);
-        e2.w32(0x8008_1200 + 0x94, p1d);
-        e2.w32(0x8008_1300 + 0x94, p1d);
-        e2.r[14] = 0x8008_0800;
-        e2.r[15] = 0x8008_0400;
-        e2.w32(0x8008_0800 + 20, 0x8008_1300);
-        e2.r[4] = 0x8008_1200;
-        e2.set_handler(0x0051_2E30, |em| em.rp);
-        e2.run(VA_EXIF_CS_HOOK, 500)?;
-        if e2.r32(0x8008_1294) != cs_v || e2.r32(0x8008_1394) != cs_v {
-            return Err("EXIF CS mask failed".into());
-        }
-    }
-
-    // full-width capture (80x53 pyramid grids), then every fx combo over a 4704x8 strip
-    let (big, strip) = (Ycc::synth(4704, 3136), Ycc::synth(4704, 8));
-    let cm_c = 23 + 12 * 8 + 5;
-    let tint = s2[va_off(VA_MODE_META + (cm_c - 9) * 4) + 3];
-    let fxs: [u32; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
-    let strip_res = par_map(&fxs, |&fx| -> Result<(Ycc, u64, (u64, u64)), String> {
-        let shot = run_driver(s2, cm_c, (1 << 5) | (fx << 2) | 2, &big, None, false)?;
-        let c = shot.call.ok_or("4704x3136: no ycc pass")?;
-        if c.ctx[16] != 80 || c.ctx[17] != 53 {
-            return Err(format!("4704x3136 pyramid failed: {:?}", c.ctx));
-        }
-        let (out, run) = run_engine(s2, &c.ctx, &c.scratch, &strip, None)?;
-        Ok((out, shot.steps, (run.steps / (4704 / 2 * 8), run.mem[0] / (4704 / 2 * 8))))
-    });
-    let mut strip_out = Vec::with_capacity(8);
-    let (mut pyr_steps, mut full_fx) = (0, (0, 0));
-    for r in strip_res {
-        let (out, steps, f) = r?;
-        pyr_steps = pyr_steps.max(steps);
-        full_fx = f;
-        strip_out.push(out);
-    }
-    for fx in [4, 5] {
-        let bloom = strip_out[fx].p[2].iter().zip(&strip_out[fx ^ 4].p[2]).map(|(&a, &b)| a as i32 - b as i32).max();
-        if tint != 1 && bloom < Some(8) {
-            return Err(format!("4704x8 fx={} halation did not bloom Cr", fx));
-        }
-    }
-
-    // stage matrix: fx (b0 3d lut, b1 grain, b2 halation) x fill x cs on stock / color / B&W / SD-LUT modes
-    let img = Ycc::synth(64, 32);
-    let mut sd = vec![0u8; 0x1040];
-    sd[..16].copy_from_slice(b"D2ML\x01\x1E\x00\x50\x02verify\0");
-    let lo = va_off(VA_LUT3D_SRGB + 5 * LUT3D_STRIDE as u32);
-    sd[0x10..0x10 + 4131].iter_mut().zip(&s2[lo..lo + 4131]).for_each(|(d, &s)| *d = s ^ 0x80);
-    let jobs: Vec<(u32, u32, u32)> = [3u32, cm_c, 151 + 13, 191]
-        .into_iter()
-        .flat_map(|cm| [1u32, 2].into_iter().flat_map(move |cs| (0..4u32).map(move |fill| (cm, cs, fill))))
-        .collect();
-    let job_res = par_map(&jobs, |&(cm, cs, fill)| -> Result<usize, String> {
-        let meta: [u8; 4] = match cm {
-            191.. => [sd[5], sd[6], sd[7], sd[8]],
-            9.. => s2[va_off(VA_MODE_META + (cm - 9) * 4)..][..4].try_into().unwrap(),
-            _ => [28, 0, 64, 0],
-        };
-        let toner = if (151..=190).contains(&cm) { VA_BW_TONER_40 + (cm - 151) * 512 } else { 0 };
-        let lut = match cm {
-            19..=150 => (if cs == 2 { VA_LUT3D_ARGB } else { VA_LUT3D_SRGB }) + (cm - 19) * LUT3D_STRIDE as u32,
-            191..=198 => SCRATCH_SD_LUT + 0x10,
-            _ => 0,
-        };
-        let shots = (0..8u32)
-            .map(|fx| run_driver(s2, cm, (fill << 5) | (fx << 2) | cs, &img, (cm >= 191).then_some(&sd[..]), true))
-            .collect::<Result<Vec<_>, _>>()?;
-        for (fx, shot) in (0u32..).zip(&shots) {
-            let tag = format!("cm={} cs={} fill={} fx={}", cm, cs, fill, fx);
-            let (lut_on, grain_on, halo_on) = (fx & 1 != 0 && lut != 0, fx & 2 != 0, fx & 4 != 0 && meta[2] != 0);
-            let work = lut_on || grain_on || halo_on || fill != 0 || toner != 0;
-            match &shot.call {
-                Some(c) if work => {
-                    let got = (c.ctx[7], c.ctx[8], c.ctx[9], c.ctx[10], grain_on.then_some(c.ctx[12]), c.ctx[19] != 0, c.ctx[20] != 0);
-                    let exp = (fx, fill, if lut_on { lut } else { 0 }, toner, grain_on.then_some(meta[0] as u32), halo_on, fill != 0);
-                    if got != exp {
-                        return Err(format!("{}: ctx {:?} != {:?}", tag, got, exp));
-                    }
-                }
-                None if !work => {}
-                _ => return Err(format!("{}: ycc pass {} != expected {}", tag, shot.call.is_some(), work)),
-            }
-            for (bit, on) in [(1, lut != 0), (2, meta[0] != 0), (4, meta[2] != 0)] {
-                if fx & bit == 0 && (shots[(fx | bit) as usize].out != shot.out) != on {
-                    return Err(format!("{}: fx bit {} {} the output", tag, bit, if on { "did not change" } else { "changed" }));
-                }
-            }
-        }
-        Ok(shots.len())
-    });
-    let mut runs = 0;
-    for r in job_res {
-        runs += r?;
-    }
-
-    println!(
-        "  [VERIFY M5Slave] 198 modes x 2 CS, signed CCMatrix, IPC/EXIF, 4704x3136 pyramid ({} insns), 4704x8 fx 0..7 (fx=7 fill=1: {} insns, {} SDRAM/pair), {} fx x fill x CS stage runs, zero-collision 0x80100000: PASS",
-        pyr_steps, full_fx.0, full_fx.1, runs
-    );
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn firm() -> Vec<u8> {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let fw = std::fs::read(root.join("data/DP2MV105.bin")).expect("data/DP2MV105.bin");
-        let pack = FilmPack::load(&root.join("data/film_pack.bin")).unwrap();
-        build_m5(&fw, &pack, &root.join("src/asm/m5"), &Config::default()).unwrap()
-    }
-
-    #[test]
-    fn pack_swar_signed_deltas() {
-        let s2 = firm();
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let (_, labels) = fr80::assemble_file_labels(&root.join("src/asm/m5/ycc_engine.fr80"), VA_YCC_SUB, &HashMap::new()).unwrap();
-        let entry = labels.iter().find(|(_, name)| name == "pack_swar").unwrap().0;
-        for delta in -127i32..=127 {
-            let mut e = Emulator::new(&s2, DELTA);
-            e.r[4] = delta as u32;
-            for reg in [3, 5, 7, 8, 9, 10] {
-                e.r[reg] = 0x1234_0000 + reg as u32;
-            }
-            let steps = e.run(entry, 100).unwrap();
-            let expected = (delta.unsigned_abs() * 0x0101_0101) | if delta < 0 { 0x8000_0000 } else { 0 };
-            assert_eq!(e.r[4], expected, "delta={delta}");
-            assert_eq!(steps, 10);
-            for reg in [3, 5, 7, 8, 9, 10] {
-                assert_eq!(e.r[reg], 0x1234_0000 + reg as u32);
-            }
-        }
-    }
-
-    /// ycc engine insns & SDRAM / ROM data accesses per pixel pair for every fx x fill combo; `s/L` = engine
-    /// seconds for a 4704x3136 capture at ~70M insns/s. `DP2M_REF_ASM=<dir>` (e.g. `git archive <rev> src/asm/m5`)
-    /// also runs that engine & driver on the same ctx / input and diffs them; `DP2M_PROF=1` prints insns/pair per
-    /// engine block. `cargo test --release --offline ycc_bench -- --ignored --nocapture`
-    /// `DP2M_BENCH_STRESS=1` adds constant boundary frames and full-range noise;
-    /// `DP2M_REF_EXACT=1` makes any output difference against `DP2M_REF_ASM` fail.
-    #[test]
-    #[ignore]
-    fn ycc_bench() {
-        let s2 = firm();
-        let refs = std::env::var_os("DP2M_REF_ASM").map(|d| {
-            let mut r = s2.clone();
-            for (f, va) in [("ycc_engine.fr80", VA_YCC_SUB), ("spatial_driver.fr80", VA_SPATIAL_DRV)] {
-                let code = assemble_file(&Path::new(&d).join(f), va, &HashMap::new()).unwrap();
-                r[va_off(va)..][..code.len()].copy_from_slice(&code);
-            }
-            r
-        });
-        let prof = std::env::var_os("DP2M_PROF").is_some();
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let mut labels = fr80::assemble_file_labels(&root.join("src/asm/m5/ycc_engine.fr80"), VA_YCC_SUB, &HashMap::new()).unwrap().1;
-        labels.insert(0, (VA_YCC_SUB, "<entry>".into()));
-        let cm_c = 23 + 12 * 8 + 5;
-        let groups = [("color", cm_c, 0), ("color fill=1", cm_c, 1), ("color fill=2", cm_c, 2), ("color fill=3", cm_c, 3), ("B&W toner", 151 + 13, 0), ("B&W fill=2", 151 + 13, 2)];
-        let mut sizes = vec![("mixed".to_string(), Ycc::synth(256, 128), Ycc::synth(256, 128)), ("strip".to_string(), Ycc::synth(4704, 8), Ycc::synth(4704, 3136))];
-        if std::env::var_os("DP2M_BENCH_STRESS").is_some() {
-            for level in [0, 1, 127, 128, 254, 255] {
-                let mut img = Ycc::synth(64, 32);
-                for plane in &mut img.p { plane.fill(level); }
-                sizes.push((format!("constant-{level}"), img.clone(), img));
-            }
-            let mut img = Ycc::synth(256, 32);
-            let mut seed = 0x1234_5678u32;
-            for plane in &mut img.p {
-                for pixel in plane {
-                    seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5;
-                    *pixel = seed as u8;
-                }
-            }
-            sizes.push(("noise".to_string(), img.clone(), img));
-        }
-        if let Some(dir) = std::env::var_os("DP2M_BENCH_YCC") {
-            let mut entries: Vec<_> = std::fs::read_dir(&dir)
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("ycc"))
-                .collect();
-            entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
-            for path in entries {
-                let raw = std::fs::read(&path).unwrap();
-                let w = u32::from_le_bytes(raw[0..4].try_into().unwrap());
-                let h = u32::from_le_bytes(raw[4..8].try_into().unwrap());
-                let y_len = (w * h) as usize;
-                let c_len = (w / 2 * h) as usize;
-                assert_eq!(raw.len(), 8 + y_len + 2 * c_len, "bad ycc size: {}", path.display());
-                let ycc = Ycc {
-                    w,
-                    h,
-                    p: [
-                        raw[8..8 + y_len].to_vec(),
-                        raw[8 + y_len..8 + y_len + c_len].to_vec(),
-                        raw[8 + y_len + c_len..].to_vec(),
-                    ],
-                };
-                let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
-                sizes.push((stem, ycc.clone(), ycc));
-            }
-        }
-        let l_pairs = 4704.0 * 3136.0 / 2.0;
-        for (fixture, img, cap) in &sizes {
-            let pairs = (img.w / 2 * img.h) as f64;
-            println!("\n{} {}x{} ({} pairs)  insns/pair  sdram/pair  rom/pair   s/L  [ref insns  ref sdram  max|d|  mean|d|  (diff px)]", fixture, img.w, img.h, pairs);
-            for (label, cm, fill) in groups {
-                for fx in 0..8u32 {
-                    let p1d = (fill << 5) | (fx << 2) | 1;
-                    let shot = run_driver(&s2, cm, p1d, cap, None, false).unwrap();
-                    let Some(c) = shot.call else {
-                        println!("  {:<13} fx={}  stock HW JPEG", label, fx);
-                        continue;
-                    };
-                    let mut hits = vec![];
-                    let (out, run) = run_engine(&s2, &c.ctx, &c.scratch, img, prof.then_some(&mut hits)).unwrap();
-                    let per = |v: u64| v as f64 / pairs;
-                    let mut line = format!(
-                        "  {:<13} fx={}  {:>9.1}  {:>9.2}  {:>8.2}  {:>5.1}",
-                        label, fx, per(run.steps), per(run.mem[0]), per(run.mem[1]), per(run.steps) * l_pairs / 70e6
-                    );
-                    if let Some(r) = &refs {
-                        let rc = run_driver(r, cm, p1d, cap, None, false).unwrap().call.unwrap();
-                        assert!(rc.ctx[..21] == c.ctx[..21], "{} fx={}: driver ctx differ from ref", label, fx);
-                        if c.ctx[19] != 0 {
-                            assert!(rc.scratch[..0x1100] == c.scratch[..0x1100], "{} fx={}: halo grid differs", label, fx);
-                        }
-                        if c.ctx[20] != 0 {
-                            assert!(rc.ctx[21] == c.ctx[21] && rc.scratch[0x2200..0x3300] == c.scratch[0x2200..0x3300], "{} fx={}: fill grid differs", label, fx);
-                        }
-                        let (rout, rrun) = run_engine(r, &c.ctx, &c.scratch, img, None).unwrap();
-                        let d: Vec<u32> = (0..3).flat_map(|k| out.p[k].iter().zip(&rout.p[k])).map(|(&a, &b)| a.abs_diff(b) as u32).collect();
-                        let (maxd, ndiff) = (d.iter().max().unwrap(), d.iter().filter(|&&v| v != 0).count());
-                        let mean = d.iter().sum::<u32>() as f64 / d.len() as f64;
-                        if std::env::var_os("DP2M_REF_EXACT").is_some() {
-                            assert_eq!(ndiff, 0, "{label} fx={fx}: output differs from reference");
-                        }
-                        line += &format!("  {:>9.1}  {:>9.2}  {:>6}  {:>7.4}  ({})", per(rrun.steps), per(rrun.mem[0]), maxd, mean, ndiff);
-                    }
-                    println!("{}", line);
-                    if prof {
-                        // insns/pair per labelled block (a block runs to the next label)
-                        for (k, (va, name)) in labels.iter().enumerate() {
-                            let end = labels.get(k + 1).map_or(VA_SPATIAL_DRV, |l| l.0);
-                            let n: u64 = hits[((va - VA_YCC_SUB) / 2) as usize..((end - VA_YCC_SUB) / 2) as usize].iter().sum();
-                            if per(n) >= 0.5 {
-                                println!("      {:>7.2}  0x{:06x}  {}", per(n), va, name);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 }

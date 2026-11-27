@@ -25,14 +25,15 @@ const USAGE: &str = "usage:
   dp2m lut <input.cube> <LUTn.BIN> [--grain N] [--grain-profile 0|1|2] [--halo N] [--halo-tint 0|1|2] [--tag NAME]
   dp2m lut inspect <LUTn.BIN>
   dp2m stage [--config dp2m.fnl] [--from <out_dir>] [--to <sd_mount>]
-  dp2m sim [--from <out_dir>] [--port <port>]
-  dp2m sim-trace [DP2MVxxx.bin] [--keys k1,k2,...] [--ppm <out.ppm>] [--watch-text]
+  dp2m sim [--config dp2m.fnl] [--from <out_dir>] [--port <port>]
+  dp2m sim-trace [DP2MVxxx.bin] [--config dp2m.fnl] [--keys k1,k2,...] [--ppm <out.ppm>] [--watch-text]
   dp2m verify-m5 <Firm.bin|out_dir>
   dp2m disasm-fr80 <Firm.bin> <va_start_hex> <va_end_hex>
   dp2m inspect <file.bin>";
 
 fn parse_hex(s: &str) -> Result<u32, String> {
-    u32::from_str_radix(s.trim_start_matches("0x").trim_start_matches("0X"), 16).map_err(|_| format!("invalid hex '{s}'"))
+    let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    u32::from_str_radix(hex, 16).map_err(|_| format!("invalid hex '{s}'"))
 }
 
 fn repo_root() -> PathBuf {
@@ -50,34 +51,55 @@ fn load_config(explicit: Option<&Path>, root: &Path) -> Result<Config, String> {
     path.map_or_else(|| Ok(Config::default()), |p| Config::load(&p))
 }
 
-/// `--flag value` pairs plus positionals.
-struct Args {
-    flags: Vec<(String, String)>,
-    switches: Vec<String>,
-    positional: Vec<String>,
+#[derive(Default)]
+struct Args<'a> {
+    flags: Vec<(&'a str, &'a str)>,
+    switches: Vec<&'a str>,
+    positional: Vec<&'a str>,
 }
 
-impl Args {
-    fn parse(args: &[String], valued: &[&str], switches: &[&str]) -> Result<Self, String> {
-        let mut a = Args { flags: vec![], switches: vec![], positional: vec![] };
-        let mut it = args.iter();
+impl<'a> Args<'a> {
+    fn parse(args: &'a [String], valued: &[&str], switches: &[&str]) -> Result<Self, String> {
+        let mut a = Self::default();
+        let mut it = args.iter().map(String::as_str);
         while let Some(s) = it.next() {
-            if valued.contains(&s.as_str()) {
-                a.flags.push((s.clone(), it.next().ok_or_else(|| format!("missing value for {s}"))?.clone()));
-            } else if switches.contains(&s.as_str()) {
-                a.switches.push(s.clone());
+            if valued.contains(&s) {
+                let v = it.next().filter(|v| !valued.contains(v) && !switches.contains(v));
+                a.flags.push((s, v.ok_or_else(|| format!("missing value for {s}"))?));
+            } else if switches.contains(&s) {
+                a.switches.push(s);
             } else if s.starts_with('-') {
                 return Err(format!("unknown flag '{s}'"));
             } else {
-                a.positional.push(s.clone());
+                a.positional.push(s);
             }
         }
         Ok(a)
     }
 
-    fn path(&self, flag: &str) -> Option<PathBuf> {
-        self.flags.iter().rev().find(|(f, _)| f == flag).map(|(_, v)| PathBuf::from(v))
+    fn values<'b>(&'b self, flag: &'b str) -> impl DoubleEndedIterator<Item = &'a str> + 'b {
+        self.flags.iter().filter_map(move |&(f, v)| (f == flag).then_some(v))
     }
+
+    fn value(&self, flag: &str) -> Option<&'a str> {
+        self.values(flag).next_back()
+    }
+
+    fn get<T: std::str::FromStr>(&self, flag: &str, default: T) -> Result<T, String> {
+        self.value(flag).map_or(Ok(default), |v| v.parse().map_err(|_| format!("invalid {flag} '{v}'")))
+    }
+
+    fn path(&self, flag: &str) -> Option<PathBuf> {
+        self.value(flag).map(PathBuf::from)
+    }
+
+    fn has(&self, flag: &str) -> bool {
+        self.switches.contains(&flag)
+    }
+}
+
+fn output_dir(root: &Path, explicit: Option<PathBuf>, cfg: &Config) -> PathBuf {
+    explicit.or_else(|| cfg.out_dir.clone().map(|p| rel(root, p))).unwrap_or_else(|| root.join("out"))
 }
 
 fn rel(root: &Path, p: PathBuf) -> PathBuf {
@@ -96,13 +118,13 @@ fn build(root: &Path, args: &[String]) -> Result<(), String> {
     let a = Args::parse(args, &["--config", "--out", "--pack"], &["--skip-verify"])?;
     let cfg = load_config(a.path("--config").as_deref(), root)?;
     let raw = a.positional.first().map(PathBuf::from).or_else(|| cfg.firmware.clone().map(|p| rel(root, p))).ok_or("provide <DP2MV105.bin> or set :firmware")?;
-    let out = a.path("--out").or_else(|| cfg.out_dir.clone().map(|p| rel(root, p))).unwrap_or_else(|| root.join("out"));
+    let out = output_dir(root, a.path("--out"), &cfg);
     let pack_path = a.path("--pack").or_else(|| cfg.pack.clone().map(|p| rel(root, p))).unwrap_or_else(|| root.join("data/film_pack.bin"));
 
     let fw = read(&raw)?;
     let pack = FilmPack::load(&pack_path)?;
     let firm = m5::build_m5(&fw, &pack, &root.join("src/asm/m5"), &cfg)?;
-    if cfg.verify && !a.switches.iter().any(|s| s == "--skip-verify") {
+    if cfg.verify && !a.has("--skip-verify") {
         m5::verify_m5(&firm)?;
     }
     let c78 = m6m::build_m6m(&fw, &pack, &root.join("src/m6m"), &out.join("m6m"), &cfg)?;
@@ -122,7 +144,7 @@ fn build(root: &Path, args: &[String]) -> Result<(), String> {
 fn stage(root: &Path, args: &[String]) -> Result<(), String> {
     let a = Args::parse(args, &["--config", "--from", "--to"], &[])?;
     let cfg = load_config(a.path("--config").as_deref(), root)?;
-    let from = a.path("--from").or_else(|| cfg.out_dir.clone().map(|p| rel(root, p))).unwrap_or_else(|| root.join("out"));
+    let from = output_dir(root, a.path("--from"), &cfg);
     let mount = a.path("--to").or_else(|| cfg.sd.mount.clone()).ok_or("provide --to <sd_mount> or set :sd {:mount ...}")?;
     if !mount.is_dir() {
         return Err(format!("SD mount path does not exist: {}", mount.display()));
@@ -145,7 +167,7 @@ fn inspect(path: &str) -> Result<(), String> {
     let b = read(Path::new(path))?;
     println!("File : {path} ({} B)", b.len());
     if b.len() == m5::S2_LEN && b.starts_with(b"SIGMA.CODSLRSD15") {
-        let hdr = u32::from_be_bytes(b[0x4C..0x50].try_into().unwrap());
+        let hdr = m5::stored_checksum(&b);
         println!("Type : M5Slave (Firm.bin)\nSum  : header {hdr:#010x}, computed {:#010x}", m5::m5_checksum(&b));
     } else if b.len() == m6m::C78_LEN && b.starts_with(b"FUJITSU!") {
         println!("Type : M6M (C78FRM.bin)");
@@ -164,16 +186,8 @@ fn sim(root: &Path, args: &[String]) -> Result<(), String> {
 
     let a = Args::parse(args, &["--config", "--from", "--port"], &[])?;
     let cfg = load_config(a.path("--config").as_deref(), root)?;
-    let from = a
-        .path("--from")
-        .or_else(|| cfg.out_dir.clone().map(|p| rel(root, p)))
-        .unwrap_or_else(|| root.join("out"));
-    let port: u16 = a
-        .flags
-        .iter()
-        .rev()
-        .find(|(f, _)| f == "--port")
-        .map_or(Ok(8080), |(_, v)| v.parse().map_err(|_| format!("invalid port '{v}'")))?;
+    let from = output_dir(root, a.path("--from"), &cfg);
+    let port = a.get("--port", 8080u16)?;
 
     let status = process::Command::new("cargo")
         .current_dir(root)
@@ -216,39 +230,22 @@ fn sim(root: &Path, args: &[String]) -> Result<(), String> {
             }
             let line = String::from_utf8_lossy(&req[..n]);
             let path = line.split_whitespace().nth(1).unwrap_or("/").split('?').next().unwrap_or("/");
-            let owned: Vec<u8>;
-            let (code, ctype, body): (&str, &str, &[u8]) = match path {
-                "/" | "/index.html" => match read(&html_p) {
-                    Ok(b) => {
-                        owned = b;
-                        ("200 OK", "text/html; charset=utf-8", &owned)
+            let serve = |p: &Path, ctype, missing: &[u8]| match fs::read(p) {
+                Ok(mut body) => {
+                    if path == "/Firm.bin" {
+                        body.truncate(m5::NOR_END_OFF);
                     }
-                    Err(_) => ("404 Not Found", "text/plain", b"missing index.html"),
-                },
-                "/dp2m_web.wasm" => match read(&wasm_p) {
-                    Ok(b) => {
-                        owned = b;
-                        ("200 OK", "application/wasm", &owned)
-                    }
-                    Err(_) => ("404 Not Found", "text/plain", b"missing wasm"),
-                },
-                "/C78FRM.bin" => match read(&c78_p) {
-                    Ok(b) => {
-                        owned = b;
-                        ("200 OK", "application/octet-stream", &owned)
-                    }
-                    Err(_) => ("404 Not Found", "text/plain", b"missing C78FRM.bin"),
-                },
-                "/Firm.bin" => match read(&firm_p) {
-                    Ok(mut b) => {
-                        b.truncate(0x007C_4080);
-                        owned = b;
-                        ("200 OK", "application/octet-stream", &owned)
-                    }
-                    Err(_) => ("404 Not Found", "text/plain", b"missing Firm.bin"),
-                },
-                "/favicon.ico" => ("204 No Content", "image/x-icon", b""),
-                _ => ("404 Not Found", "text/plain", b"not found"),
+                    ("200 OK", ctype, body)
+                }
+                Err(_) => ("404 Not Found", "text/plain", missing.to_vec()),
+            };
+            let (code, ctype, body) = match path {
+                "/" | "/index.html" => serve(&html_p, "text/html; charset=utf-8", b"missing index.html"),
+                "/dp2m_web.wasm" => serve(&wasm_p, "application/wasm", b"missing wasm"),
+                "/C78FRM.bin" => serve(&c78_p, "application/octet-stream", b"missing C78FRM.bin"),
+                "/Firm.bin" => serve(&firm_p, "application/octet-stream", b"missing Firm.bin"),
+                "/favicon.ico" => ("204 No Content", "image/x-icon", Vec::new()),
+                _ => ("404 Not Found", "text/plain", b"not found".to_vec()),
             };
             let hdr = format!(
                 "HTTP/1.1 {code}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
@@ -256,7 +253,7 @@ fn sim(root: &Path, args: &[String]) -> Result<(), String> {
             );
             let _ = s.write_all(hdr.as_bytes());
             if !body.is_empty() {
-                let _ = s.write_all(body);
+                let _ = s.write_all(&body);
             }
         });
     }
@@ -289,16 +286,14 @@ fn sim_trace(root: &Path, args: &[String]) -> Result<(), String> {
 
     let a = Args::parse(args, &["--config", "--keys", "--ppm"], &["--watch-text"])?;
     let cfg = load_config(a.path("--config").as_deref(), root)?;
-    let out = cfg.out_dir.clone().map(|p| rel(root, p)).unwrap_or_else(|| root.join("out"));
-    let pkg_path = a
-        .positional
-        .first()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| out.join(package::file_name(&cfg).unwrap_or_else(|_| "DP2MV200.bin".into())));
+    let pkg_path = match a.positional.first() {
+        Some(p) => PathBuf::from(p),
+        None => output_dir(root, None, &cfg).join(package::file_name(&cfg)?),
+    };
 
     let pkg = read(&pkg_path)?;
     let mut cam = Camera::from_package(&pkg)?;
-    let watch_text = a.switches.iter().any(|s| s == "--watch-text");
+    let watch_text = a.has("--watch-text");
     if watch_text {
         cam.cpu_mut().set_write_watch(Some((0xA000_0000, 0xA017_9000)));
     }
@@ -338,7 +333,7 @@ fn sim_trace(root: &Path, args: &[String]) -> Result<(), String> {
 
     report("boot", cam.cpu().total_steps, &mut cam);
 
-    if let Some((_, keys_str)) = a.flags.iter().rev().find(|(f, _)| f == "--keys") {
+    if let Some(keys_str) = a.value("--keys") {
         for raw_tok in keys_str.split(',').map(str::trim).filter(|s| !s.is_empty()) {
             if let Some(rest) = raw_tok.strip_prefix("cm=") {
                 let cm: u32 = rest.parse().map_err(|_| format!("invalid cm '{rest}'"))?;
@@ -348,7 +343,7 @@ fn sim_trace(root: &Path, args: &[String]) -> Result<(), String> {
             } else if let Some(rest) = raw_tok.strip_prefix("nv:") {
                 let (va_s, v_s) = rest.split_once('=').ok_or_else(|| format!("expected nv:<hex>=<u8> in '{raw_tok}'"))?;
                 let va = parse_hex(va_s)?;
-                let val: u8 = if v_s.starts_with("0x") { parse_hex(v_s)? as u8 } else { v_s.parse().map_err(|_| format!("invalid u8 '{v_s}'"))? };
+                let val = u8::try_from(parse_u32_auto(v_s)?).map_err(|_| format!("invalid u8 '{v_s}'"))?;
                 let before = cam.cpu().total_steps;
                 cam.write_u8(va, val);
                 report(raw_tok, cam.cpu().total_steps - before, &mut cam);
@@ -393,8 +388,8 @@ fn sim_trace(root: &Path, args: &[String]) -> Result<(), String> {
 }
 
 fn parse_u32_auto(s: &str) -> Result<u32, String> {
-    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        u32::from_str_radix(hex, 16).map_err(|_| format!("invalid hex '{s}'"))
+    if s.starts_with("0x") || s.starts_with("0X") {
+        parse_hex(s)
     } else {
         s.parse::<u32>().map_err(|_| format!("invalid int '{s}'"))
     }
@@ -407,25 +402,21 @@ fn verify_cmd(root: &Path, args: &[String]) -> Result<(), String> {
     let a = Args::parse(args, &["--fw", "--suite", "--artifacts"], &["--quiet"])?;
     let out = a.positional.first().map(PathBuf::from).unwrap_or_else(|| root.join("out"));
     let fw = a.path("--fw").unwrap_or_else(|| root.join("data/DP2MV105.bin"));
-    let verbose = !a.switches.iter().any(|s| s == "--quiet");
-    let suites: Vec<&str> = a.flags.iter().filter(|(f, _)| f == "--suite").map(|(_, v)| v.as_str()).collect();
+    let verbose = !a.has("--quiet");
+    let suites: Vec<&str> = a.values("--suite").collect();
 
     let t0 = Instant::now();
     let b = Build::load(&out, &fw)?;
     let results = run_suites_with_artifacts(&b, &suites, verbose, a.path("--artifacts").as_deref());
     println!("== summary ({:.2}s)", t0.elapsed().as_secs_f64());
-    let mut failed = false;
     for s in &results {
         let status = if s.skipped { "SKIP" } else if s.failed > 0 { "FAIL" } else { "PASS" };
         println!("  {:<7} {status}  {} pass, {} fail", s.name, s.passed, s.failed);
         for f in &s.fails {
             println!("    FAIL {f}");
         }
-        if s.failed > 0 {
-            failed = true;
-        }
     }
-    if failed {
+    if results.iter().any(|s| s.failed > 0) {
         return Err("verification failed".into());
     }
     Ok(())
@@ -435,26 +426,18 @@ fn re_cmd(root: &Path, args: &[String]) -> Result<(), String> {
     use dp2m_emu::re::{self, ReCtx, dis, xref::{self, RefKind, XrefIndex}};
     use dp2m_emu::stock;
 
-    // Parse top-level options before subcommand
-    let mut fw = root.join("data/DP2MV105.bin");
-    let mut image: Option<PathBuf> = None;
-    let mut syms: Option<PathBuf> = None;
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--fw" if i + 1 < args.len() => { fw = PathBuf::from(&args[i + 1]); i += 2; }
-            "--image" if i + 1 < args.len() => { image = Some(PathBuf::from(&args[i + 1])); i += 2; }
-            "--syms" if i + 1 < args.len() => { syms = Some(PathBuf::from(&args[i + 1])); i += 2; }
-            _ => break,
-        }
+    let opts = ["--fw", "--image", "--syms"];
+    let mut prefix = 0;
+    while args.get(prefix).is_some_and(|f| opts.contains(&f.as_str())) {
+        prefix = (prefix + 2).min(args.len());
     }
-    let Some(sub) = args.get(i).map(String::as_str) else {
-        return Err("usage: dp2m re [--image C78FRM.bin] <package|dis|xrefs|callers|sid|strings|menus|screens|icons|nvram>".into());
-    };
-    let rest = &args[i + 1..];
-    let img_path = image.unwrap_or_else(|| fw.clone());
+    let a = Args::parse(&args[..prefix], &opts, &[])?;
+    let (sub, rest) = args[prefix..].split_first().ok_or(USAGE)?;
+    let fw = a.path("--fw").unwrap_or_else(|| root.join("data/DP2MV105.bin"));
+    let img_path = a.path("--image").unwrap_or_else(|| fw.clone());
+    let syms = a.path("--syms");
 
-    match sub {
+    match sub.as_str() {
         "package" => {
             let p = rest.first().map(PathBuf::from).unwrap_or(img_path);
             for line in re::cmd_package(&p, Some(&fw))? {
@@ -466,11 +449,11 @@ fn re_cmd(root: &Path, args: &[String]) -> Result<(), String> {
             let ctx = ReCtx::load(&img_path, syms.as_deref())?;
             let va = parse_u32_auto(a.positional.first().ok_or("dis <va> [end]")?)?;
             let end = a.positional.get(1).map(|s| parse_u32_auto(s)).transpose()?;
-            let n: usize = a.flags.iter().rev().find(|(f, _)| f == "-n").map_or(Ok(40), |(_, v)| v.parse().map_err(|_| "bad -n".to_owned()))?;
-            let arm = a.switches.iter().any(|s| s == "--arm");
+            let n: usize = a.get("-n", 40)?;
+            let arm = a.has("--arm");
             let (stop, lim) = match end {
                 Some(e) => (e, None),
-                None => (va.saturating_add((n as u32) * 4), Some(n)),
+                None => (va.saturating_add(u32::try_from(n.saturating_mul(4)).unwrap_or(u32::MAX)), Some(n)),
             };
             for line in dis::dis_range(&ctx.img, &ctx.names, va, stop, lim, arm) {
                 println!("{line}");
@@ -482,7 +465,7 @@ fn re_cmd(root: &Path, args: &[String]) -> Result<(), String> {
             let val = parse_u32_auto(a.positional.first().ok_or("expected hex address")?)?;
             let kinds: Option<Vec<RefKind>> = if sub == "callers" {
                 Some(vec![RefKind::Tbl, RefKind::Tblx, RefKind::Abl, RefKind::Ablx])
-            } else if let Some((_, ks)) = a.flags.iter().rev().find(|(f, _)| f == "--kinds") {
+            } else if let Some(ks) = a.value("--kinds") {
                 Some(ks.split(',').map(|k| RefKind::parse(k).ok_or_else(|| format!("unknown kind '{k}'"))).collect::<Result<_, _>>()?)
             } else {
                 None
@@ -496,9 +479,9 @@ fn re_cmd(root: &Path, args: &[String]) -> Result<(), String> {
         "sid" => {
             let a = Args::parse(rest, &["--find", "--lang"], &[])?;
             let ctx = ReCtx::load(&img_path, syms.as_deref())?;
-            let find = a.flags.iter().rev().find(|(f, _)| f == "--find").map(|(_, v)| v.as_str());
-            let lang = a.flags.iter().rev().find(|(f, _)| f == "--lang").map_or(Ok(0), |(_, v)| parse_u32_auto(v))?;
-            let sids: Vec<u32> = a.positional.iter().map(|s| parse_u32_auto(s)).collect::<Result<_, _>>()?;
+            let find = a.value("--find");
+            let lang = a.value("--lang").map_or(Ok(0), parse_u32_auto)?;
+            let sids: Vec<u32> = a.positional.iter().copied().map(parse_u32_auto).collect::<Result<_, _>>()?;
             for line in re::cmd_sid(&ctx, &sids, find, lang) {
                 println!("{line}");
             }
@@ -506,9 +489,9 @@ fn re_cmd(root: &Path, args: &[String]) -> Result<(), String> {
         "strings" => {
             let a = Args::parse(rest, &["--min"], &["--refs"])?;
             let ctx = ReCtx::load(&img_path, syms.as_deref())?;
-            let min: usize = a.flags.iter().rev().find(|(f, _)| f == "--min").map_or(Ok(4), |(_, v)| v.parse().map_err(|_| "bad --min".to_owned()))?;
-            let with_refs = a.switches.iter().any(|s| s == "--refs");
-            for line in re::cmd_strings(&ctx, a.positional.first().map(String::as_str), min, with_refs) {
+            let min: usize = a.get("--min", 4)?;
+            let with_refs = a.has("--refs");
+            for line in re::cmd_strings(&ctx, a.positional.first().copied(), min, with_refs) {
                 println!("{line}");
             }
         }
@@ -535,15 +518,15 @@ fn re_cmd(root: &Path, args: &[String]) -> Result<(), String> {
         "nvram" => {
             let a = Args::parse(rest, &["--window", "--block", "--len", "--offset"], &[])?;
             let ctx = ReCtx::load(&img_path, syms.as_deref())?;
-            let (lo, hi) = if let Some((_, w)) = a.flags.iter().rev().find(|(f, _)| f == "--window") {
+            let (lo, hi) = if let Some(w) = a.value("--window") {
                 let (a_s, b_s) = w.split_once(':').ok_or("expected LO:HI for --window")?;
                 (parse_u32_auto(a_s)?, parse_u32_auto(b_s)?)
             } else {
                 (0xA093_9600, 0xA093_9B00)
             };
-            let block = a.flags.iter().rev().find(|(f, _)| f == "--block").map_or(Ok(stock::NV_BLOCK), |(_, v)| parse_u32_auto(v))?;
-            let len = a.flags.iter().rev().find(|(f, _)| f == "--len").map_or(Ok(stock::NV_LEN), |(_, v)| parse_u32_auto(v).map(|x| x as usize))?;
-            let offsets: Vec<u32> = a.flags.iter().filter(|(f, _)| f == "--offset").map(|(_, v)| parse_u32_auto(v)).collect::<Result<_, _>>()?;
+            let block = a.value("--block").map_or(Ok(stock::NV_BLOCK), parse_u32_auto)?;
+            let len = a.value("--len").map_or(Ok(stock::NV_LEN), |v| parse_u32_auto(v).map(|x| x as usize))?;
+            let offsets: Vec<u32> = a.values("--offset").map(parse_u32_auto).collect::<Result<_, _>>()?;
             let idx = XrefIndex::build(&ctx.img);
             let (acc, calls) = xref::nvram_scan(&ctx.img, lo, hi, &idx, 48);
             eprintln!("{} accesses, {} calls", acc.len(), calls.len());
@@ -554,8 +537,8 @@ fn re_cmd(root: &Path, args: &[String]) -> Result<(), String> {
         "liveness" => {
             let a = Args::parse(rest, &["--min-size", "--stock"], &["--tsv"])?;
             let ctx = ReCtx::load(&img_path, syms.as_deref())?;
-            let min_size = a.flags.iter().rev().find(|(f, _)| f == "--min-size").map_or(Ok(512), |(_, v)| parse_u32_auto(v))?;
-            let tsv = a.switches.iter().any(|s| s == "--tsv");
+            let min_size = a.value("--min-size").map_or(Ok(512), parse_u32_auto)?;
+            let tsv = a.has("--tsv");
             let t0 = std::time::Instant::now();
             let lv = re::liveness::analyse(&ctx.img, &[]);
             let stock_lv = if let Some(sp) = a.path("--stock") {
@@ -588,9 +571,9 @@ fn re_cmd(root: &Path, args: &[String]) -> Result<(), String> {
             let a = Args::parse(rest, &["--px", "--style", "--lang"], &[])?;
             let ctx = ReCtx::load(&img_path, syms.as_deref())?;
             let s = a.positional.first().ok_or("usage: dp2m re text <string> [--px N] [--style H] [--lang N]")?;
-            let px = a.flags.iter().rev().find(|(f, _)| f == "--px").map_or(Ok(18), |(_, v)| parse_u32_auto(v))?;
-            let style = a.flags.iter().rev().find(|(f, _)| f == "--style").map_or(Ok(0x22), |(_, v)| parse_u32_auto(v))?;
-            let lang = a.flags.iter().rev().find(|(f, _)| f == "--lang").map_or(Ok(0), |(_, v)| parse_u32_auto(v))?;
+            let px = a.value("--px").map_or(Ok(18), parse_u32_auto)?;
+            let style = a.value("--style").map_or(Ok(0x22), parse_u32_auto)?;
+            let lang = a.value("--lang").map_or(Ok(0), parse_u32_auto)?;
             for line in re::cmd_text(&ctx, s, px, style, lang)? {
                 println!("{line}");
             }
@@ -610,7 +593,7 @@ fn x3f_cmd(args: &[String]) -> Result<(), String> {
         write(&dp, &camf)?;
     }
     let entries = x3f::parse_camf(&camf);
-    let show_all = a.switches.iter().any(|s| s == "--all");
+    let show_all = a.has("--all");
     println!("Decoded {} B CAMF, {} entries from {}", camf.len(), entries.len(), path.display());
     const FILTER: &[&str] = &[
         "Color", "CMCM", "CMCC", "MCAS", "CCMatrix", "WBGain", "TC", "Gamma", "Sat",
@@ -621,7 +604,7 @@ fn x3f_cmd(args: &[String]) -> Result<(), String> {
         if show_all || FILTER.iter().any(|w| e.name.contains(w)) {
             let line = x3f::format_entry(e);
             if line.len() > 180 {
-                println!("  {}...", &line[..177]);
+                println!("  {}...", &line[..line.floor_char_boundary(177)]);
             } else {
                 println!("  {line}");
             }
@@ -638,19 +621,12 @@ fn lut_cmd(args: &[String]) -> Result<(), String> {
     let a = Args::parse(args, &["--grain", "--grain-profile", "--halo", "--halo-tint", "--tag"], &[])?;
     let input = PathBuf::from(a.positional.first().ok_or("usage: dp2m lut <in.cube> <out.bin>")?);
     let output = PathBuf::from(a.positional.get(1).ok_or("usage: dp2m lut <in.cube> <out.bin>")?);
-    let opt = |flag: &str, def: u8| -> Result<u8, String> {
-        a.flags
-            .iter()
-            .rev()
-            .find(|(f, _)| f == flag)
-            .map_or(Ok(def), |(_, v)| v.parse::<u8>().map_err(|_| format!("invalid {flag} '{v}'")))
-    };
-    let tag = a.flags.iter().rev().find(|(f, _)| f == "--tag").map(|(_, v)| v.as_str());
-    lut::compile_file(&input, &output, opt("--grain", 28)?, opt("--grain-profile", 0)?, opt("--halo", 64)?, opt("--halo-tint", 0)?, tag)
+    lut::compile_file(&input, &output, a.get("--grain", 28)?, a.get("--grain-profile", 0)?, a.get("--halo", 64)?, a.get("--halo-tint", 0)?, a.value("--tag"))
 }
 
 fn run() -> Result<(), String> {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let args = env::args_os().skip(1).map(|a| a.into_string().map_err(|_| "argument is not valid UTF-8"))
+        .collect::<Result<Vec<_>, _>>()?;
     let root = repo_root();
     match args.first().map(String::as_str) {
         Some("build") => build(&root, &args[1..]),

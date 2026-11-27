@@ -37,21 +37,19 @@ pub fn build(stock: &[u8], firm: &[u8], c78: &[u8], cfg: &Config) -> Result<Vec<
         pkg[off..off + 16].fill(0);
         pkg[off..off + ver.len()].copy_from_slice(ver.as_bytes());
     }
-    pkg[DATE..DATE + 8].copy_from_slice(build_date().as_bytes());
+    let epoch = std::env::var("SOURCE_DATE_EPOCH").ok().and_then(|s| s.parse().ok());
+    let date = build_date(epoch, || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(1_767_225_600, |d| d.as_secs() as i64)
+    })?;
+    pkg[DATE..DATE + 8].copy_from_slice(date.as_bytes());
     Ok(pkg)
 }
 
 /// `YYYYMMDD` from `SOURCE_DATE_EPOCH` (>= 2000-01-01; ignores Nix's 1980 sentinel) or the clock.
-fn build_date() -> String {
-    let secs = std::env::var("SOURCE_DATE_EPOCH")
-        .ok()
-        .and_then(|s| s.parse::<i64>().ok())
-        .filter(|&s| s >= 946_684_800)
-        .unwrap_or_else(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(1_767_225_600, |d| d.as_secs() as i64)
-        });
+fn build_date(epoch: Option<i64>, now: impl FnOnce() -> i64) -> Result<String, String> {
+    let secs = epoch.filter(|&s| s >= 946_684_800).unwrap_or_else(now);
     // days since 1970-01-01 -> civil date (Hinnant)
     let z = secs.div_euclid(86_400) + 719_468;
     let era = z.div_euclid(146_097);
@@ -62,18 +60,19 @@ fn build_date() -> String {
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + (m <= 2) as i64;
-    format!("{y:04}{m:02}{d:02}")
+    if !(0..=9999).contains(&y) {
+        return Err(format!("build date from epoch {secs} cannot fit the 8-byte package field"));
+    }
+    Ok(format!("{y:04}{m:02}{d:02}"))
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn epoch_dates() {
-        // SAFETY: tests in this module are the only readers of SOURCE_DATE_EPOCH
-        unsafe { std::env::set_var("SOURCE_DATE_EPOCH", "1369353600") };
-        assert_eq!(super::build_date(), "20130524");
-        unsafe { std::env::set_var("SOURCE_DATE_EPOCH", "315532800") };
-        assert!(super::build_date().starts_with("20"));
-        unsafe { std::env::remove_var("SOURCE_DATE_EPOCH") };
+        let now = || 1_767_225_600;
+        assert_eq!(super::build_date(Some(1_369_353_600), now).unwrap(), "20130524");
+        assert_eq!(super::build_date(Some(315_532_800), now).unwrap(), "20260101");
+        assert!(super::build_date(Some(i64::MAX), now).is_err());
     }
 }

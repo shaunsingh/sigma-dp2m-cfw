@@ -99,11 +99,19 @@ pub struct Generated {
     pub stats: String,
 }
 
-fn stock_rows(s3: &S3, va: u32) -> Vec<[u32; 8]> {
-    (0..)
-        .map(|i| read_u32s::<8>(s3, va + i * 32))
-        .take_while(|w| w.iter().any(|&x| x != 0))
-        .collect()
+fn stock_rows(s3: &S3, va: u32, min: usize) -> Result<Vec<[u32; 8]>, String> {
+    let mut rows = Vec::new();
+    let max = (s3.len() - super::s3_off(va)) / 32;
+    for i in 0..max as u32 {
+        let row = read_u32s::<8>(s3, va + i * 32);
+        if row == [0; 8] {
+            return if rows.len() >= min { Ok(rows) } else {
+                Err(format!("stock menu @ {va:#010x} has fewer than {min} rows"))
+            };
+        }
+        rows.push(row);
+    }
+    Err(format!("stock menu @ {va:#010x} lacks a zero terminator"))
 }
 
 pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, String> {
@@ -114,7 +122,7 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
     // film labels first: string index == label icon index
     let film_sid: Vec<u32> = FILMS.iter().map(|f| st.add(f.label)).collect();
 
-    let color = stock_rows(s3, STOCK_COLOR_MENU);
+    let color = stock_rows(s3, STOCK_COLOR_MENU, 7)?;
     let (vivid, bw) = (color[1], color[6]);
     let mut color_rows: Vec<Row> = color.iter().copied().map(Row::stock).collect();
     for (i, f) in FILMS.iter().enumerate().filter(|(_, f)| cfg.film_enabled(f.slug)) {
@@ -133,7 +141,7 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
     }
     menus.push((0x09, ".menu.color", color_rows));
 
-    let grid = stock_rows(s3, STOCK_GRID_MENU);
+    let grid = stock_rows(s3, STOCK_GRID_MENU, 2)?;
     let gt = grid[1];
     let value_row = |sid: u32, value: u32, get: Fp, set: Fp| Row { w: [gt[0], gt[1], 0, sid << 16, value], get, set, extra: Fp::Null };
     let mut grid_rows: Vec<Row> = grid.iter().copied().map(Row::stock).collect();
@@ -145,9 +153,9 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
     }
     menus.push((0x37, ".menu.grid", grid_rows));
 
-    let iso_1ev = stock_rows(s3, STOCK_ISO_MENU_1EV);
-    let iso_3ev = stock_rows(s3, STOCK_ISO_MENU_3EV);
     if cfg.m6m.iso50 {
+        let iso_1ev = stock_rows(s3, STOCK_ISO_MENU_1EV, 2)?;
+        let iso_3ev = stock_rows(s3, STOCK_ISO_MENU_3EV, 1)?;
         let mut iso50 = iso_1ev[1];
         iso50[3] = SID_ISO50 << 16;
         iso50[4] = 1;
@@ -259,7 +267,7 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
         .collect();
     menus.extend(qs_copies);
     for (k, &va) in STOCK_QS_SLOTS.iter().enumerate() {
-        let slot = stock_rows(s3, va);
+        let slot = stock_rows(s3, va, 1)?;
         let t = slot[0];
         let mut rows: Vec<Row> = slot.iter().copied().map(Row::stock).collect();
         for (j, &(id, title)) in qs_items.iter().enumerate() {
@@ -269,14 +277,14 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
         menus.push((0xE5 + k as u32, ".data.menu", rows));
     }
 
-    let page = |va: u32, drop: u32, add: &[Row]| -> Vec<Row> {
-        let mut rows: Vec<Row> = stock_rows(s3, va).into_iter().filter(|w| w[0] != drop).map(Row::stock).collect();
+    let page = |va: u32, drop: u32, add: &[Row]| -> Result<Vec<Row>, String> {
+        let mut rows: Vec<Row> = stock_rows(s3, va, 1)?.into_iter().filter(|w| w[0] != drop).map(Row::stock).collect();
         rows.extend_from_slice(add);
-        rows
+        Ok(rows)
     };
-    menus.push((0x0F, ".data.menu", page(STOCK_SHOOT_P2, 0x09, &[Row::page(MENU_PEAKSENS, t_peaksens)])));
-    menus.push((0x10, ".data.menu", page(STOCK_SHOOT_P3, u32::MAX, &[Row::page(MENU_PEAKCOL, t_peak)])));
-    menus.push((0x14, ".data.menu", page(STOCK_SETUP_P1, u32::MAX, &[Row::page(MENU_ZEBRALVL, t_zebralvl)])));
+    menus.push((0x0F, ".data.menu", page(STOCK_SHOOT_P2, 0x09, &[Row::page(MENU_PEAKSENS, t_peaksens)])?));
+    menus.push((0x10, ".data.menu", page(STOCK_SHOOT_P3, u32::MAX, &[Row::page(MENU_PEAKCOL, t_peak)])?));
+    menus.push((0x14, ".data.menu", page(STOCK_SETUP_P1, u32::MAX, &[Row::page(MENU_ZEBRALVL, t_zebralvl)])?));
     let mut setup_p4_add = vec![Row::page(0xA3, SID_IMAGER_TEMP)];
     if cfg.m6m.doom {
         let t_doom = st.add("DOOM");
@@ -287,10 +295,10 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
             extra: Fp::Sym("doom_open"),
         });
     }
-    menus.push((0x17, ".data.menu", page(STOCK_SETUP_P4, u32::MAX, &setup_p4_add)));
-    menus.push((0x3E, ".data.menu", page(STOCK_ISO_AUTO, u32::MAX, &[Row::page(MENU_MINSHUTTER, t_minsh)])));
+    menus.push((0x17, ".data.menu", page(STOCK_SETUP_P4, u32::MAX, &setup_p4_add)?));
+    menus.push((0x3E, ".data.menu", page(STOCK_ISO_AUTO, u32::MAX, &[Row::page(MENU_MINSHUTTER, t_minsh)])?));
 
-    let bkt = stock_rows(s3, STOCK_BKT_ORDER);
+    let bkt = stock_rows(s3, STOCK_BKT_ORDER, 1)?;
     let mut bkt_rows: Vec<Row> = bkt.iter().copied().map(Row::stock).collect();
     if cfg.m6m.bkt5 {
         for (v, label) in [(4, "5-Shot: 0 / - / +"), (6, "5-Shot: - / 0 / +"), (7, "5-Shot: + / 0 / -")] {
@@ -300,7 +308,7 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
     menus.push((0x28, ".data.menu", bkt_rows));
 
     // exposure modes F1/F2 (9, 10) as copies of C3; the "F1"/"F2" strings label their icons like the stock "C1" glyphs
-    let expo = stock_rows(s3, STOCK_EXPO_MENU);
+    let expo = stock_rows(s3, STOCK_EXPO_MENU, 1)?;
     let c3 = *expo.iter().find(|w| w[4] == 7).ok_or("stock exposure menu 0x05 has no C3 row")?;
     let mut expo_rows: Vec<Row> = expo.iter().copied().map(Row::stock).collect();
     let mut c_label = [0; 2];

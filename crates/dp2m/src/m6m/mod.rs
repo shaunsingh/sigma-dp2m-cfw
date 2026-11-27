@@ -42,7 +42,7 @@ const RAM: (u32, u32) = (0xA1C0_0000, 0xA1E0_0000);
 
 // never touch
 const FPGA: (u32, u32) = (0xA017_9000, 0xA023_D35A);
-const BSS_TAIL: u32 = 0xA07F_BC1C;
+const VECTOR_SOURCE: (u32, u32) = (0xA07F_BC1C, 0xA080_0000);
 const SHARED_LITERAL: (u32, u32) = (0xA004_D3D0, 0xA07E_EFCC);
 const LIVE_SCREENS: (u32, u32) = (0xA005_D924, 0xA005_F1A0);
 const LIVE_VTABLE: (u32, u32) = (0xA07D_EBF0, 0xA07D_EC0C);
@@ -82,15 +82,12 @@ fn be32(s3: &S3, va: u32) -> u32 {
     read_u32s::<1>(s3, va)[0]
 }
 
-pub fn thumb_bl(src: u32, dst: u32) -> [u8; 4] {
+fn thumb_bl(src: u32, dst: u32) -> Result<[u8; 4], String> {
     let d = dst as i64 - (src as i64 + 4);
-    assert!((-(1 << 22)..(1 << 22)).contains(&d) && d & 1 == 0, "BL {src:#x} -> {dst:#x} out of range");
-    let hi = 0xF000 | ((d >> 12) & 0x7FF) as u16;
-    let lo = 0xF800 | ((d >> 1) & 0x7FF) as u16;
-    let mut b = [0; 4];
-    b[..2].copy_from_slice(&hi.to_be_bytes());
-    b[2..].copy_from_slice(&lo.to_be_bytes());
-    b
+    if !(-(1 << 22)..(1 << 22)).contains(&d) || d & 1 != 0 {
+        return Err(format!("BL {src:#x} -> {dst:#x} out of range or unaligned"));
+    }
+    Ok((0xF000_F800 | (((d >> 12) as u32 & 0x7FF) << 16) | ((d >> 1) as u32 & 0x7FF)).to_be_bytes())
 }
 
 /// Callee of a Thumb BL/BLX pair (BLX targets are word aligned ARM).
@@ -194,7 +191,8 @@ pub fn build_m6m(fw_raw: &[u8], pack: &FilmPack, src: &Path, work: &Path, cfg: &
     let s3 = &mut c78[S3_IN_C78..];
     let mut used = Vec::new();
     for sec in elf.sections.iter().filter(|s| s.flags & elf::SHF_ALLOC != 0 && s.size > 0) {
-        let (lo, hi) = (sec.addr, sec.addr + sec.size);
+        let lo = sec.addr;
+        let hi = lo.checked_add(sec.size).ok_or_else(|| format!("{} address range overflows", sec.name))?;
         if sec.kind == elf::SHT_NOBITS {
             if lo < RAM.0 || hi > RAM.1 {
                 return Err(format!("{} {lo:#x}..{hi:#x} outside payload RAM", sec.name));
@@ -224,26 +222,35 @@ pub fn build_m6m(fw_raw: &[u8], pack: &FilmPack, src: &Path, work: &Path, cfg: &
         write(s3, slot, &(target | 1).to_be_bytes());
     }
 
-    let hooks = elf.section(".dp2m.hooks").ok_or("payload has no .dp2m.hooks")?;
-    let mut n_hooks = 0;
-    for h in hooks.data.as_chunks::<16>().0 {
+    let section = elf.section(".dp2m.hooks").ok_or("payload has no .dp2m.hooks")?;
+    let (hooks, partial) = section.data.as_chunks::<16>();
+    if hooks.is_empty() || !partial.is_empty() {
+        return Err("expected nonempty .dp2m.hooks with 16-byte records".into());
+    }
+    for h in hooks {
         let [kind, site, target, expect] = std::array::from_fn(|i| u32::from_be_bytes(h[4 * i..4 * i + 4].try_into().unwrap()));
-        let cur = be32(s3, site & !1);
+        let width = if kind == HOOK_HALF { 2 } else { 4 };
+        if site & 1 != 0 || site < VA_BASE || (site - VA_BASE) as usize > s3.len() - width {
+            return Err(format!("hook {kind} @ {site:#010x} is unaligned or outside S3"));
+        }
+        let cur = if kind == HOOK_HALF {
+            u16::from_be_bytes(read(s3, site, 2).try_into().unwrap()) as u32
+        } else {
+            be32(s3, site)
+        };
         let ok = match kind {
-            HOOK_CALL => thumb_call_target(site, be32(s3, site)) == Some(expect & !1),
-            HOOK_BL | HOOK_WORD => be32(s3, site) == expect,
-            HOOK_HALF => u16::from_be_bytes(read(s3, site, 2).try_into().unwrap()) as u32 == expect,
+            HOOK_CALL => thumb_call_target(site, cur) == Some(expect & !1),
+            HOOK_BL | HOOK_WORD | HOOK_HALF => cur == expect,
             _ => return Err(format!("unknown hook kind {kind} @ {site:#x}")),
         };
         if !ok {
             return Err(format!("hook {kind} @ {site:#010x}: stock {cur:#010x} != expected {expect:#010x}"));
         }
         match kind {
-            HOOK_CALL | HOOK_BL => write(s3, site, &thumb_bl(site, target & !1)),
+            HOOK_CALL | HOOK_BL => write(s3, site, &thumb_bl(site, target & !1)?),
             HOOK_WORD => write(s3, site, &target.to_be_bytes()),
             _ => write(s3, site, &(target as u16).to_be_bytes()),
         }
-        n_hooks += 1;
     }
 
     let (major, minor) = cfg.version_pair()?;
@@ -272,20 +279,20 @@ pub fn build_m6m(fw_raw: &[u8], pack: &FilmPack, src: &Path, work: &Path, cfg: &
         let n: u32 = used.iter().filter(|u| u.0 == *region).map(|u| u.2).sum();
         print!("  [M6M {region}] {n}/{} B", hi - lo);
     }
-    println!("\n  [M6M payload] {} hooks, {}", n_hooks, g.stats);
+    println!("\n  [M6M payload] {} hooks, {}", hooks.len(), g.stats);
 
     verify_m6m_invariants(&c78, stock)?;
     Ok(c78)
 }
 
-pub fn verify_m6m_invariants(c78: &[u8], stock: &[u8]) -> Result<(), String> {
+fn verify_m6m_invariants(c78: &[u8], stock: &[u8]) -> Result<(), String> {
     let (s3, st) = (&c78[S3_IN_C78..], &stock[S3_IN_C78..]);
     let same = |lo: u32, hi: u32| read(s3, lo, (hi - lo) as usize) == read(st, lo, (hi - lo) as usize);
     for (what, (lo, hi)) in [
         ("Spartan-6 FPGA bitstream", FPGA),
         ("live screens 50..55", LIVE_SCREENS),
         ("live screen vtable", LIVE_VTABLE),
-        (".bss tail", (BSS_TAIL, VA_BASE + 0x80_0000)),
+        ("exception vector source", VECTOR_SOURCE),
     ] {
         if !same(lo, hi) {
             return Err(format!("CRITICAL: {what} modified"));
@@ -297,6 +304,6 @@ pub fn verify_m6m_invariants(c78: &[u8], stock: &[u8]) -> Result<(), String> {
     if c78[..S3_IN_C78] != stock[..S3_IN_C78] {
         return Err("CRITICAL: IPL modified".into());
     }
-    println!("  [VERIFY M6M] FPGA, IPL, .bss tail, shared literal, live screens & vtable: PASS");
+    println!("  [VERIFY M6M] FPGA, IPL, vector source, shared literal, live screens & vtable: PASS");
     Ok(())
 }

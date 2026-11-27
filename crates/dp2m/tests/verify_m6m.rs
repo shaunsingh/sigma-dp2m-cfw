@@ -1,7 +1,5 @@
 mod common;
 
-use std::time::Instant;
-
 use dp2m_emu::verify::{Build, run_suites_with_artifacts};
 
 fn check_labels_png(png: &[u8]) {
@@ -49,26 +47,18 @@ fn check_labels_png(png: &[u8]) {
 fn native_m6m_verify_all_suites() {
     common::with_fresh_build(|out, root| {
         let fw = root.join("data/DP2MV105.bin");
-        let t0 = Instant::now();
         let build = Build::load(out, &fw).expect("load fresh build artifacts");
         let artifacts = out.join("artifacts");
         let results = run_suites_with_artifacts(&build, &[], false, Some(&artifacts));
-        let elapsed = t0.elapsed();
 
-        let mut total_pass = 0;
-        let mut total_fail = 0;
-        for s in &results {
+        let expected = [("m6m", 241), ("custom", 130), ("labels", 135)];
+        assert_eq!(results.len(), expected.len());
+        for (s, (name, min_pass)) in results.iter().zip(expected) {
+            assert_eq!(s.name, name);
             assert!(!s.skipped, "suite {} unexpectedly skipped", s.name);
-            println!("  {:<7} {} pass, {} fail", s.name, s.passed, s.failed);
-            for f in &s.fails {
-                eprintln!("    FAIL [{}] {f}", s.name);
-            }
-            total_pass += s.passed;
-            total_fail += s.failed;
+            assert_eq!(s.failed, 0, "{name} failures: {:?}", s.fails);
+            assert!(s.passed >= min_pass, "{name}: expected at least {min_pass} checks, got {}", s.passed);
         }
-        println!("native Rust verify: {total_pass} pass, {total_fail} fail in {:.2}s", elapsed.as_secs_f64());
-        assert_eq!(total_fail, 0, "native M6M verifier reported failures");
-        assert!(total_pass >= 490, "expected ~491 checks, got {total_pass}");
         check_labels_png(&std::fs::read(artifacts.join("labels.png")).expect("read label contact sheet"));
     });
 }

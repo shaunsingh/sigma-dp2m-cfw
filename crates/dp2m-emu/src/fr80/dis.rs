@@ -1,4 +1,6 @@
-//! fr60/fr80/fr81 BE disassembler
+//! Big-endian FR disassembler for M5 firmware.
+
+use std::fmt::Write;
 
 const CC: [&str; 16] = [
     "ra", "no", "eq", "ne", "c", "nc", "n", "p",
@@ -17,7 +19,7 @@ fn dr_name(n: u8) -> &'static str {
     }
 }
 
-pub fn dis_one(buf: &[u8], off: usize, va: u32) -> (usize, String) {
+fn dis_one(buf: &[u8], off: usize, va: u32) -> (usize, String) {
     if off + 2 > buf.len() {
         return (2, ".hword ???".to_string());
     }
@@ -137,10 +139,10 @@ pub fn dis_range(buf: &[u8], va_start: u32, va_end: u32, delta: u32) -> Vec<Stri
             break;
         }
         let (sz, text) = dis_one(buf, off, va);
-        let hex: String = buf[off..(off + sz).min(buf.len())]
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect();
+        let mut hex = String::with_capacity(sz * 2);
+        for b in &buf[off..(off + sz).min(buf.len())] {
+            write!(hex, "{b:02x}").unwrap();
+        }
         out.push(format!("  0x{:06x}: {:<12}  {}", va, hex, text));
         va += sz as u32;
     }

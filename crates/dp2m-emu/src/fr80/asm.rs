@@ -1,4 +1,4 @@
-//! two-pass fujitsu fr80 BE assembler w/ .include, .equ, .macro/.endm, .rept, & *.far branches
+//! Assembler for the M5 firmware hooks.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -111,14 +111,11 @@ impl Preproc {
                 continue;
             }
             if let Some(rest) = line.strip_prefix(".equ") {
-                let parts: Vec<&str> = rest.splitn(2, ',').collect();
-                if parts.len() != 2 {
+                let Some((name, expr)) = rest.split_once(',') else {
                     return Err(err(&loc, "expected `.equ NAME, EXPR`"));
-                }
-                let sym = parts[0].trim().to_string();
-                let val = eval_expr(parts[1].trim(), &self.consts)
-                    .map_err(|m| err(&loc, m))?;
-                self.consts.insert(sym, val);
+                };
+                let val = eval_expr(expr, &self.consts).map_err(|m| err(&loc, m))?;
+                self.consts.insert(name.trim().to_owned(), val);
                 continue;
             }
             if let Some(rest) = line.strip_prefix(".macro") {
@@ -378,20 +375,15 @@ fn parse_mem(op: &str, syms: &HashMap<String, i64>) -> Result<MemAddr, String> {
     }
     let inner = s.strip_prefix('@').ok_or_else(|| format!("expected @mem, got '{}'", op))?;
     if let Some(paren) = inner.strip_prefix('(').and_then(|x| x.strip_suffix(')')) {
-        let parts: Vec<&str> = paren.split(',').map(|x| x.trim()).collect();
-        if parts.len() != 2 {
+        let Some((base, offset)) = paren.split_once(',').filter(|(_, offset)| !offset.contains(',')) else {
             return Err(format!("bad memory operand '{}'", op));
-        }
-        if parts[0] == "r13" {
-            return Ok(MemAddr::IdxR13(parse_reg(parts[1])?));
-        }
-        if parts[0] == "r14" || parts[0] == "fp" {
-            return Ok(MemAddr::FpDisp(eval_expr(parts[1], syms)?));
-        }
-        if parts[0] == "r15" || parts[0] == "sp" {
-            return Ok(MemAddr::SpDisp(eval_expr(parts[1], syms)?));
-        }
-        return Err(format!("unsupported indexed memory '{}'", op));
+        };
+        return match base.trim() {
+            "r13" => Ok(MemAddr::IdxR13(parse_reg(offset)?)),
+            "r14" | "fp" => Ok(MemAddr::FpDisp(eval_expr(offset, syms)?)),
+            "r15" | "sp" => Ok(MemAddr::SpDisp(eval_expr(offset, syms)?)),
+            _ => Err(format!("unsupported indexed memory '{}'", op)),
+        };
     }
     Ok(MemAddr::AtReg(parse_reg(inner)?))
 }
@@ -443,33 +435,33 @@ pub fn assemble_sections(
     let mut pp = Preproc::new(extra_consts);
     pp.feed(&src, &path.display().to_string(), path.parent())?;
 
-    let mut buckets: HashMap<String, Vec<(String, String)>> = HashMap::new();
-    let mut cur_sec: Option<String> = None;
+    let mut buckets: HashMap<&str, Vec<(String, String)>> = HashMap::new();
+    let mut cur_sec = None;
     for (loc, line) in pp.lines {
         if let Some(rest) = line.strip_prefix(".section") {
-            let name = rest.trim().to_string();
-            if !section_vas.contains_key(&name) {
+            let name = rest.trim();
+            let Some((key, _)) = section_vas.get_key_value(name) else {
                 return Err(err(&loc, format!("unknown section '{}'", name)));
-            }
-            cur_sec = Some(name);
+            };
+            cur_sec = Some(key.as_str());
             continue;
         }
         let sec = cur_sec
-            .as_ref()
             .ok_or_else(|| err(&loc, "instruction outside `.section` block"))?;
-        buckets.entry(sec.clone()).or_default().push((loc, line));
+        buckets.entry(sec).or_default().push((loc, line));
     }
 
     let mut out = HashMap::new();
     for (name, &va) in section_vas {
-        let lines = buckets.remove(name).unwrap_or_default();
+        let lines = buckets.remove(name.as_str()).unwrap_or_default();
         let bytes = assemble_lines(&lines, va, &pp.consts)?.0;
         out.insert(name.clone(), bytes);
     }
     Ok(out)
 }
 
-pub fn assemble_str(
+#[cfg(test)]
+fn assemble_str(
     src: &str,
     base_va: u32,
     extra_consts: &HashMap<String, i64>,
@@ -761,30 +753,17 @@ fn encode_stmt(loc: &str, line: &str, syms: &HashMap<String, i64>) -> Result<Ite
             }
             vec![0xA5, (((neg + 16) as u8) << 4) | dst]
         }
-        "sub" => {
+        "sub" | "mul" | "and" | "or" | "eor" => {
+            let op = match mnem.as_str() {
+                "sub" => 0xAC,
+                "mul" => 0xAF,
+                "and" => 0x82,
+                "or" => 0x92,
+                _ => 0x9A,
+            };
             let src = parse_reg(&ops[0]).map_err(e)?;
             let dst = parse_reg(&ops[1]).map_err(e)?;
-            vec![0xAC, (src << 4) | dst]
-        }
-        "mul" => {
-            let src = parse_reg(&ops[0]).map_err(e)?;
-            let dst = parse_reg(&ops[1]).map_err(e)?;
-            vec![0xAF, (src << 4) | dst]
-        }
-        "and" => {
-            let src = parse_reg(&ops[0]).map_err(e)?;
-            let dst = parse_reg(&ops[1]).map_err(e)?;
-            vec![0x82, (src << 4) | dst]
-        }
-        "or" => {
-            let src = parse_reg(&ops[0]).map_err(e)?;
-            let dst = parse_reg(&ops[1]).map_err(e)?;
-            vec![0x92, (src << 4) | dst]
-        }
-        "eor" => {
-            let src = parse_reg(&ops[0]).map_err(e)?;
-            let dst = parse_reg(&ops[1]).map_err(e)?;
-            vec![0x9A, (src << 4) | dst]
+            vec![op, (src << 4) | dst]
         }
         "cmp" => {
             if ops[0].starts_with('#') {
@@ -801,29 +780,18 @@ fn encode_stmt(loc: &str, line: &str, syms: &HashMap<String, i64>) -> Result<Ite
             }
         }
         // fr80 shifts (silicon-verified @ 0x4D3F72): 0xB0=LSR 0xB4=LSL 0xB8=ASR
-        "lsr" => {
+        "lsr" | "lsl" | "asr" => {
             let u4 = eval_expr(&ops[0], syms).map_err(e)?;
             let dst = parse_reg(&ops[1]).map_err(e)?;
             if !(0..=15).contains(&u4) {
-                return Err(e(format!("lsr #u4 out of range: {}", u4)));
+                return Err(e(format!("{} #u4 out of range: {}", mnem, u4)));
             }
-            vec![0xB0, ((u4 as u8) << 4) | dst]
-        }
-        "lsl" => {
-            let u4 = eval_expr(&ops[0], syms).map_err(e)?;
-            let dst = parse_reg(&ops[1]).map_err(e)?;
-            if !(0..=15).contains(&u4) {
-                return Err(e(format!("lsl #u4 out of range: {}", u4)));
-            }
-            vec![0xB4, ((u4 as u8) << 4) | dst]
-        }
-        "asr" => {
-            let u4 = eval_expr(&ops[0], syms).map_err(e)?;
-            let dst = parse_reg(&ops[1]).map_err(e)?;
-            if !(0..=15).contains(&u4) {
-                return Err(e(format!("asr #u4 out of range: {}", u4)));
-            }
-            vec![0xB8, ((u4 as u8) << 4) | dst]
+            let op = match mnem.as_str() {
+                "lsr" => 0xB0,
+                "lsl" => 0xB4,
+                _ => 0xB8,
+            };
+            vec![op, ((u4 as u8) << 4) | dst]
         }
         // *2 forms shift by 16..31 (stock `b1f1 lsr2 #31` @ 0x4D3F6E)
         "lsr2" | "lsl2" | "asr2" => {

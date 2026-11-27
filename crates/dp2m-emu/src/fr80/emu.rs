@@ -1,4 +1,4 @@
-//! fr80 BE emulator for fw verification and capture simulation
+//! Big-endian FR80 interpreter for M5 firmware routines.
 
 pub type Handler = Box<dyn FnMut(&mut Emulator) -> u32>;
 
@@ -328,6 +328,33 @@ impl<'a> Emulator<'a> {
                 a
             }};
         }
+        macro_rules! set_nz {
+            ($res:expr) => {{
+                let res: u32 = $res;
+                fl_n = (res as i32) < 0;
+                fl_z = res == 0;
+            }};
+        }
+        macro_rules! add {
+            ($dst:expr, $src:expr) => {{
+                let (dst, src) = ($dst, $src);
+                let (res, carry) = u32::overflowing_add(dst, src);
+                fl_c = carry;
+                fl_v = (dst as i32).overflowing_add(src as i32).1;
+                set_nz!(res);
+                res
+            }};
+        }
+        macro_rules! sub {
+            ($dst:expr, $src:expr) => {{
+                let (dst, src) = ($dst, $src);
+                let (res, borrow) = u32::overflowing_sub(dst, src);
+                fl_c = borrow;
+                fl_v = (dst as i32).overflowing_sub(src as i32).1;
+                set_nz!(res);
+                res
+            }};
+        }
 
         while steps < max_steps {
             if pc == RETURN {
@@ -404,8 +431,8 @@ impl<'a> Emulator<'a> {
                 }
                 0x07 if n1 == 0 => {
                     let a = tally!(r[15]);
-                    r[n0] = self.r32(a);
                     r[15] = r[15].wrapping_add(4);
+                    r[n0] = self.r32(a);
                 }
                 0x07 if n1 == 8 && n0 == 1 => {
                     let a = tally!(r[15]);
@@ -413,10 +440,9 @@ impl<'a> Emulator<'a> {
                     r[15] = r[15].wrapping_add(4);
                 }
                 0x0F => {
-                    r[15] = r[15].wrapping_sub(4);
-                    let a = tally!(r[15]);
+                    let a = tally!(r[15].wrapping_sub(4));
                     self.w32(a, r[14]);
-                    r[14] = r[15];
+                    r[14] = a;
                     r[15] = r[15].wrapping_sub((lo8 as u32) * 4);
                 }
                 0x10 => {
@@ -448,9 +474,10 @@ impl<'a> Emulator<'a> {
                     self.w8(a, r[n0] as u8);
                 }
                 0x17 if n1 == 0 => {
+                    let val = r[n0];
                     r[15] = r[15].wrapping_sub(4);
                     let a = tally!(r[15]);
-                    self.w32(a, r[n0]);
+                    self.w32(a, val);
                 }
                 0x17 if n1 == 8 && n0 == 1 => {
                     r[15] = r[15].wrapping_sub(4);
@@ -469,14 +496,13 @@ impl<'a> Emulator<'a> {
                 }
                 0x82 => {
                     r[n0] &= r[n1];
-                    let v = r[n0];
-                    fl_n = (v as i32) < 0;
-                    fl_z = v == 0;
-                    fl_v = false;
-                    fl_c = false;
+                    set_nz!(r[n0]);
                 }
                 0x8B => r[n0] = r[n1],
-                0x92 => r[n0] |= r[n1],
+                0x92 => {
+                    r[n0] |= r[n1];
+                    set_nz!(r[n0]);
+                }
                 0x97 => match n1 {
                     0x0 => pc = r[n0],
                     0x1 => {
@@ -490,7 +516,10 @@ impl<'a> Emulator<'a> {
                     0xB => r[n0] &= 0xFFFF,
                     _ => return Err(format!("unsupported FR80 op 0x{:04X} @ 0x{:06X}", op, pc - 2)),
                 },
-                0x9A => r[n0] ^= r[n1],
+                0x9A => {
+                    r[n0] ^= r[n1];
+                    set_nz!(r[n0]);
+                }
                 0x9B => {
                     r[n0] = ((n1 as u32) << 16) | (u16::from_be_bytes(self.fetch(pc)) as u32);
                     pc = pc.wrapping_add(2);
@@ -510,27 +539,34 @@ impl<'a> Emulator<'a> {
                     let d = (lo8 as i8 as i32) * 4;
                     r[15] = r[15].wrapping_add(d as u32);
                 }
-                0xA4 => r[n0] = r[n0].wrapping_add(n1 as u32),
-                0xA5 => r[n0] = r[n0].wrapping_add(((n1 as i32) - 16) as u32),
-                0xA6 => r[n0] = r[n0].wrapping_add(r[n1]),
-                0xA8 => {
-                    let (dst, src) = (r[n0], n1 as u32);
-                    let (r32, c) = dst.overflowing_sub(src);
-                    let (_, v) = (dst as i32).overflowing_sub(src as i32);
-                    (fl_n, fl_z, fl_v, fl_c) = ((r32 as i32) < 0, r32 == 0, v, c);
+                0xA4 => r[n0] = add!(r[n0], n1 as u32),
+                0xA5 => r[n0] = add!(r[n0], n1 as u32 | 0xFFFF_FFF0),
+                0xA6 => r[n0] = add!(r[n0], r[n1]),
+                0xA8 => { sub!(r[n0], n1 as u32); }
+                0xAA => { sub!(r[n0], r[n1]); }
+                0xAC => r[n0] = sub!(r[n0], r[n1]),
+                0xAF => {
+                    let prod = r[n0] as i32 as i64 * r[n1] as i32 as i64;
+                    mdl = prod as u32;
+                    fl_n = (mdl as i32) < 0;
+                    fl_z = prod == 0;
+                    fl_v = prod != mdl as i32 as i64;
                 }
-                0xAA => {
-                    let (dst, src) = (r[n0], r[n1]);
-                    let (r32, c) = dst.overflowing_sub(src);
-                    let (_, v) = (dst as i32).overflowing_sub(src as i32);
-                    (fl_n, fl_z, fl_v, fl_c) = ((r32 as i32) < 0, r32 == 0, v, c);
+                0xB0 | 0xB1 | 0xB8 | 0xB9 => {
+                    let amount = n1 as u32 + u32::from(hi8 & 1) * 16;
+                    let old = r[n0];
+                    r[n0] = if hi8 & 8 == 0 { old >> amount } else { ((old as i32) >> amount) as u32 };
+                    fl_c = amount != 0 && old.wrapping_shr(amount.wrapping_sub(1)) & 1 != 0;
+                    set_nz!(r[n0]);
                 }
-                0xAC => r[n0] = r[n0].wrapping_sub(r[n1]),
-                0xAF => mdl = (r[n0] as i32).wrapping_mul(r[n1] as i32) as u32,
-                0xB0 | 0xB1 => r[n0] = r[n0].wrapping_shr(n1 as u32 + ((hi8 & 1) as u32) * 16),
-                0xB4 | 0xB5 => r[n0] = r[n0].wrapping_shl(n1 as u32 + ((hi8 & 1) as u32) * 16),
+                0xB4 | 0xB5 => {
+                    let amount = n1 as u32 + u32::from(hi8 & 1) * 16;
+                    let old = r[n0];
+                    r[n0] = old << amount;
+                    fl_c = amount != 0 && old.wrapping_shr(32 - amount) & 1 != 0;
+                    set_nz!(r[n0]);
+                }
                 0xB7 if n1 == 5 => r[n0] = mdl,
-                0xB8 | 0xB9 => r[n0] = ((r[n0] as i32) >> (n1 + ((hi8 & 1) as usize) * 16)) as u32,
                 0xC0..=0xCF => r[n0] = ((op >> 4) & 0xFF) as u32,
                 0xD0..=0xD7 => {
                     rp = pc;
@@ -572,6 +608,84 @@ impl<'a> Emulator<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn arithmetic_updates_nzvc() {
+        for (op, dst, src, result, expected) in [
+            (0xA410u16, 0xFFFF_FFFF, 0, 0, (false, true, false, true)), // ADD #1
+            (0xA5F0, 0x8000_0000, 0, 0x7FFF_FFFF, (false, false, true, true)), // ADD2 #-1
+            (0xA610, 0x7FFF_FFFF, 1, 0x8000_0000, (true, false, true, false)), // ADD R1
+            (0xAC10, 0, 1, 0xFFFF_FFFF, (true, false, false, true)), // SUB R1
+            (0xAA10, 0, 1, 0, (true, false, false, true)), // CMP R1
+        ] {
+            let [a, b] = op.to_be_bytes();
+            let rom = [a, b, 0x97, 0x20];
+            let mut e = Emulator::new(&rom, 0);
+            e.r[..2].copy_from_slice(&[dst, src]);
+            e.run(0, 3).unwrap();
+            assert_eq!((e.r[0], e.flags), (result, expected), "{op:04x}");
+        }
+    }
+
+    #[test]
+    fn logical_ops_preserve_vc_and_set_nz() {
+        for (op, src, result) in [(0x82, 0, 0), (0x92, 0, 0x8000_0000), (0x9A, 0x8000_0000, 0)] {
+            let rom = [op, 0x10, 0x97, 0x20];
+            let mut e = Emulator::new(&rom, 0);
+            e.r[..2].copy_from_slice(&[0x8000_0000, src]);
+            e.flags = (false, false, true, true);
+            e.run(0, 3).unwrap();
+            assert_eq!((e.r[0], e.flags), (result, (result != 0, result == 0, true, true)));
+        }
+    }
+
+    #[test]
+    fn immediate_shifts_set_nzc_preserving_v() {
+        for (op, lo, dst, result, carry) in [
+            (0xB4, 0, 0x8000_0000, 0x8000_0000, false), // LSL #0 clears C
+            (0xB4, 0x10, 0x8000_0000, 0, true), // LSL #1
+            (0xB1, 0, 0x0000_8000, 0, true), // LSR2 #16
+            (0xB9, 0xF0, 0xC000_0000, 0xFFFF_FFFF, true), // ASR2 #31
+        ] {
+            let rom = [op, lo, 0x97, 0x20];
+            let mut e = Emulator::new(&rom, 0);
+            e.r[0] = dst;
+            e.flags = (false, false, true, true);
+            e.run(0, 3).unwrap();
+            assert_eq!((e.r[0], e.flags), (result, ((result as i32) < 0, result == 0, true, carry)));
+        }
+    }
+
+    #[test]
+    fn mul_flags_distinguish_low_word_from_full_product() {
+        let rom = [0xAF, 0x10, 0x97, 0x20]; // mul r1, r0; ret
+        let mut e = Emulator::new(&rom, 0);
+        e.r[..2].copy_from_slice(&[0x8000_0000, 2]);
+        e.flags = (true, true, false, true);
+        e.run(0, 3).unwrap();
+        assert_eq!((e.mdl, e.flags), (0, (false, false, true, true)));
+    }
+
+    #[test]
+    fn enter_immediate_includes_saved_frame_pointer() {
+        let rom = [0x0F, 0x04, 0x8B, 0xF0, 0x9F, 0x90, 0x97, 0x20]; // enter #16; mov sp,r0; leave; ret
+        let mut e = Emulator::new(&rom, 0);
+        e.r[14..].copy_from_slice(&[0x1234, 0x8000_0020]);
+        e.run(0, 5).unwrap();
+        assert_eq!(e.r[0], 0x8000_0010);
+        assert_eq!(e.r32(0x8000_001C), 0x1234);
+        assert_eq!(e.r[14..], [0x1234, 0x8000_0020]);
+    }
+
+    #[test]
+    fn push_and_pop_sp_use_original_source_and_loaded_destination() {
+        let rom = [0x17, 0x0F, 0x07, 0x0F, 0x97, 0x20]; // st sp,@-sp; ld @sp+,sp; ret
+        let mut e = Emulator::new(&rom, 0);
+        e.r[15] = 0x8000_0020;
+        e.run(0, 4).unwrap();
+        assert_eq!(e.r32(0x8000_001C), 0x8000_0020);
+        assert_eq!(e.r[15], 0x8000_0020);
+    }
 
     #[test]
     fn fetch_and_data_access_counters() {

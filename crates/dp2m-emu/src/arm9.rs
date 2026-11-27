@@ -6,7 +6,7 @@ pub const RET_SENTINEL: u32 = 0xA27F_0000;
 
 const CODE_BITMAP_SPAN: usize = 0x0020_0000; // 2 MB of code halfwords (0xA0000000..0xA0200000)
 
-pub type Hook = Box<dyn FnMut(&mut Cpu) -> HookAction>;
+type Hook = Box<dyn FnMut(&mut Cpu) -> HookAction>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum HookAction {
@@ -32,8 +32,8 @@ pub struct Cpu {
     pub v: bool,
     pub q: bool,
     pub thumb: bool,
-    pub cpsr_low: u32,
-    pub sdram: Box<[u8; SDRAM_SIZE]>,
+    cpsr_low: u32,
+    sdram: Box<[u8; SDRAM_SIZE]>,
     pub total_steps: u64,
     pub last_error: Option<String>,
     pub watch_hits: Vec<(u32, u32, u32)>,
@@ -87,7 +87,7 @@ impl Cpu {
     }
 
     #[inline]
-    pub fn cpsr(&self) -> u32 {
+    fn cpsr(&self) -> u32 {
         ((self.n as u32) << 31)
             | ((self.z as u32) << 30)
             | ((self.c as u32) << 29)
@@ -98,7 +98,7 @@ impl Cpu {
     }
 
     #[inline]
-    pub fn set_cpsr(&mut self, val: u32, mask: u32) {
+    fn set_cpsr(&mut self, val: u32, mask: u32) {
         let cur = (self.cpsr() & !mask) | (val & mask);
         self.n = (cur >> 31) & 1 != 0;
         self.z = (cur >> 30) & 1 != 0;
@@ -184,6 +184,11 @@ impl Cpu {
         } else {
             u32::from_be_bytes(self.mmio_read(va & !3))
         }
+    }
+
+    #[inline]
+    fn arm_load_word(&self, addr: u32) -> u32 {
+        self.r32(addr).rotate_right((addr & 3) * 8)
     }
 
     #[inline(always)]
@@ -478,8 +483,7 @@ impl Cpu {
                 self.total_steps = self.total_steps.wrapping_add(step);
                 return Err(self.wild_pc(pc));
             }
-            // The precise bitmap tells us when the entire 128-byte line is
-            // hook-free. Only trace lines that don't contain the exit PC.
+            // The fast loop skips per-instruction hooks and exit checks.
             let word = if off < CODE_BITMAP_SPAN {
                 self.hook_bits[off >> 7]
             } else if self.has_high_hooks {
@@ -636,8 +640,7 @@ impl Cpu {
     fn add_flags(&mut self, a: u32, b: u32) -> u32 {
         let (res, c) = a.overflowing_add(b);
         let (_, v) = (a as i32).overflowing_add(b as i32);
-        self.n = (res as i32) < 0;
-        self.z = res == 0;
+        self.set_nz(res);
         self.c = c;
         self.v = v;
         res
@@ -647,8 +650,7 @@ impl Cpu {
     fn sub_flags(&mut self, a: u32, b: u32) -> u32 {
         let (res, borrow) = a.overflowing_sub(b);
         let (_, v) = (a as i32).overflowing_sub(b as i32);
-        self.n = (res as i32) < 0;
-        self.z = res == 0;
+        self.set_nz(res);
         self.c = !borrow;
         self.v = v;
         res
@@ -658,8 +660,7 @@ impl Cpu {
     fn adc_flags(&mut self, a: u32, b: u32, cin: bool) -> u32 {
         let full = (a as u64) + (b as u64) + (cin as u64);
         let res = full as u32;
-        self.n = (res as i32) < 0;
-        self.z = res == 0;
+        self.set_nz(res);
         self.c = full >> 32 != 0;
         self.v = ((!(a ^ b) & (a ^ res)) >> 31) != 0;
         res
@@ -668,6 +669,23 @@ impl Cpu {
     #[inline(always)]
     fn sbc_flags(&mut self, a: u32, b: u32, cin: bool) -> u32 {
         self.adc_flags(a, !b, cin)
+    }
+
+    #[cold]
+    fn stock_swi(&mut self, number: u32) {
+        const IRQ_MASK: u32 = 0x80;
+        match number {
+            // 0x1C8 restores SPSR.I from r0; 0x1E4 returns the old SPSR in r0.
+            6 => self.cpsr_low = (self.cpsr_low & !IRQ_MASK) | (self.r[0] & IRQ_MASK),
+            7 => {
+                self.r[0] = self.cpsr();
+                self.cpsr_low |= IRQ_MASK;
+            }
+            // ITCM 0x1FC..0x31C preserves r0/r1; caches and write buffers are not modeled.
+            8..=15 => {}
+            // The kernel vector at 0xA01728C8 is not modeled.
+            _ => self.r[0] = 0,
+        }
     }
 
     #[inline(always)]
@@ -864,7 +882,7 @@ impl Cpu {
                 let ea = if u { base.wrapping_add(off) } else { base.wrapping_sub(off) };
                 let addr = if p { ea } else { base };
                 if l {
-                    let val = if b { self.r8(addr) as u32 } else { self.r32(addr) };
+                    let val = if b { self.r8(addr) as u32 } else { self.arm_load_word(addr) };
                     if (!p || w) && rn != rd {
                         self.r[rn] = ea;
                     }
@@ -887,9 +905,8 @@ impl Cpu {
             }
             0b000 | 0b001 => self.step_arm_dp_misc::<WATCH>(pc, pc8, insn)?,
             0b110 | 0b111 => {
-                // SVC -> E_OK (0) in r0; Coprocessor MRC p15 -> 0, MCR/LDC/STC -> NOP
                 if (insn & 0x0F00_0000) == 0x0F00_0000 {
-                    self.r[0] = 0;
+                    self.stock_swi(insn & 0x00FF_FFFF);
                 } else if (insn & 0x0F10_0010) == 0x0E10_0010 {
                     let rd = ((insn >> 12) & 0xF) as usize;
                     if rd != 15 {
@@ -1019,7 +1036,7 @@ impl Cpu {
                     self.w8_inner::<WATCH>(addr, src as u8);
                     self.r[rd] = old;
                 } else {
-                    let old = self.r32(addr);
+                    let old = self.arm_load_word(addr);
                     self.w32_inner::<WATCH>(addr, src);
                     self.r[rd] = old;
                 }
@@ -1089,22 +1106,12 @@ impl Cpu {
                     self.r[rn] = ea;
                 }
             }
-            (true, 1) => {
-                let v = self.r16(addr) as u32;
-                if (!p || w) && rn != rd {
-                    self.r[rn] = ea;
-                }
-                self.r[rd] = v;
-            }
-            (true, 2) => {
-                let v = (self.r8(addr) as i8) as i32 as u32;
-                if (!p || w) && rn != rd {
-                    self.r[rn] = ea;
-                }
-                self.r[rd] = v;
-            }
-            (true, 3) => {
-                let v = (self.r16(addr) as i16) as i32 as u32;
+            (true, 1..=3) => {
+                let v = match op_sh {
+                    1 => self.r16(addr) as u32,
+                    2 => self.r8(addr) as i8 as i32 as u32,
+                    _ => self.r16(addr) as i16 as i32 as u32,
+                };
                 if (!p || w) && rn != rd {
                     self.r[rn] = ea;
                 }
@@ -1531,8 +1538,7 @@ impl Cpu {
                     // Format 16 / 17: B<cond> or SVC
                     let cond = (op >> 8) & 0xF;
                     if cond == 0xF {
-                        // SVC #imm8: uITRON critical section / syscall -> return E_OK (0)
-                        self.r[0] = 0;
+                        self.stock_swi(op & 0xFF);
                     } else if cond == 0xE {
                         return self.fault(format!("Thumb UDF @ {:#010x}: {:#06x}", pc, op));
                     } else if self.cond_ok(cond) {
@@ -1601,6 +1607,66 @@ fn msr_mask(field: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stock_swi_cache_services_preserve_registers() {
+        let mut cpu = Cpu::new();
+        let pc = SDRAM_BASE;
+        for thumb in [false, true] {
+            cpu.thumb = thumb;
+            cpu.r[..2].copy_from_slice(&[0x1234_5678, 0x9ABC_DEF0]);
+            cpu.r[14] = RET_SENTINEL;
+            cpu.c = true;
+            let psr = cpu.cpsr();
+            for swi in 8..=15 {
+                if thumb {
+                    cpu.step_thumb_op::<false>(pc, 0xDF00 | swi).unwrap();
+                } else {
+                    cpu.step_arm_op::<false>(pc, 0xEF00_0000 | swi).unwrap();
+                }
+                assert_eq!(cpu.r[..2], [0x1234_5678, 0x9ABC_DEF0], "SWI {swi}");
+                assert_eq!(cpu.r[14], RET_SENTINEL);
+                assert_eq!(cpu.cpsr(), psr);
+                assert_eq!(cpu.r[15], pc + if thumb { 2 } else { 4 });
+            }
+        }
+    }
+
+    #[test]
+    fn stock_swi_irq_mask_round_trip() {
+        let mut cpu = Cpu::new();
+        let pc = SDRAM_BASE;
+        cpu.thumb = true;
+        cpu.n = true;
+        let psr = cpu.cpsr();
+        cpu.step_thumb_op::<false>(pc, 0xDF07).unwrap();
+        assert_eq!((cpu.r[0], cpu.cpsr()), (psr, psr | 0x80));
+        cpu.step_thumb_op::<false>(pc + 2, 0xDF06).unwrap();
+        assert_eq!((cpu.r[0], cpu.cpsr()), (psr, psr));
+        cpu.thumb = false;
+        let psr = cpu.cpsr();
+        cpu.step_arm_op::<false>(pc, 0x0F00_0007).unwrap(); // SWIEQ, Z clear
+        assert_eq!(cpu.cpsr(), psr);
+        cpu.step_arm_op::<false>(pc, 0xEF00_0007).unwrap();
+        assert_eq!((cpu.r[0], cpu.cpsr()), (psr, psr | 0x80));
+        cpu.step_arm_op::<false>(pc + 4, 0xEF00_0006).unwrap();
+        assert_eq!((cpu.r[0], cpu.cpsr()), (psr, psr));
+    }
+
+    #[test]
+    fn unaligned_word_load_rotates_big_endian_word() {
+        let mut cpu = Cpu::new();
+        let a = SDRAM_BASE + 0x100;
+        cpu.w32(a, 0x1122_3344);
+        for (offset, expected) in [(1, 0x4411_2233), (2, 0x3344_1122), (3, 0x2233_4411)] {
+            cpu.r[1] = a + offset;
+            cpu.step_arm_op::<false>(SDRAM_BASE, 0xE591_0000).unwrap(); // ldr r0, [r1]
+            assert_eq!(cpu.r[0], expected);
+            cpu.r[2] = 0x1122_3344;
+            cpu.step_arm_op::<false>(SDRAM_BASE, 0xE101_0092).unwrap(); // swp r0, r2, [r1]
+            assert_eq!(cpu.r[0], expected);
+        }
+    }
 
     #[test]
     fn step_counts_through_hooks_and_page_edges() {

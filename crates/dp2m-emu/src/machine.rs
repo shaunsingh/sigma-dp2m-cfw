@@ -1,6 +1,6 @@
-//! Native ARM926EJ-S verification & RE machine (replaces Unicorn `tools/re/emu.py`).
+//! ARM926EJ-S firmware harness with M6M hardware and uITRON hooks.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeSet;
 use std::rc::Rc;
 
@@ -35,18 +35,14 @@ impl Machine {
         cpu.load_s3(img.s3());
 
         // uITRON bump allocator & out-pointer syscalls (never leave *p_blk uninitialized)
-        let heap = Rc::new(RefCell::new(0xA0A2_0000u32));
-        let bump = {
-            let heap = heap.clone();
-            move |c: &mut Cpu, n: u32| -> u32 {
-                let sz = n.max(16).next_multiple_of(16);
-                let mut h = heap.borrow_mut();
-                let ptr = *h;
-                *h = ptr.wrapping_add(sz);
-                let off = (ptr - SDRAM_BASE) as usize;
-                c.sdram_mut()[off..off + sz as usize].fill(0);
-                ptr
-            }
+        let heap = Rc::new(Cell::new(0xA0A2_0000u32));
+        let bump = move |c: &mut Cpu, n: u32| {
+            let sz = n.max(16).next_multiple_of(16);
+            let ptr = heap.get();
+            heap.set(ptr.wrapping_add(sz));
+            let off = (ptr - SDRAM_BASE) as usize;
+            c.sdram_mut()[off..off + sz as usize].fill(0);
+            ptr
         };
 
         cpu.stub_range(stock::UITRON.0, stock::UITRON.1, Some(0));
@@ -114,11 +110,15 @@ impl Machine {
             let (fill, stride, dst) = (c.r[1] as u8, c.r[2], c.r[3]);
             let (wb, rows) = (c.r32(c.r[13]), c.r32(c.r[13] + 4));
             if dst >= BASE && wb > 0 && rows > 0 && rows <= 2048 && stride <= 8192 {
-                let row = vec![fill; wb as usize];
+                let mut row = None;
                 for r in 0..rows {
                     let off = dst.wrapping_add(r.wrapping_mul(stride));
                     if off.saturating_add(wb) <= RAM_END {
-                        c.write_bytes(off, &row);
+                        if off >= BASE {
+                            c.fill_bytes(off, fill, wb as usize);
+                        } else {
+                            c.write_bytes(off, row.get_or_insert_with(|| vec![fill; wb as usize]));
+                        }
                     }
                 }
             }
@@ -127,9 +127,7 @@ impl Machine {
         cpu.add_hook(stock::DMA_MEM_COPY, |c| {
             let (dst, src, n) = (c.r[0], c.r[1], c.r[2]);
             if dst >= BASE && src >= BASE && n > 0 && dst.saturating_add(n) <= RAM_END && src.saturating_add(n) <= RAM_END {
-                let mut tmp = vec![0u8; n as usize];
-                c.read_bytes(src, &mut tmp);
-                c.write_bytes(dst, &tmp);
+                c.copy_within_bytes(dst, src, n as usize);
             }
             HookAction::Return(Some(0))
         });
@@ -142,8 +140,7 @@ impl Machine {
     }
 
     pub fn load_nv_defaults(&mut self) {
-        let defs = self.img.rd(stock::NV_DEFAULTS, stock::NV_LEN).to_vec();
-        self.cpu.write_bytes(stock::NV_BLOCK, &defs);
+        self.cpu.write_bytes(stock::NV_BLOCK, self.img.rd(stock::NV_DEFAULTS, stock::NV_LEN));
     }
 
     pub fn rd(&self, va: u32, n: usize) -> Vec<u8> {
@@ -234,13 +231,18 @@ fn copy_2d(c: &mut Cpu, src: u32, ss: u32, dst: u32, ds: u32, wb: u32, rows: u32
     if src < BASE || dst < BASE || wb == 0 || rows == 0 || rows > 2048 {
         return;
     }
-    let mut row = vec![0u8; wb as usize];
+    let mut row = None;
     for r in 0..rows {
         let s = src.wrapping_add(r.wrapping_mul(ss));
         let d = dst.wrapping_add(r.wrapping_mul(ds));
         if s.saturating_add(wb) <= RAM_END && d.saturating_add(wb) <= RAM_END {
-            c.read_bytes(s, &mut row);
-            c.write_bytes(d, &row);
+            if s >= BASE && d >= BASE {
+                c.copy_within_bytes(d, s, wb as usize);
+            } else {
+                let row = row.get_or_insert_with(|| vec![0; wb as usize]);
+                c.read_bytes(s, row);
+                c.write_bytes(d, row);
+            }
         }
     }
 }

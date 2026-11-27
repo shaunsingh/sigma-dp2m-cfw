@@ -52,10 +52,11 @@ fn m6m_bench() {
     let va = |name: &str| syms.get(name).unwrap_or_else(|| panic!("payload symbol {name}")).va();
     let fcnt = va("lv_planes") + 12;
     let draw = va("grid_draw_hook") | 1;
-    let scenes: [(&str, Option<Vec<u8>>); 3] = [
+    let scenes: [(&str, Option<Vec<u8>>); 4] = [
         ("default", None),
         ("checker", Some(scene(|x, y| if ((x >> 1) ^ (y >> 1)) & 1 == 0 { [255; 3] } else { [0; 3] }))),
         ("white", Some(scene(|_, _| [255; 3]))),
+        ("black", Some(scene(|_, _| [0; 3]))),
     ];
     println!("boot: {boot_ms:.1} ms");
     println!("overlay cost in emulated M6M instructions (host DMA fills/flushes excluded)");

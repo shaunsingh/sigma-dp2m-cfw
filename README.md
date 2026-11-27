@@ -110,7 +110,7 @@ Run as `cargo run --release -- <command>`. Without `--config`, the builder uses 
 | Command | Action |
 | --- | --- |
 | `build [DP2MV105.bin] [--config f] [--out dir] [--pack f] [--skip-verify]` | build all images; `--skip-verify` skips the FR80 check |
-| `verify [out_dir] [--fw f] [--suite m6m\|custom\|labels] [--artifacts dir] [--quiet]` | native Rust M6M verifier (538 checks across `m6m`, `custom`, `labels` in ~0.7 s; `--artifacts` writes `labels.png`) |
+| `verify [out_dir] [--fw f] [--suite m6m\|custom\|labels] [--artifacts dir] [--quiet]` | native Rust M6M verifier (554 checks across `m6m`, `custom`, `labels` in ~0.8 s; `--artifacts` writes `labels.png`) |
 | `re [--fw f] [--image f] [--syms f] <cmd>` | native M6M RE toolkit: `package`, `dis`, `xrefs`, `callers`, `sid`, `strings`, `menus`, `screens`, `icons`, `nvram`, `liveness`, `text` |
 | `x3f <file.X3F> [--dump out.camf] [--all]` | decode Merrill X3F Type-4 Huffman CAMF sections and dump `CMbM`/`CMbP`/`CMbT` entries |
 | `lut <in.cube> <LUTn.BIN> [--grain N] [--grain-profile 0\|1\|2] [--halo N] [--halo-tint 0\|1\|2] [--tag S]` | compile an Adobe/Resolve `.cube` 3D LUT (`DOMAIN_MIN`/`DOMAIN_MAX`, 17³ + gray anchors) into a 4,160 B D2ML SD-card binary; `lut inspect <LUTn.BIN>` inspects an existing binary |

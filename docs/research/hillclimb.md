@@ -21,38 +21,39 @@ Default config (`dp2m.example.fnl`: `24/36` films, `11/11` grids, DOOM enabled):
 ### M6M ARM946E-S BE (`C78FRM.bin`)
 - **Payload**: `125` hooks, `118` strings, `42` menus, `431` rows (`codegen_all_36_films_and_subset_grids` also verifies `36/36` films + `11/11` grids link within budget).
 - **Region usage**:
-  - `CODE`: `12,820 / 15,316 B` | `DATA`: `12,436 / 12,800 B` | `LOOKS`: `7,476 / 8,756 B` | `MENU`: `4,148 / 4,672 B`
+  - `CODE`: `12,908 / 15,316 B` | `DATA`: `12,436 / 12,800 B` | `LOOKS`: `7,476 / 8,756 B` | `MENU`: `4,148 / 4,672 B`
   - `DOOM_A`: `4,752 / 4,876 B` | `DOOM_B`: `4,092 / 4,668 B` | `DOOM_C`: `2,180 / 2,492 B` | `DOOM_D`: `1,184 / 2,304 B` | `DOOM_E`: `2,820 / 3,500 B`
 - **Live-view overlays (`m6m_bench`, `draw only` emulated ARM9 insns; host DMA fills/flushes excluded)**:
 
-| Grid | Mode | `default` | `checker` | `white` |
-| --- | --- | --- | --- | --- |
-| `7` | Electronic Level | `11,129` | `11,129` | `11,129` |
-| `8` | 21:9 XPan + Level | `30,059` | `30,059` | `30,059` |
-| `10` | 1:1 Square + Level | `65,262` | `65,262` | `65,262` |
-| `11` | Focus Peaking | `626,068` | `368,622` | `368,622` |
-| `12` | Peaking + Level | `636,940` | `379,494` | `379,494` |
-| `13` | Zebras | `150,312` | `411,114` | `241,726` |
-| `14` | RGB Hist + Level | `155,313` | `150,437` | `150,437` |
-| `17` | False Color (IRE) | `331,438` | `458,094` | `458,094` |
+| Grid | Mode | `default` | `checker` | `white` | `black` |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `7` | Electronic Level | `10,832` | `10,832` | `10,832` | `10,832` |
+| `8` | 21:9 XPan + Level | `29,794` | `29,794` | `29,794` | `29,794` |
+| `10` | 1:1 Square + Level | `63,287` | `63,287` | `63,287` | `63,287` |
+| `11` | Focus Peaking | `626,066` | `368,620` | `368,620` | `368,620` |
+| `12` | Peaking + Level | `636,642` | `379,196` | `379,196` | `379,196` |
+| `13` | Zebras | `150,310` | `411,112` | `241,724` | `148,444` |
+| `14` | RGB Hist + Level | `154,952` | `150,076` | `150,076` | `150,306` |
+| `17` | False Color (IRE) | `330,716` | `457,372` | `457,372` | `457,372` |
 
-- **Dual Hi+Lo zebras, direct draw (`m6m_bench`)**: scalar C → ARM/SWAR, with an independent full-frame oracle over all eight phases and all 256 luma values:
+- **Dual Hi+Lo zebras, direct draw (`m6m_bench`)**: scalar C → ARM/SWAR with uniform-highlight and uniform-shadow bulk stores. Independent full-frame oracles cover all eight phases, all 256 luma values, varied all-shadow blocks, and shadow/midtone fallback blocks:
 
-| Scene | Before | After | Reduction |
+| Scene | Before low store | Current | Change |
 | --- | ---: | ---: | ---: |
-| `default` | `430,473` | `221,030` | `48.7%` |
-| `checker` | `1,220,703` | `852,888` | `30.1%` |
-| `white` | `1,093,503` | `318,860` | `70.8%` |
+| `default` | `221,030` | `221,122` | `+0.04%` |
+| `checker` | `852,888` | `869,848` | `+2.0%` |
+| `white` | `318,860` | `318,860` | `0%` |
+| `black` | `852,888` | `429,100` | `-49.7%` |
 
-  The ARM implementation also shrinks the function by `224 B`.
+  The uniform-shadow path adds `88 B` of `CODE`: two instructions to each non-uniform block containing highlights, and thirteen to each non-uniform block with shadows but no highlights (the all-low probe ahead of the scalar fallback). These are emulator instruction counts, not measured hardware frame times. Oracles use the default highlight threshold `242`; non-default threshold coverage and camera A/B remain pending.
 
 - **Label renderer (`labels.c`, `m6m_bench`)**: `41` emulated insns cached (`O(1)` `(class, sid)` table), `271,272..3,108,375` cold across classes 1..6. Cold renders clean `22..242` tile cache lines instead of SWI 10's `512`, with no whole-cache invalidate. Cache CP15 cost is not modeled: the extra `9` cold emulated instructions are address setup, not a hardware timing measurement. On-camera visual and latency A/B remain pending.
 - **Custom DOOM applet (`SCREEN_DOOM`, `0x21`)**: custom 2.5D sector/portal renderer with a hand-built 13-sector map (not a port of id DOOM); `320×240` 8bpp → `640×480` `RGBA4444` 2×2 upscale. `camera_flow` enforces `< 2.5M` emulated ARM9 insns/tick and clean exit back to `SCREEN_LV` (`0x15`).
 
 ## 3. Emulator & verification commands
 
-- `crates/dp2m-emu/src/arm9.rs` uses a direct-fetch SDRAM loop with a 2 MB hook bitmap (`~245 MIPS` overlay / `~491 MIPS` label host rate; `m6m_bench` ~0.74 s wall time). `crates/dp2m-emu/src/fr80/emu.rs` uses direct ROM fetch with a 64 KB SDRAM TLB (`1024` pages) and handler bloom filter.
-- `dp2m verify out`: **538 / 538** checks (`m6m: 270`, `custom: 130`, `labels: 138`) in ~0.68 s; `--artifacts <dir>` writes `labels.png`.
+- `crates/dp2m-emu/src/arm9.rs` uses a direct-fetch SDRAM loop with a 2 MB hook bitmap (`~223 MIPS` overlay / `~477 MIPS` label host rate; `m6m_bench` ~0.90 s wall time). `crates/dp2m-emu/src/fr80/emu.rs` uses direct ROM fetch with a 64 KB SDRAM TLB (`1024` pages) and handler bloom filter.
+- `dp2m verify out`: **554 / 554** checks (`m6m: 286`, `custom: 130`, `labels: 138`) in ~0.80 s; `--artifacts <dir>` writes `labels.png`.
 - `camera_flow` verifies Film page OSD FNV-1a64 (`0x16a06c94433a64d3`), menus, AE, WB, native `SCREEN_PB`, dual-CPU capture, and DOOM gameplay.
 
 ```sh

@@ -1,4 +1,4 @@
-//! m6m suite (226 checks): invariants, hooks, menus, strings, NVRAM settings, bracketing,
+//! m6m suite (286 checks): invariants, hooks, menus, strings, NVRAM settings, bracketing,
 //! auto-ISO min shutter, IPC packing, makernotes, Live View B2Y, Y-cap, HUD overlays, updater & package.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -1225,6 +1225,20 @@ fn check_hud(b: &Build, r: &mut Report, peakcol_addr: u32, peaksens_addr: u32, z
         let expected = dual_expected(&noisy_y, phase);
         let diff = got.iter().zip(&expected).position(|(g, e)| g != e);
         r.check(got == expected, format!("Dual Hi+Lo full-frame reference, phase {phase}, all 256 luma values; first diff {diff:?}, got {:?}, expected {:?}", diff.map(|i| got[i]), diff.map(|i| expected[i])));
+    }
+    let low_y: Vec<u8> = (0..640 * 424).map(|i| ((i * 5 + i / 640) % 13) as u8).collect();
+    let low_mid_y: Vec<u8> = (0..640 * 424).map(|i| if i % 16 < 8 { (i % 13) as u8 } else { 80 }).collect();
+    for (name, frame_y) in [("all-low", &low_y), ("low/midtone", &low_mid_y)] {
+        m.wr(yv, frame_y);
+        for phase in 0..8u32 {
+            m.w32(lp + 12, phase);
+            draw(&mut m, 13)?;
+            let mut got = vec![0u8; 640 * 424 * 2];
+            m.cpu.read_bytes(stock::ARGB_FB, &mut got);
+            let expected = dual_expected(frame_y, phase);
+            let diff = got.iter().zip(&expected).position(|(g, e)| g != e);
+            r.check(got == expected, format!("Dual Hi+Lo {name} full-frame reference, phase {phase}; first diff {diff:?}, got {:?}, expected {:?}", diff.map(|i| got[i]), diff.map(|i| expected[i])));
+        }
     }
     m.w8(zebralvl_addr, 0);
 

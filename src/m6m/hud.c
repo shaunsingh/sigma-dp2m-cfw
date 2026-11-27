@@ -370,17 +370,19 @@ static void draw_histogram_arm(const uint8_t *Yp, const uint8_t *Cb, const uint8
 }
 
 static void draw_histogram(void) {
-    /* Re-read y after cb/cr: lv_ycap_hook (hooks.S) writes y,cb,cr,fcnt to completion on rotation. */
-    uint32_t y, cb, cr;
+    /* lv_ycap_hook (hooks.S) rewrites y,cb,cr then bumps fcnt, to completion relative to this task. */
+    uint32_t y, cb, cr, f;
     do {
+        f = lv_planes.fcnt;
         y = lv_planes.y;
         cb = lv_planes.cb;
         cr = lv_planes.cr;
-    } while (lv_planes.y != y);
+    } while (lv_planes.fcnt != f);
     if (!plane_ok(y)) return;
     /* hist_buf is shared: the grid hooks are reachable from tasks that preempt the UI task and
-     * run to completion, so a nested draw skips. Non-zero initialiser: payload .bss is not zeroed. */
-    static uint8_t hist_free = 1u;
+     * run to completion, so a nested draw skips. Payload .bss is not zeroed at boot; volatile and
+     * the explicit section stop clang from inverting the flag into .bss. */
+    static volatile uint8_t hist_free __attribute__((section(".data.hist_free"))) = 1u;
     if (!hist_free) return;
     hist_free = 0u;
     draw_histogram_arm((const uint8_t *)y,

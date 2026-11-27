@@ -21,7 +21,7 @@ Default config (`dp2m.example.fnl`: `24/36` films, `11/11` grids, DOOM enabled):
 ### M6M ARM946E-S BE (`C78FRM.bin`)
 - **Payload**: `127` hooks, `118` strings, `42` menus, `431` rows (`codegen_all_36_films_and_subset_grids` also verifies `36/36` films + `11/11` grids link within budget).
 - **Region usage**:
-  - `CODE`: `13,300 / 15,316 B` | `DATA`: `12,436 / 12,800 B` | `LOOKS`: `7,476 / 8,756 B` | `MENU`: `4,148 / 4,672 B`
+  - `CODE`: `13,296 / 15,316 B` | `DATA`: `12,436 / 12,800 B` | `LOOKS`: `7,476 / 8,756 B` | `MENU`: `4,148 / 4,672 B`
   - `DOOM_A`: `4,752 / 4,876 B` | `DOOM_B`: `4,092 / 4,668 B` | `DOOM_C`: `2,180 / 2,492 B` | `DOOM_D`: `1,104 / 2,304 B` | `DOOM_E`: `2,820 / 3,500 B`
 - **Live-view overlays (`m6m_bench`, `draw only` emulated ARM9 insns; host DMA fills/flushes excluded)**:
 

@@ -23,6 +23,9 @@ const CHECKSUM_FIELD: std::ops::Range<usize> = 0x4C..0x50;
 const MCAS_STRIDE: u32 = 0x200;
 const LUT3D_STRIDE: usize = 0x1028;
 
+// DP2 Quattro 2.03 in-camera CMCM entry 10 (DP2QV203.BIN file offset 0x4796B0), Q16 rounded to Q10.
+pub(crate) const DP2Q_TEAL_ORANGE_CMCM_Q10: [i16; 9] = [1092, 59, -127, 257, 392, 375, -17, -43, 1084];
+
 // flash map (< 0x00800000 = 8 MB NOR limit)
 const VA_MATRIX_HOOK: u32 = 0x005D_0000;
 const VA_LUTSEL_HOOK: u32 = 0x005D_0180;
@@ -274,7 +277,7 @@ pub fn build_m5(fw_raw: &[u8], pack: &FilmPack, asm_dir: &Path, cfg: &Config) ->
         color(pack.dp2q_cmcm_4[1], [30, 0, 72, 0]),
         color(pack.dp2q_cmcm_4[2], [26, 0, 88, 2]),
         color(pack.dp2q_cmcm_4[3], [26, 0, 48, 0]),
-        color(eye_q10, [32, 0, 80, 0]),
+        color(DP2Q_TEAL_ORANGE_CMCM_Q10, [32, 0, 80, 0]),
         mono([38, 2, 56, 1]),
         mono([38, 2, 56, 1]),
         mono([40, 2, 60, 1]),

@@ -944,7 +944,10 @@ fn check_lv(b: &Build, r: &mut Report) -> Result<(), String> {
         format!("color mode {} -> 0: stock gamma restored", kf.cm),
     );
     r.eq(call_lv(&mut m, "lv_cmcm_hook", &[1, 0])?, vec![LvCall::Cmcm(1, 0)], "CMCM hook, stock color mode: stock path");
-    let cf = b.catalog.films.iter().find(|f| look(f).flags & LV_CMCM != 0 && look(f).flags & LV_MONO_Q7 == 0).unwrap();
+    let cf = b.catalog.films.iter().find(|f| f.cm == 13).unwrap();
+    let official_teal = [1092, 59, -127, 257, 392, 375, -17, -43, 1084];
+    r.eq(look(cf).cmcm, official_teal, "Teal & Orange LV uses official DP2Q CMCM entry 10 in Q10");
+    r.eq(look(cf).flags, LV_CMCM, "Teal & Orange LV enables CMCM without mono weights or gamma knots");
     for (mode, cc) in [(7u32, &cc7), (1, &ccn)] {
         let exp = lv_matrix(&look(cf).cmcm, look(cf).flags, cc);
         r.eq(call_lv(&mut m, "lv_cmcm_hook", &[mode, cf.cm])?, vec![LvCall::Mat(exp)], format!("CMCM hook, film cm {}, LV mode {mode}: q10 film x live q7", cf.cm));

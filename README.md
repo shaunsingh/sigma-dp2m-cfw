@@ -19,7 +19,7 @@ dp2m starts from the stock 1.05 package (`DP2MV105.bin`). It assembles FR80 code
 - 3D spectral engine, grain and halation are independent toggles.
 - Live view uses each film's color matrix and tone curve, and follows mode and paper changes immediately.
 - Custom exposure modes C1..C3, F1, F2.
-- ISO 50, 5-shot bracketing, minimum shutter speed for ISO auto.
+- ISO 50, Auto-ISO lower limit down to ISO 50, 5-shot bracketing, minimum shutter speed for ISO auto.
 - 11 live-view overlays as extra grid modes (7..17): electronic level (7), aspect masks with level (21:9 XPan, 16:9 Cinema, 1:1 Square, 7:6, 4:3), focus peaking and peaking + level (runtime Medium / High / Low / Auto MF sensitivity + Red / Yellow / White / Black color), zebras (runtime 95% / 90% Safe / 100% Clip / Dual Hi+Lo), RGB histogram + level, and False Color (IRE heatmap + legend).
 - Bare-metal ARM926EJ-S **DOOM** applet (`SCREEN_DOOM`, Setup page 4): custom 2.5D sector/portal renderer (not a port of the id engine) with a hand-built 13-sector E1M1-tribute map, procedural textures, enemy sprites, weapon/HUD, automap, and clean exit back to Live View.
 
@@ -110,7 +110,7 @@ Run as `cargo run --release -- <command>`. Without `--config`, the builder uses 
 | Command | Action |
 | --- | --- |
 | `build [DP2MV105.bin] [--config f] [--out dir] [--pack f] [--skip-verify]` | build all images; `--skip-verify` skips the FR80 check |
-| `verify [out_dir] [--fw f] [--suite m6m\|custom\|labels] [--artifacts dir] [--quiet]` | native Rust M6M verifier (506 checks across `m6m`, `custom`, `labels` in ~0.4 s; `--artifacts` writes `labels.png`) |
+| `verify [out_dir] [--fw f] [--suite m6m\|custom\|labels] [--artifacts dir] [--quiet]` | native Rust M6M verifier (527 checks across `m6m`, `custom`, `labels` in ~0.4 s; `--artifacts` writes `labels.png`) |
 | `re [--fw f] [--image f] [--syms f] <cmd>` | native M6M RE toolkit: `package`, `dis`, `xrefs`, `callers`, `sid`, `strings`, `menus`, `screens`, `icons`, `nvram`, `liveness`, `text` |
 | `x3f <file.X3F> [--dump out.camf] [--all]` | decode Merrill X3F Type-4 Huffman CAMF sections and dump `CMbM`/`CMbP`/`CMbT` entries |
 | `lut <in.cube> <LUTn.BIN> [--grain N] [--grain-profile 0\|1\|2] [--halo N] [--halo-tint 0\|1\|2] [--tag S]` | compile an Adobe/Resolve `.cube` 3D LUT (`DOMAIN_MIN`/`DOMAIN_MAX`, 17³ + gray anchors) into a 4,160 B D2ML SD-card binary; `lut inspect <LUTn.BIN>` inspects an existing binary |

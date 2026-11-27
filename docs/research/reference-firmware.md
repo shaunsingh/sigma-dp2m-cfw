@@ -39,7 +39,7 @@ Same header layout as `DP2MV105.bin`:
     - Raw Q16: `[69910, 3773, -8136, 16440, 25096, 24009, -1094, -2747, 69385]`
     - Floats: `[1.066742, 0.057571, -0.124146, 0.250854, 0.382935, 0.366348, -0.016693, -0.041916, 1.058731]`
     - Q10: `[1092, 59, -127, 257, 392, 375, -17, -43, 1084]` (each row sums to 1024).
-    - Current `dp2m` builds do **not** use this CMCM: `m5.rs` pairs identity CMCM with `dp2q_to_mcas` for packed mode 13, and `codegen.rs::lv_looks` leaves T&O all-zero so Live View shows Standard. No T&O entries exist in any CAMF block; values exist only in the in-camera tables.
+    - `dp2m` uses this Q10 matrix for both the packed-mode-13 capture recipe and its Live View preview, paired with `dp2q_to_mcas`. No T&O entries exist in any CAMF block; values exist only in the in-camera tables.
   - Following the CMCM table: 7 saturation-step matrices at `0x4796D4..0x4797AC`, then identity floats at `0x4797D0`.
 - **In-camera MCK / MCB / MCID tables (verified; MCK mode order inferred by alignment with CMCM table order)**:
   - **MCK** at `0x24816C`: LE `i16`, 12 sets × 216 B. Set 0 Standard; 1 Vivid (differs in sectors 3..5, 9..11); 2 Neutral; 3 Portrait (= Vivid in sectors 3..5); 4 Landscape (= Vivid in sectors 9..11); 5..9 (FCBlue, SunsetRed, ForestGreen, Cinema, FCYellow) identical to Standard; 10 Teal & Orange (= `dp2m`'s `dp2q_to_mcas` exactly); 11 zero. (`dp2m` uses identity MCK for Quattro modes 9..12 rather than Quattro's Standard MCK.)

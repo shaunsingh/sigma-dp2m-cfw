@@ -198,6 +198,13 @@ pub fn verify_m5(s2: &[u8]) -> Result<(), String> {
     }
     check_stock_instructions(s2)?;
 
+    let teal_off = va_off(VA_CMCM_TABLE + 4 * 32);
+    let teal: [i16; 9] = core::array::from_fn(|k| i16::from_be_bytes(s2[teal_off + k * 2..teal_off + k * 2 + 2].try_into().unwrap()));
+    let official_teal = [1092, 59, -127, 257, 392, 375, -17, -43, 1084];
+    if teal != official_teal {
+        return Err(format!("Teal & Orange CMCM mismatch: got {teal:?}, official DP2Q Q10 {official_teal:?}"));
+    }
+
     {
         let mut e = Emulator::new(s2, DELTA);
         e.r[14] = 0x8008_0200;

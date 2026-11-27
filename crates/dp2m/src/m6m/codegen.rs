@@ -542,6 +542,7 @@ fn lv_looks(s3: &S3, pack: &FilmPack) -> Result<Vec<Look>, String> {
     for (i, m) in pack.dp2q_cmcm_4.iter().enumerate() {
         out[at(FILM_MODE0 + i as u8)] = (*m, [0; 18], LV_CMCM);
     }
+    out[at(FILM_MODE0 + 4)] = (crate::m5::DP2Q_TEAL_ORANGE_CMCM_Q10, [0; 18], LV_CMCM);
     for (i, &(r, g, b)) in catalog::MONO_FILTER_Q7.iter().enumerate() {
         let (fi, _) = catalog::films_of(FilmKind::OpticalMono).nth(i).unwrap();
         out[at(catalog::packed_mode(fi, 0))] = ([r, g, b, r, g, b, r, g, b], [0; 18], LV_MONO_Q7);

@@ -1,4 +1,4 @@
-//! labels suite (135 checks): runtime-rendered BP4 label icons across all 6 classes,
+//! labels suite (138 checks): runtime-rendered BP4 label icons across all 6 classes,
 //! arena allocation & reset, stray-write hygiene, QS strip routing, LV status/info/menu icons.
 
 use std::cell::RefCell;
@@ -268,7 +268,9 @@ pub(crate) fn run_with_artifacts(b: &Build, r: &mut Report, artifacts: Option<&P
     r.check(m.rd(stock::OSD_DIRTY, 16) == dirty0, "OSD dirty rects unchanged");
 
     r.check(
-        b.stock.u32(0xA07F_BED8) == 0xEE07_0F3A
+        b.stock.u32(0xA07F_BED0) == 0xE281_101F
+            && b.stock.u32(0xA07F_BED4) == 0xE1A0_12A1
+            && b.stock.u32(0xA07F_BED8) == 0xEE07_0F3A
             && b.stock.u32(0xA07F_BEE8) == 0xEE07_1F9A
             && b.stock.u32(0xA07F_BEEC) == 0xE8BD_0003,
         "stock SWI 12 cleans by address, drains the write buffer, and restores r0/r1",

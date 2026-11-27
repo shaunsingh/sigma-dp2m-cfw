@@ -57,7 +57,7 @@ static inline void hw_dcache_sync(void) {
     __asm__ volatile("svc #10" ::: "lr", "memory");
 }
 
-/* ITCM SWI 12 (0x264, image 0xA07FBECC): clean 32-byte D-cache lines over r0..r0+r1, drain the
+/* ITCM SWI 12 (0x2B0, image 0xA07FBECC): clean 32-byte D-cache lines over r0..r0+r1, drain the
  * write buffer, and preserve r0/r1 and flags. Unlike SWI 10, unrelated cache lines are untouched. */
 static inline void hw_dcache_clean_range(const void *p, uint32_t n) {
     register uint32_t a __asm__("r0") = (uintptr_t)p & ~31u;

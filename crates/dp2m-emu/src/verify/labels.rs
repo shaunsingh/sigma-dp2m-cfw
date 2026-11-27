@@ -266,6 +266,27 @@ pub(crate) fn run_with_artifacts(b: &Build, r: &mut Report, artifacts: Option<&P
     }
     r.eq((m.u32(stock::FONT_SCALE), m.u32(stock::FONT_SCALE + 4)), (5, 7), "font scale restored");
     r.check(m.rd(stock::OSD_DIRTY, 16) == dirty0, "OSD dirty rects unchanged");
+
+    r.check(
+        b.stock.u32(0xA07F_BED8) == 0xEE07_0F3A
+            && b.stock.u32(0xA07F_BEE8) == 0xEE07_1F9A
+            && b.stock.u32(0xA07F_BEEC) == 0xE8BD_0003,
+        "stock SWI 12 cleans by address, drains the write buffer, and restores r0/r1",
+    );
+    let mut cache_m = Machine::new(&b.img, 0);
+    cache_m.w32(b.sym("cache"), LABEL_MAGIC);
+    cache_m.w32(b.sym("cache") + 4, 4u32.wrapping_sub(a0) & 31);
+    cache_m.cpu.start_cache_log();
+    let cold = render_icon(&mut cache_m, b.cat("ICON_LABEL_L"))?.ok_or("cold cache-test label did not render")?;
+    let cached = render_icon(&mut cache_m, b.cat("ICON_LABEL_L"))?.ok_or("cached cache-test label did not render")?;
+    let cache_log = cache_m.cpu.stop_cache_log();
+    r.eq(cold.ptr & 31, 4, "cache-range test tile starts four bytes into a cache line");
+    r.eq(
+        cache_log,
+        vec![(12, cold.ptr & !31, (cold.w * cold.h) as u32 + (cold.ptr & 31))],
+        format!("cold label cleans its aligned, extended tile range; cached lookup issues no cache SWI (same tile: {})", cold.ptr == cached.ptr),
+    );
+
     let log = m.cpu.stop_write_log();
     let stray: Vec<u32> = log.iter().map(|&(a, _)| a).collect::<BTreeSet<_>>().into_iter().take(8).collect();
     r.eq(stray, vec![], "label rendering writes only allowed ranges");

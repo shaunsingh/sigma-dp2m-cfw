@@ -41,6 +41,7 @@ pub struct Cpu {
     write_log_active: bool,
     write_allow: Vec<(u32, u32)>,
     write_log: Vec<(u32, u32)>,
+    cache_log: Option<Vec<(u32, u32, u32)>>,
     mmio: Vec<(u32, Box<[u8; 4096]>)>,
     hook_bits: Vec<u64>,
     has_high_hooks: bool,
@@ -73,6 +74,7 @@ impl Cpu {
             write_log_active: false,
             write_allow: Vec::new(),
             write_log: Vec::new(),
+            cache_log: None,
             mmio: Vec::new(),
             hook_bits: vec![0; (CODE_BITMAP_SPAN / 2) / 64],
             has_high_hooks: false,
@@ -229,6 +231,14 @@ impl Cpu {
         self.write_log_active = false;
         self.write_allow.clear();
         std::mem::take(&mut self.write_log)
+    }
+
+    pub fn start_cache_log(&mut self) {
+        self.cache_log = Some(Vec::new());
+    }
+
+    pub fn stop_cache_log(&mut self) -> Vec<(u32, u32, u32)> {
+        self.cache_log.take().unwrap_or_default()
     }
 
     #[cold]
@@ -682,7 +692,11 @@ impl Cpu {
                 self.cpsr_low |= IRQ_MASK;
             }
             // ITCM 0x1FC..0x31C preserves r0/r1; caches and write buffers are not modeled.
-            8..=15 => {}
+            8..=15 => {
+                if let Some(log) = &mut self.cache_log {
+                    log.push((number, self.r[0], self.r[1]));
+                }
+            }
             // The kernel vector at 0xA01728C8 is not modeled.
             _ => self.r[0] = 0,
         }

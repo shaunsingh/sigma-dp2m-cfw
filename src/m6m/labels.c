@@ -355,7 +355,7 @@ const struct icon *label_icon(uint32_t id) {
         REG32(OSD_DIRTY + 4u) = d1;
         if (!t) return 0;
         cache.tile[k][i] = t;
-        hw_dcache_sync();
+        hw_dcache_clean_range(t, c->w * c->h);
     }
     ICON_RESULT->data = t;
     ICON_RESULT->w = c->w;

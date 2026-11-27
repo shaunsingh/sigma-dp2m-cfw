@@ -4,7 +4,7 @@ All performance numbers below were measured in the built-in ARM9 and FR80 emulat
 
 ## 1. Hardware & build invariants
 
-- **M6M CP15 MPU & `SWI 10` (`0xA07FBE64`)**: Stock MPU init (`0xA01720F0..0xA01721EC`) enables the 16 KB 4-way D-cache and write buffer over `0xA0000000..0xAFFFFFFF` (Region 2: OSD `0xA2130000`, `ARGB_FB` `0xA21D8C00`, `lv_planes`) plus I-cache over `0xA0000000..0xA1FFFFFF` (Region 3). ITCM `SWI 10` (`0x00000248`) cleans all 4 ways × 128 sets by index (`c7, c10, 2`), drains the write buffer (`c7, c10, 4`), invalidates the D-cache (`c7, c6, 0`), leaves the I-cache untouched, and restores `r0`/`r1`/`r2`. `hw_dcache_sync()` (`src/m6m/dp2m.h`) brackets CPU/Milbeaut-2D-DMA handoffs in `hud.c`, `labels.c`, and `doom.c`.
+- **M6M CP15 MPU & cache SWIs (`0xA07FBE64` / `0xA07FBECC`)**: Stock MPU init (`0xA01720F0..0xA01721EC`) enables the 16 KB 4-way D-cache and write buffer over `0xA0000000..0xAFFFFFFF` (Region 2: OSD `0xA2130000`, `ARGB_FB` `0xA21D8C00`, `lv_planes`) plus I-cache over `0xA0000000..0xA1FFFFFF` (Region 3). ITCM `SWI 10` (`0x00000248`) cleans all 4 ways × 128 sets by index (`c7, c10, 2`), drains the write buffer (`c7, c10, 4`), invalidates the D-cache (`c7, c6, 0`), leaves the I-cache untouched, and restores `r0`/`r1`/`r2`. `hw_dcache_sync()` (`src/m6m/dp2m.h`) brackets full-frame CPU/Milbeaut-2D-DMA handoffs in `hud.c` and `doom.c`. Newly rendered label tiles instead use stock `SWI 12` through `hw_dcache_clean_range()`, which aligns and extends the range, cleans only those lines by address, and drains the write buffer without a whole-cache invalidate.
 - **Spartan-6 XC6SLX25 FPGA (`0xA0179000..0xA023D35A`)**: `803,674 B` (`IDCODE = 0x04004093`, `COR1 = 0x3D00`), verified byte-exact stock at build time.
 - **M5 FR80 SDRAM scratch (`0x80100000..0x8010C800`)**: verified zero-collision against `PREVIEW_Y` (`0x80FB0580`), `THUMB_Y/CB/CR` (`0x81046580`), and RAW/RGB buffers (`0x8104B590+`) in `verify-m5`.
 - **Executable-region check**: `build_m6m` bars `SHF_EXECINSTR` sections from `0xA0070000..0xA00B8000` (simulator HLE driver stub range).
@@ -18,10 +18,10 @@ Default config (`dp2m.example.fnl`: `24/36` films, `11/11` grids, DOOM enabled):
 - **`dp2m verify-m5`**: 198 modes × 2 CS, signed CCMatrix, IPC/EXIF, `4704×3136` pyramid (`754,794` emulated insns), `4704×8` `fx 0..7` (`fx=7 fill=1`: `144` insns/pair, `18` SDRAM/pair), 256 `fx × fill × CS` stage runs, zero-collision `0x80100000`.
 - **`ycc_bench` (FR80 emulator)**: see [../hardware.md](../hardware.md#25-color-pipeline--d2ml-sd-card-3d-lut-format) for per-stage insns/pair (`B&W toner fx=0/1`: `23.0` insns/pair on `4704×8`; `fill=1 fx=0`: `29.9`; `fx=1`: `65.4`; `fx=7 fill=1`: `147.6`).
 
-### M6M ARM926EJ-S BE (`C78FRM.bin`)
+### M6M ARM946E-S BE (`C78FRM.bin`)
 - **Payload**: `125` hooks, `118` strings, `42` menus, `431` rows (`codegen_all_36_films_and_subset_grids` also verifies `36/36` films + `11/11` grids link within budget).
 - **Region usage**:
-  - `CODE`: `12,808 / 15,316 B` | `DATA`: `12,436 / 12,800 B` | `LOOKS`: `7,476 / 8,756 B` | `MENU`: `4,148 / 4,672 B`
+  - `CODE`: `12,820 / 15,316 B` | `DATA`: `12,436 / 12,800 B` | `LOOKS`: `7,476 / 8,756 B` | `MENU`: `4,148 / 4,672 B`
   - `DOOM_A`: `4,752 / 4,876 B` | `DOOM_B`: `4,092 / 4,668 B` | `DOOM_C`: `2,180 / 2,492 B` | `DOOM_D`: `1,184 / 2,304 B` | `DOOM_E`: `2,820 / 3,500 B`
 - **Live-view overlays (`m6m_bench`, `draw only` emulated ARM9 insns; host DMA fills/flushes excluded)**:
 
@@ -46,13 +46,13 @@ Default config (`dp2m.example.fnl`: `24/36` films, `11/11` grids, DOOM enabled):
 
   The ARM implementation also shrinks the function by `224 B`.
 
-- **Label renderer (`labels.c`, `m6m_bench`)**:  `42` emulated insns cached (`O(1)` `(class, sid)` table), `271,261..3,108,364` cold across classes 1..6.
+- **Label renderer (`labels.c`, `m6m_bench`)**: `41` emulated insns cached (`O(1)` `(class, sid)` table), `271,272..3,108,375` cold across classes 1..6. Cold renders clean `22..242` tile cache lines instead of SWI 10's `512`, with no whole-cache invalidate. Cache CP15 cost is not modeled: the extra `9` cold emulated instructions are address setup, not a hardware timing measurement. On-camera visual and latency A/B remain pending.
 - **Custom DOOM applet (`SCREEN_DOOM`, `0x21`)**: custom 2.5D sector/portal renderer with a hand-built 13-sector map (not a port of id DOOM); `320×240` 8bpp → `640×480` `RGBA4444` 2×2 upscale. `camera_flow` enforces `< 2.5M` emulated ARM9 insns/tick and clean exit back to `SCREEN_LV` (`0x15`).
 
 ## 3. Emulator & verification commands
 
 - `crates/dp2m-emu/src/arm9.rs` uses a direct-fetch SDRAM loop with a 2 MB hook bitmap (`~245 MIPS` overlay / `~491 MIPS` label host rate; `m6m_bench` ~0.74 s wall time). `crates/dp2m-emu/src/fr80/emu.rs` uses direct ROM fetch with a 64 KB SDRAM TLB (`1024` pages) and handler bloom filter.
-- `dp2m verify out`: **535 / 535** checks (`m6m: 270`, `custom: 130`, `labels: 135`) in ~0.42 s; `--artifacts <dir>` writes `labels.png`.
+- `dp2m verify out`: **538 / 538** checks (`m6m: 270`, `custom: 130`, `labels: 138`) in ~0.68 s; `--artifacts <dir>` writes `labels.png`.
 - `camera_flow` verifies Film page OSD FNV-1a64 (`0x16a06c94433a64d3`), menus, AE, WB, native `SCREEN_PB`, dual-CPU capture, and DOOM gameplay.
 
 ```sh

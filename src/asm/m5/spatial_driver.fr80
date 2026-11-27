@@ -1,4 +1,4 @@
-// spatial driver @ 0x4D738E (pre-hw-jpeg), stateless w/ scratch @ 0x80100000
+// spatial driver @ 0x4D738E (pre-hw-jpeg); scratch 0x80100000..0x8010C800
 
 .include "m5_addrs.inc"
 
@@ -16,6 +16,7 @@
     st      r7, @-r15
     st      RP, @-r15
 
+    // stock SYM_GET_JOB_CM (0x4DD702) only clobbers r0, r1, r4, r12, r13, so r2 survives across it
     ld      @(r14, #8), r4 ; extsh r4
     ldi:32  #SYM_GET_JOB_1D, r12 ; call @r12 ; mov r4, r2
     ld      @(r14, #8), r4 ; extsh r4
@@ -43,7 +44,6 @@ do_work:
     st      r10, @-r15
     st      r11, @-r15
     enter   #160
-    st      r2, @(r14, #-4)
     st      r3, @(r14, #-8)
     st      r0, @(r14, #-12)
     st      r4, @(r14, #-16)
@@ -160,13 +160,7 @@ done_exit:
     ld      @r15+, r10
     ld      @r15+, r9
     ld      @r15+, r8
-    ld      @r15+, RP
-    ld      @r15+, r7
-    ld      @r15+, r6
-    ld      @r15+, r5
-    ld      @r15+, r4
-    ldi:32  #SYM_HW_JPEG_ENCODE, r12
-    jmp     @r12
+    jmp.far fast_stock
 
 has_work:
     ldi:8   #0, r4 ; ld @(r14, #-16), r5 ; ldi:32 #SYM_GET_IMG_DIM, r12 ; call @r12 ; st_ctx 12, r4
@@ -244,7 +238,7 @@ pyr_dispatch:
     mov     r3, r12 ; lsr #1, r12 ; st r12, @(r14, #-48)
     ld      @(r14, #-32), r0 ; cmp #0, r0 ; beq pyr_fill_only
 
-    // precompute scaled halo optical LUT into SCRATCH_BLUR_LINE (eliminates mul + stack load per grid cell!)
+    // reuse SCRATCH_BLUR_LINE (256 B) as scaled halo optical LUT during pyramid build
     ldi:32  #VA_HALO_OPT_LUT, r5
     ldi:32  #SCRATCH_BLUR_LINE, r12
     ldi:20  #256, r13
@@ -256,13 +250,13 @@ ph_lut_lp:
 
     ld      @(r14, #-28), r0 ; cmp #0, r0 ; beq pyr_halo_only
 
-    // both halation & fill active: r12=scaled halo LUT, r6=pdx/2, r10=r11+pdx/2, r9=0x01100 hoisted!
+    // both halation & fill: r12=scaled halo LUT, r6=pdx/2, r10=r11+pdx/2, r9=HALO_CORE-HALO_GRID
     st      r6, @(r14, #-148)
     st      r9, @(r14, #-152)
     st      r10, @(r14, #-156)
     ld      @(r14, #-48), r6
     mov     r11, r10 ; add r6, r10
-    ldi:20  #0x01100, r9
+    ldi:20  #SCRATCH_HALO_CORE - SCRATCH_HALO_GRID, r9
     ldi:32  #SCRATCH_HALO_GRID, r8
     ldi:8   #0, r4
 pyr_by:
@@ -280,7 +274,7 @@ pbm2:
     cmp     r0, r1 ; ble pbm3 ; mov r1, r0
 pbm3:
     lsr     #2, r2
-    ldi:20  #0x02200, r13 ; stb r2, @(r13, r8)
+    ldi:20  #SCRATCH_FILL_GRID - SCRATCH_HALO_GRID, r13 ; stb r2, @(r13, r8)
     add     r2, r4
 
     mov     r0, r13 ; ldub @(r13, r12), r0
@@ -295,7 +289,7 @@ pbm3:
     jmp.far finish_ym
 
 pyr_halo_only:
-    // r12=scaled halo LUT, r2=pdx/2, r4=r11+pdx/2 hoisted — zero stack loads or muls in pyr_hx!
+    // r12=scaled halo LUT, r2=pdx/2, r4=r11+pdx/2
     ldi:32  #SCRATCH_HALO_GRID, r8
     ld      @(r14, #-48), r2
     mov     r11, r4 ; add r2, r4
@@ -312,7 +306,7 @@ phm2:
 phm3:
     mov     r0, r13 ; ldub @(r13, r12), r0
     stb     r0, @r8
-    ldi:20  #0x01100, r13 ; stb r0, @(r13, r8)
+    ldi:20  #SCRATCH_HALO_CORE - SCRATCH_HALO_GRID, r13 ; stb r0, @(r13, r8)
     add     #1, r8
     add     r3, r5
     add2    #-1, r7 ; cmp #0, r7 ; bgt pyr_hx
@@ -384,6 +378,7 @@ run_passes:
     ldi:32  #SCRATCH_SAK_MAGIC, r8
     ldi:32  #0x53414B31, r1
     ld      @r8, r2 ; cmp r1, r2 ; bne sak_cache_clear
+    // SDRAM lut3d ptr (>= 0x80000000, signed < 0) is mutable SD LUT and always invalidates cache
     cmp     #0, r0 ; blt sak_cache_clear
     ldi:8   #4, r13 ; ld @(r13, r8), r2 ; cmp r0, r2 ; beq rp_call
 sak_cache_clear:
@@ -403,7 +398,11 @@ rp_call:
     ldi:32  #VA_YCC_SUB, r12 ; call @r12
     jmp.far done_exit
 
-// 2-row SWAR horizontal step (max sum*51 = 1275*51 = 65025 < 65536 -> 0 carry across 16-bit lanes!)
+// 2-row SWAR horizontal preload & step (max sum*51 = 1275*51 = 65025 < 65536 -> 0 carry across 16-bit lanes)
+.macro b5_h2_load dst
+    ldub    @r5, \dst ; lsl2 #16, \dst ; ldub @(r13, r5), r0 ; or r0, \dst ; add #1, r5
+.endm
+
 .macro b5_h2_step ring
     ldub    @r5, r0 ; lsl2 #16, r0
     ldub    @(r13, r5), r1 ; or r1, r0 ; add #1, r5
@@ -449,11 +448,11 @@ b5_pass:
     mov     r7, r13
 b5_h2_lp:
     ld      @(r14, #-148), r5
-    ldub    @r5, r4 ; lsl2 #16, r4 ; ldub @(r13, r5), r0 ; or r0, r4 ; mov r4, r2 ; add #1, r5
-    ldub    @r5, r6 ; lsl2 #16, r6 ; ldub @(r13, r5), r0 ; or r0, r6 ; add r6, r2 ; add #1, r5
+    b5_h2_load r4 ; mov r4, r2
+    b5_h2_load r6 ; add r6, r2
     mov     r5, r12
-    ldub    @r5, r8 ; lsl2 #16, r8 ; ldub @(r13, r5), r0 ; or r0, r8 ; add r8, r2 ; add #1, r5
-    ldub    @r5, r9 ; lsl2 #16, r9 ; ldub @(r13, r5), r0 ; or r0, r9 ; add r9, r2 ; add #1, r5
+    b5_h2_load r8 ; add r8, r2
+    b5_h2_load r9 ; add r9, r2
     mov     r13, r7 ; add2 #-4, r7
 b5_h2_x4:
     cmp     #4, r7 ; blt b5_h2_t0
@@ -472,8 +471,9 @@ b5_h2_edge:
     stb     r10, @r12 ; stb r1, @(r13, r12)
     ld      @(r14, #-148), r8
     mov     r8, r5 ; add #2, r5
-    ldub    @r5, r0 ; stb r0, @r8 ; add #1, r8 ; stb r0, @r8 ; add2 #-1, r8
-    ldub    @(r13, r5), r0 ; stb r0, @(r13, r8) ; add #1, r8 ; stb r0, @(r13, r8) ; add2 #-1, r8
+    ldub    @r5, r0 ; stb r0, @r8
+    ldub    @(r13, r5), r1 ; stb r1, @(r13, r8)
+    add     #1, r8 ; stb r0, @r8 ; stb r1, @(r13, r8) ; add2 #-1, r8
     add     r13, r8 ; add r13, r8 ; st r8, @(r14, #-148)
     ld      @(r14, #-152), r6 ; add2 #-2, r6 ; st r6, @(r14, #-152)
     cmp     #2, r6 ; bge.far b5_h2_lp

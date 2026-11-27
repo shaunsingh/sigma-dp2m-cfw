@@ -1187,6 +1187,47 @@ fn check_hud(b: &Build, r: &mut Report, peakcol_addr: u32, peaksens_addr: u32, z
     m.w8(zebralvl_addr, 0);
     r.check(z90_ok && z100_ok && zdual_ok, "grid 13 zebra levels: 90% Safe, 100% Clip & Dual Hi(orange)+Lo(cyan)");
 
+    let dual_expected = |y: &[u8], phase: u32| {
+        let hi = [0xF40Eu16, 0xF40E, 0x111A, 0x111A];
+        let lo = [0x1DFEu16, 0x1DFE, 0x111A, 0x111A];
+        let phase = phase as usize;
+        let mut out = vec![0u8; 640 * 424 * 2];
+        for sy in (0..424).step_by(2) {
+            let row = sy / 2;
+            for sx in (0..640).step_by(2) {
+                let stripe = (sx / 2) & 3;
+                let v = y[sy * 640 + sx];
+                let px = if v >= 242 {
+                    hi[(((row + phase) & 3) + stripe) & 3]
+                } else if v <= 12 {
+                    lo[(((424 - row + phase) & 3) + stripe) & 3]
+                } else {
+                    0
+                };
+                for dy in [sy, sy + 1] {
+                    for dx in [sx, sx + 1] {
+                        let o = (dy * 640 + dx) * 2;
+                        out[o..o + 2].copy_from_slice(&px.to_be_bytes());
+                    }
+                }
+            }
+        }
+        out
+    };
+    let noisy_y: Vec<u8> = (0..640 * 424).map(|i| ((i * 37 + (i / 640) * 101) & 255) as u8).collect();
+    m.wr(yv, &noisy_y);
+    m.w8(zebralvl_addr, 3);
+    for phase in 0..8u32 {
+        m.w32(lp + 12, phase);
+        draw(&mut m, 13)?;
+        let mut got = vec![0u8; 640 * 424 * 2];
+        m.cpu.read_bytes(stock::ARGB_FB, &mut got);
+        let expected = dual_expected(&noisy_y, phase);
+        let diff = got.iter().zip(&expected).position(|(g, e)| g != e);
+        r.check(got == expected, format!("Dual Hi+Lo full-frame reference, phase {phase}, all 256 luma values; first diff {diff:?}, got {:?}, expected {:?}", diff.map(|i| got[i]), diff.map(|i| expected[i])));
+    }
+    m.w8(zebralvl_addr, 0);
+
     // Mode 17: Foveon False Color (IRE) 6 zones + vertical IRE scale bar
     let mut fc_y = vec![80u8; 640 * 424];
     for y in 40..80usize {

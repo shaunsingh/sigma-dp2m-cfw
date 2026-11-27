@@ -76,6 +76,9 @@ fn m6m_bench() {
             ov_insns += idle + per_frame + only;
             println!("{name:<8} {grid:>4} {idle:>12} {per_frame:>12} {only:>12}");
         }
+        let y = cam.cpu().r32_be(va("lv_planes"));
+        let dual = cam.cpu_mut().call(va("draw_zebras_dual_arm"), &[y, 0, 242], &[], CALL_SP, MAX_STEPS).expect("dual zebras").1;
+        println!("{name:<8} dual draw only {dual:>12}");
     }
     let ov_s = t_ov.elapsed().as_secs_f64();
     println!("overlay host rate: {:.1} MIPS ({:.1} ms)", ov_insns as f64 / ov_s / 1e6, ov_s * 1e3);

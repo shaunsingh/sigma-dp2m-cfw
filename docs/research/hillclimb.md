@@ -13,16 +13,16 @@ All performance numbers below were measured in the built-in ARM9 and FR80 emulat
 
 Default config (`dp2m.example.fnl`: `24/36` films, `11/11` grids, DOOM enabled):
 
-### M5Slave FR80 (`Firm.bin`, checksum `0x32b30d99`)
-- **Code sizes**: `matrix=242 B`, `lutsel=56 B`, `mcas=140 B`, `ipc/exif=90 B`, `ycc_engine=4,028 B` (fits inside the 4 KB FR80 I-cache), `spatial_driver=2,510 B`.
-- **`dp2m verify-m5`**: 198 modes × 2 CS, signed CCMatrix, IPC/EXIF, `4704×3136` pyramid (`755,157` emulated insns), `4704×8` `fx 0..7` (`fx=7 fill=1`: `147` insns/pair, `18` SDRAM/pair), 256 `fx × fill × CS` stage runs, zero-collision `0x80100000`.
+### M5Slave FR80 (`Firm.bin`, checksum `0x32b300c0`)
+- **Code sizes**: `matrix=242 B`, `lutsel=56 B`, `mcas=140 B`, `ipc/exif=90 B`, `ycc_engine=3,974 B` (fits inside the 4 KB FR80 I-cache), `spatial_driver=2,494 B`.
+- **`dp2m verify-m5`**: 198 modes × 2 CS, signed CCMatrix, IPC/EXIF, `4704×3136` pyramid (`754,794` emulated insns), `4704×8` `fx 0..7` (`fx=7 fill=1`: `144` insns/pair, `18` SDRAM/pair), 256 `fx × fill × CS` stage runs, zero-collision `0x80100000`.
 - **`ycc_bench` (FR80 emulator)**: see [../hardware.md](../hardware.md#25-color-pipeline--d2ml-sd-card-3d-lut-format) for per-stage insns/pair (`B&W toner fx=0/1`: `23.0` insns/pair on `4704×8`; `fill=1 fx=0`: `29.9`; `fx=1`: `65.4`; `fx=7 fill=1`: `147.6`).
 
 ### M6M ARM926EJ-S BE (`C78FRM.bin`)
-- **Payload**: `116` hooks, `118` strings, `40` menus, `413` rows (`codegen_all_36_films_and_subset_grids` also verifies `36/36` films + `11/11` grids link within budget).
+- **Payload**: `125` hooks, `118` strings, `42` menus, `431` rows (`codegen_all_36_films_and_subset_grids` also verifies `36/36` films + `11/11` grids link within budget).
 - **Region usage**:
-  - `CODE`: `15,148 / 15,316 B` | `DATA`: `12,468 / 12,800 B` | `LOOKS`: `7,476 / 8,756 B` | `MENU`: `3,572 / 4,672 B`
-  - `DOOM_A`: `4,796 / 4,876 B` | `DOOM_B`: `4,232 / 4,668 B` | `DOOM_C`: `2,212 / 2,492 B` | `DOOM_D`: `1,252 / 2,304 B` | `DOOM_E`: `3,168 / 3,500 B`
+  - `CODE`: `12,808 / 15,316 B` | `DATA`: `12,436 / 12,800 B` | `LOOKS`: `7,476 / 8,756 B` | `MENU`: `4,148 / 4,672 B`
+  - `DOOM_A`: `4,752 / 4,876 B` | `DOOM_B`: `4,092 / 4,668 B` | `DOOM_C`: `2,180 / 2,492 B` | `DOOM_D`: `1,184 / 2,304 B` | `DOOM_E`: `2,820 / 3,500 B`
 - **Live-view overlays (`m6m_bench`, `draw only` emulated ARM9 insns; host DMA fills/flushes excluded)**:
 
 | Grid | Mode | `default` | `checker` | `white` |
@@ -36,13 +36,23 @@ Default config (`dp2m.example.fnl`: `24/36` films, `11/11` grids, DOOM enabled):
 | `14` | RGB Hist + Level | `155,313` | `150,437` | `150,437` |
 | `17` | False Color (IRE) | `331,438` | `458,094` | `458,094` |
 
-- **Label renderer (`labels.c`, `m6m_bench`)**: `42` emulated insns cached (`O(1)` `(class, sid)` table), `271,261..3,108,364` cold across classes 1..6.
+- **Dual Hi+Lo zebras, direct draw (`m6m_bench`)**: scalar C → ARM/SWAR, with an independent full-frame oracle over all eight phases and all 256 luma values:
+
+| Scene | Before | After | Reduction |
+| --- | ---: | ---: | ---: |
+| `default` | `430,473` | `221,030` | `48.7%` |
+| `checker` | `1,220,703` | `852,888` | `30.1%` |
+| `white` | `1,093,503` | `318,860` | `70.8%` |
+
+  The ARM implementation also shrinks the function by `224 B`.
+
+- **Label renderer (`labels.c`, `m6m_bench`)**:  `42` emulated insns cached (`O(1)` `(class, sid)` table), `271,261..3,108,364` cold across classes 1..6.
 - **Custom DOOM applet (`SCREEN_DOOM`, `0x21`)**: custom 2.5D sector/portal renderer with a hand-built 13-sector map (not a port of id DOOM); `320×240` 8bpp → `640×480` `RGBA4444` 2×2 upscale. `camera_flow` enforces `< 2.5M` emulated ARM9 insns/tick and clean exit back to `SCREEN_LV` (`0x15`).
 
 ## 3. Emulator & verification commands
 
 - `crates/dp2m-emu/src/arm9.rs` uses a direct-fetch SDRAM loop with a 2 MB hook bitmap (`~245 MIPS` overlay / `~491 MIPS` label host rate; `m6m_bench` ~0.74 s wall time). `crates/dp2m-emu/src/fr80/emu.rs` uses direct ROM fetch with a 64 KB SDRAM TLB (`1024` pages) and handler bloom filter.
-- `dp2m verify out`: **506 / 506** checks (`m6m: 241`, `custom: 130`, `labels: 135`) in ~0.42 s; `--artifacts <dir>` writes `labels.png`.
+- `dp2m verify out`: **535 / 535** checks (`m6m: 270`, `custom: 130`, `labels: 135`) in ~0.42 s; `--artifacts <dir>` writes `labels.png`.
 - `camera_flow` verifies Film page OSD FNV-1a64 (`0x16a06c94433a64d3`), menus, AE, WB, native `SCREEN_PB`, dual-CPU capture, and DOOM gameplay.
 
 ```sh

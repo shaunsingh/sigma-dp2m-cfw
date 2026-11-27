@@ -454,6 +454,10 @@ static const uint32_t zebra_stripes_hi[7] = {
     0xF40EF40Eu, 0xF40EF40Eu, 0x111A111Au, 0x111A111Au,
     0xF40EF40Eu, 0xF40EF40Eu, 0x111A111Au,
 };
+static const uint32_t zebra_stripes_lo[7] = {
+    0x1DFE1DFEu, 0x1DFE1DFEu, 0x111A111Au, 0x111A111Au,
+    0x1DFE1DFEu, 0x1DFE1DFEu, 0x111A111Au,
+};
 
 // 4-word (16 LCD px) SWAR zebra pass on DMA-zeroed ARGB back-buffer: precomputed row stripes + inline stmia/partial
 __attribute__((noinline, target("arm")))
@@ -544,12 +548,9 @@ static void draw_zebras_arm(const uint8_t *Y, uint32_t phase, uint32_t thresh) {
 }
 
 // Dual highlight (>= hi_thresh, orange) + shadow (<= 12, reverse-diagonal cyan) 4-word SWAR zebra pass
-__attribute__((noinline, target("arm")))
-static void draw_zebras_dual_arm(const uint8_t *Y, uint32_t phase, uint32_t hi_thresh) {
-    static const uint32_t zebra_stripes_lo[7] = {
-        0x1DFE1DFEu, 0x1DFE1DFEu, 0x111A111Au, 0x111A111Au,
-        0x1DFE1DFEu, 0x1DFE1DFEu, 0x111A111Au,
-    };
+// Scalar reference for the ARM loop below; not emitted.
+__attribute__((unused, noinline, target("arm")))
+static void draw_zebras_dual_c(const uint8_t *Y, uint32_t phase, uint32_t hi_thresh) {
     uint32_t addh = 256u - hi_thresh;
     uint32_t mask = 0x00FF00FFu, add_hi = (addh << 16) | addh, add_lo = 0x000D000Du, hi = 0x01000100u;
     const uint32_t *rw = (const uint32_t *)(const void *)Y;
@@ -579,6 +580,144 @@ static void draw_zebras_dual_arm(const uint8_t *Y, uint32_t phase, uint32_t hi_t
     }
 }
 
+__attribute__((noinline, target("arm")))
+static void draw_zebras_dual_arm(const uint8_t *Y, uint32_t phase, uint32_t hi_thresh) {
+    uint32_t addh = 256u - hi_thresh;
+    uint32_t add_hi = (addh << 16) | addh;
+    const uint32_t *rw = (const uint32_t *)(const void *)Y;
+    uint32_t *f0 = (uint32_t *)(void *)ARGB_FB;
+    for (uint32_t row = 0; row < LV_H / 2u; row++, rw += 2u * FB_W / 4u, f0 += 2u * FB_W / 2u) {
+        register uint32_t r_rp   __asm__("r12") = (uint32_t)(uintptr_t)rw;
+        register uint32_t r_o0   __asm__("r11") = (uint32_t)(uintptr_t)f0;
+        register uint32_t r_n    __asm__("lr")  = FB_W / 16u;
+        register uint32_t r_mask __asm__("r4")  = 0x00FF00FFu;
+        register uint32_t r_addh __asm__("r5")  = add_hi;
+        register uint32_t r_addl __asm__("r6")  = add_hi + 0x010C010Cu; /* (268 + addh) - h = 268 - Y */
+        register uint32_t r_sh   __asm__("r7")  = (uint32_t)(uintptr_t)(zebra_stripes_hi + ((row + phase) & 3u));
+        register uint32_t r_sl   __asm__("r8")  = (uint32_t)(uintptr_t)(zebra_stripes_lo + (((LV_H - row) + phase) & 3u));
+        __asm__ volatile(
+            "1:\n\t"
+            "ldmia r12!, {r0, r1, r2, r3}\n\t"
+            "and r0, r4, r0, lsr #8\n\t"
+            "and r1, r4, r1, lsr #8\n\t"
+            "and r2, r4, r2, lsr #8\n\t"
+            "and r3, r4, r3, lsr #8\n\t"
+            "add r0, r0, r5\n\t"
+            "add r1, r1, r5\n\t"
+            "add r2, r2, r5\n\t"
+            "add r3, r3, r5\n\t"
+            "sub r9, r6, r0\n\t"
+            "sub r10, r6, r1\n\t"
+            "orr r9, r9, r10\n\t"
+            "sub r10, r6, r2\n\t"
+            "orr r9, r9, r10\n\t"
+            "sub r10, r6, r3\n\t"
+            "orr r9, r9, r10\n\t"
+            "orr r9, r9, r0\n\t"
+            "orr r9, r9, r1\n\t"
+            "orr r9, r9, r2\n\t"
+            "orr r9, r9, r3\n\t"
+            "bics r9, r9, r4\n\t"
+            "bne 2f\n\t"
+            "add r11, r11, #32\n\t"
+            "subs lr, lr, #1\n\t"
+            "bne 1b\n\t"
+            "b 5f\n\t"
+            "2:\n\t"
+            "and r9, r0, r1\n\t"
+            "and r9, r9, r2\n\t"
+            "and r9, r9, r3\n\t"
+            "bic r9, r9, r4\n\t"
+            "eor r9, r9, #0x01000000\n\t"
+            "cmp r9, #0x00000100\n\t"
+            "bne 3f\n\t"
+            "ldmia r7, {r0, r1, r2, r3}\n\t"
+            "add r9, r11, #0x500\n\t"
+            "stmia r11!, {r0, r1, r2, r3}\n\t"
+            "stmia r11!, {r0, r1, r2, r3}\n\t"
+            "stmia r9!, {r0, r1, r2, r3}\n\t"
+            "stmia r9, {r0, r1, r2, r3}\n\t"
+            "subs lr, lr, #1\n\t"
+            "bne 1b\n\t"
+            "b 5f\n\t"
+            "3:\n\t"
+            "sub r9, r6, r0\n\t"
+            "tst r0, #0x01000000\n\t"
+            "ldrne r10, [r7, #0]\n\t"
+            "strne r10, [r11, #0]\n\t"
+            "strne r10, [r11, #0x500]\n\t"
+            "tst r9, #0x01000000\n\t"
+            "ldrne r10, [r8, #0]\n\t"
+            "strne r10, [r11, #0]\n\t"
+            "strne r10, [r11, #0x500]\n\t"
+            "tst r0, #0x00000100\n\t"
+            "ldrne r10, [r7, #4]\n\t"
+            "strne r10, [r11, #4]\n\t"
+            "strne r10, [r11, #0x504]\n\t"
+            "tst r9, #0x00000100\n\t"
+            "ldrne r10, [r8, #4]\n\t"
+            "strne r10, [r11, #4]\n\t"
+            "strne r10, [r11, #0x504]\n\t"
+            "sub r9, r6, r1\n\t"
+            "tst r1, #0x01000000\n\t"
+            "ldrne r10, [r7, #8]\n\t"
+            "strne r10, [r11, #8]\n\t"
+            "strne r10, [r11, #0x508]\n\t"
+            "tst r9, #0x01000000\n\t"
+            "ldrne r10, [r8, #8]\n\t"
+            "strne r10, [r11, #8]\n\t"
+            "strne r10, [r11, #0x508]\n\t"
+            "tst r1, #0x00000100\n\t"
+            "ldrne r10, [r7, #12]\n\t"
+            "strne r10, [r11, #12]\n\t"
+            "strne r10, [r11, #0x50c]\n\t"
+            "tst r9, #0x00000100\n\t"
+            "ldrne r10, [r8, #12]\n\t"
+            "strne r10, [r11, #12]\n\t"
+            "strne r10, [r11, #0x50c]\n\t"
+            "sub r9, r6, r2\n\t"
+            "tst r2, #0x01000000\n\t"
+            "ldrne r10, [r7, #0]\n\t"
+            "strne r10, [r11, #16]\n\t"
+            "strne r10, [r11, #0x510]\n\t"
+            "tst r9, #0x01000000\n\t"
+            "ldrne r10, [r8, #0]\n\t"
+            "strne r10, [r11, #16]\n\t"
+            "strne r10, [r11, #0x510]\n\t"
+            "tst r2, #0x00000100\n\t"
+            "ldrne r10, [r7, #4]\n\t"
+            "strne r10, [r11, #20]\n\t"
+            "strne r10, [r11, #0x514]\n\t"
+            "tst r9, #0x00000100\n\t"
+            "ldrne r10, [r8, #4]\n\t"
+            "strne r10, [r11, #20]\n\t"
+            "strne r10, [r11, #0x514]\n\t"
+            "sub r9, r6, r3\n\t"
+            "tst r3, #0x01000000\n\t"
+            "ldrne r10, [r7, #8]\n\t"
+            "strne r10, [r11, #24]\n\t"
+            "strne r10, [r11, #0x518]\n\t"
+            "tst r9, #0x01000000\n\t"
+            "ldrne r10, [r8, #8]\n\t"
+            "strne r10, [r11, #24]\n\t"
+            "strne r10, [r11, #0x518]\n\t"
+            "tst r3, #0x00000100\n\t"
+            "ldrne r10, [r7, #12]\n\t"
+            "strne r10, [r11, #28]\n\t"
+            "strne r10, [r11, #0x51c]\n\t"
+            "tst r9, #0x00000100\n\t"
+            "ldrne r10, [r8, #12]\n\t"
+            "strne r10, [r11, #28]\n\t"
+            "strne r10, [r11, #0x51c]\n\t"
+            "add r11, r11, #32\n\t"
+            "subs lr, lr, #1\n\t"
+            "bne 1b\n\t"
+            "5:\n\t"
+            : "+r"(r_rp), "+r"(r_o0), "+r"(r_n)
+            : "r"(r_mask), "r"(r_addh), "r"(r_addl), "r"(r_sh), "r"(r_sl)
+            : "r0", "r1", "r2", "r3", "r9", "r10", "cc", "memory");
+    }
+}
 static void draw_zebras(const uint8_t *Y) {
     clear_dma(0, 0, FB_W, LV_H);
     uint32_t lvl = REG8(NV_ZEBRALVL);

@@ -20,7 +20,6 @@
             rust-analyzer
             llvmPackages.clang-unwrapped
             llvmPackages.lld
-            (python3.withPackages (ps: with ps; [ capstone unicorn numpy scipy pillow ]))
           ];
           RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
         };

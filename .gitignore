@@ -23,9 +23,5 @@ dp2m.fnl
 *.tar.gz
 *.pkg
 
-# Python & OS artifacts
-__pycache__/
-*.pyc
-*.egg-info/
-.venv/
+# OS artifacts
 .DS_Store

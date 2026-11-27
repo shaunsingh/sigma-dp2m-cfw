@@ -16,16 +16,12 @@ jobs:
           target: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y clang lld
-      - run: cargo clippy --release --all-targets -- -D warnings
+      - run: cargo clippy --release --workspace --all-targets -- -D warnings
       - run: cargo build --release -p dp2m-web --target wasm32-unknown-unknown
-      # the camera_flow tests and tools.verify read out/, so build comes first
-      - run: cargo run --release -- build --out out
-      - run: cargo test --release
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - run: pip install ./tools
-      - run: python -m tools.verify out
+      - run: cargo run --release -p dp2m -- build --out out
+      - run: cargo test --release --workspace
+      - run: cargo run --release -p dp2m -- verify out
+      - run: cargo run --release -p dp2m -- verify-m5 out/Firm.bin
       - uses: actions/upload-artifact@v4
         with:
           name: firmware

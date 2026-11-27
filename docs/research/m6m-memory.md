@@ -18,7 +18,7 @@ SDRAM is 256 MB (`0xA0000000..0xB0000000`; hard-coded references reach `0xAF7EB1
 | `0xA0A1F398..0xA1B1F398` | 17 MB | C heap | `0xA01657E4` returns base / limit |
 | `0xA1B1F3A0..0xA1B5717C` | 224 KB | µITRON task stacks | 46 config records `0xA0561EE4..0xA05623E8` |
 | `0xA1B57180..0xA2130000` | 5.9 MB | no references found | payload `.bss` at `0xA1C00000..0xA1E00000` |
-| `0xA2130000..` | | OSD planes (8 bpp index plane `0xA2130000`, ARGB4444 overlay `0xA21D8C00`), glyph raster `0xA2304C00`, LV and capture buffers | literals in `0xA0165938`, `0xA00419B0`, `0xA0041FAC` |
+| `0xA2130000..` | | OSD planes (8 bpp index plane `0xA2130000`, RGBA4444 overlay `0xA21D8C00`), glyph raster `0xA2304C00`, LV and capture buffers | literals in `0xA0165938`, `0xA00419B0`, `0xA0041FAC` |
 
 Scatter table at `0xA07AD3CC` (16 B entries `{load, exec, size, fn}`):
 
@@ -54,19 +54,21 @@ Bytes that no code reads or writes (static scan): `+0x20..+0x27`, `+0x29..+0x3B`
 
 ### dp2m bytes (reserved area)
 
-| Address | Offset | Setting | Values |
+| Address | Offset | Setting | Values (`src/m6m/hud.c`, `ui.c`) |
 | --- | --- | --- | --- |
 | `0xA0939688` | `+0x04` | color print paper | 0 = film's Auto paper, 1..8 |
-| `0xA0939689` | `+0x05` | 3D spectral engine | 0/1 (fx bit 0) |
-| `0xA093968A` | `+0x06` | X3 fill | 0..3 |
+| `0xA0939689` | `+0x05` | 3D spectral engine | 0 HW Fast, 1 3D Spectral (fx bit 0) |
+| `0xA093968A` | `+0x06` | X3 fill | 0 Off, 1 +0.5, 2 +1.0, 3 -0.5 |
 | `0xA093968B` | `+0x07` | ISO-auto min shutter | 0..6 |
-| `0xA093968C` | `+0x08` | peaking color | 0..3 |
+| `0xA093968C` | `+0x08` | peaking color | 0 red, 1 yellow, 2 white, 3 black |
 | `0xA093968D` | `+0x09` | grain | 0/1 (fx bit 1) |
 | `0xA093968E` | `+0x0A` | halation | 0/1 (fx bit 2) |
 | `0xA093968F` | `+0x0B` | B&W paper | 0 = Auto, 1..8 |
 | `0xA0939690` | `+0x0C` | SD LUT slot | 0 = Auto, 1..8 |
+| `0xA0939691` | `+0x0D` | peaking sensitivity | 0 Medium (`PEAKING_THRESH`, default 44), 1 High (24), 2 Low (72), 3 Auto (High when `MF_SPOT_ACTIVE` `0xA0939A53` != 0, else Medium) |
+| `0xA0939692` | `+0x0E` | zebra level | 0 95% IRE (`ZEBRA_THRESH`, default 242), 1 90% IRE (230), 2 100% IRE (252), 3 Dual Hi+Lo (`>= ZEBRA_THRESH` orange + `<= 12` cyan) |
 
-`+0x0D..+0x13` are free. Getters clamp out-of-range values to 0.
+`+0x0F..+0x13` (`0xA0939693..0xA0939697`) are free. Getters clamp out-of-range values to 0.
 
 Only `+0x04..+0x13` is reserved. Writing volatile data at `+0x14..` (for example live-view plane pointers every frame) overwrites the display-level bytes, and the next flush persists them. Volatile state belongs in payload `.bss`.
 

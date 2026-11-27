@@ -17,7 +17,7 @@ Addresses are M6M virtual addresses in the stock 1.05 image. The implementation 
 | 0 / 1 / 2 / 3 | M / S / A / P |
 | 4 | Movie |
 | 5..7 | C1..C3 |
-| 8 | temporary mode set by screen 25 (`0xA005742A`) and left at `0xA0057B64`; shutdown (`0xA016949A`) restores the previous mode. About 30 sites test `cmp r0,#8`. Very likely playback. |
+| 8 | temporary playback mode set by `SCREEN_PB` (screen 25, `0xA005742A`) and cleared at `0xA0057B64`; shutdown (`0xA016949A`) restores the previous mode. About 30 sites test `cmp r0,#8`. |
 | 9 / 10 | F1 / F2 (dp2m) |
 
 Stock code treats values above 8 as P in the resolver, so a camera downgraded with mode 9/10 saved falls back to P.

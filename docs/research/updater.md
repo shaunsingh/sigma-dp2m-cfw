@@ -50,7 +50,7 @@ Segment 1 is a separate M6M build. Its source-path strings reference the C79 tre
 File names known to the scanner (strings in both M6M images): `DP2MVxxx.bin`, `C78FRM.bin`, `Firm.bin`, `C78_M6M5.bin`.
 
 - `DP2MVxxx.bin` shows "Current version" (from the immediates) and the new version (from header `0x10`). Because the new version comes from the package, a dp2m package already shows its own version when the stock firmware installs it.
-- `C78FRM.bin`, `Firm.bin` and `C78_M6M5.bin` are debug files. Instead of versions the screen shows the matching banner and the file timestamp. There is no version check. Older dp2m builds wrote the full package layout (header and all three segments) as `C78_M6M5.bin`; the current builder does not emit it.
+- `C78FRM.bin`, `Firm.bin` and `C78_M6M5.bin` are debug files. Instead of versions the screen shows the matching banner and the file timestamp, with no version check. `dp2m build` emits `DP2MV<major><minor>.bin`, `Firm.bin`, and `C78FRM.bin`.
 
 ## dp2m changes
 
@@ -66,7 +66,7 @@ The banners and immediates belong to the firmware that runs the update, so they 
 
 ## `Firm.bin` flash rules (M5Slave)
 
-Confirmed from `0xA000CFCA`, `0xA000D3BC..0xA000D40A` and on-camera flashing:
+Confirmed from `0xA000CFCA` and `0xA000D3BC..0xA000D40A`:
 
 - Error `0002` if `Firm.bin` has non-stock bytes at VA `>= 0x00800000` (outside the 8 MB NOR) or if the additive checksum at `Firm.bin[0x4C..0x50]` does not equal `sum(Firm.bin[0x80..0x800080])`.
 - If error `0002` leaves the screen unresponsive, remove the battery. The camera boots from its previous flash image.
@@ -74,4 +74,4 @@ Confirmed from `0xA000CFCA`, `0xA000D3BC..0xA000D40A` and on-camera flashing:
 ## Tools
 
 - `cargo run --release -- inspect <file>` identifies a package, `Firm.bin` or `C78FRM.bin` and prints the package version and date.
-- `python -m tools.re package [path]` dumps the header and segments.
+- `cargo run --release -- re package [path]` dumps the header and segments.

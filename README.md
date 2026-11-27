@@ -7,7 +7,9 @@ The camera has two processors, both updated from one package:
 - **M6M** (`C78FRM.bin`): ARM926EJ-S, big endian. UI, settings, live view, capture control.
 - **M5Slave** (`Firm.bin`): Fujitsu FR80 ("TRUE II"), big endian. Capture ISP and the JPEG / X3F pipeline.
 
-dp2m starts from the stock 1.05 package (`DP2MV105.bin`). It assembles FR80 code into free M5 flash, compiles a C payload and links it into unused parts of the M6M image, and writes a new package for the stock updater.
+dp2m starts from the stock 1.05 package (`DP2MV105.bin`). It assembles FR80 code into free M5 flash, compiles a C/asm payload and links it into unused parts of the M6M image, and writes a new package for the stock updater.
+
+> **Status**: Nothing in the current tree has been run on a real camera. All verification suites, integration tests, and performance numbers are measured in the built-in ARM9 and FR80 emulators.
 
 ## Features
 
@@ -18,15 +20,14 @@ dp2m starts from the stock 1.05 package (`DP2MV105.bin`). It assembles FR80 code
 - Live view uses each film's color matrix and tone curve, and follows mode and paper changes immediately.
 - Custom exposure modes C1..C3, F1, F2.
 - ISO 50, 5-shot bracketing, minimum shutter speed for ISO auto.
-- 11 live-view overlays as extra grid modes: electronic level (standard or Quattro minimal), aspect masks (21:9, 21:9 + level, 4:3, 1:1), focus peaking (runtime Low / Normal / High / Auto MF sensitivity + color), zebras (runtime 95% / 100% / 90% / Dual Hi+Lo), RGB histogram, and False Color (IRE heatmap + legend).
-- Bare-metal ARM926EJ-S big-endian **DOOM** raycaster applet (`SCREEN_DOOM`, Setup page 4): procedural E1M1-style level, textured walls/flats, enemy sprites, weapon/HUD, and clean return to camera UI.
+- 11 live-view overlays as extra grid modes (7..17): electronic level (7), aspect masks with level (21:9 XPan, 16:9 Cinema, 1:1 Square, 7:6, 4:3), focus peaking and peaking + level (runtime Medium / High / Low / Auto MF sensitivity + Red / Yellow / White / Black color), zebras (runtime 95% / 90% Safe / 100% Clip / Dual Hi+Lo), RGB histogram + level, and False Color (IRE heatmap + legend).
+- Bare-metal ARM926EJ-S **DOOM** applet (`SCREEN_DOOM`, Setup page 4): custom 2.5D sector/portal renderer (not a port of the id engine) with a hand-built 13-sector E1M1-tribute map, procedural textures, enemy sprites, weapon/HUD, automap, and clean exit back to Live View.
 
 ## Requirements
 
-- Rust 1.85 or newer (edition 2024) with `cargo`.
+- Rust 1.85 or newer (edition 2024) with `cargo` (and `wasm32-unknown-unknown` target for `dp2m sim`).
 - LLVM `clang` and `ld.lld` on `PATH`. The M6M build calls them directly with `--target=armeb-none-eabi`.
 - A host C compiler and `make`: `mlua` builds its vendored LuaJIT from source.
-- Optional: Python 3 with `numpy`, `scipy`, `capstone`, `unicorn` and `pillow` for the scripts in `tools/`.
 - Optional: Nix. `nix develop` opens a shell with all of the above (see `flake.nix`).
 
 The build reads the stock package from `data/DP2MV105.bin`.
@@ -114,32 +115,15 @@ Run as `cargo run --release -- <command>`. Without `--config`, the builder uses 
 | `x3f <file.X3F> [--dump out.camf] [--all]` | decode Merrill X3F Type-4 Huffman CAMF sections and dump `CMbM`/`CMbP`/`CMbT` entries |
 | `lut <in.cube> <LUTn.BIN> [--grain N] [--grain-profile 0\|1\|2] [--halo N] [--halo-tint 0\|1\|2] [--tag S]` | compile an Adobe/Resolve `.cube` 3D LUT (`DOMAIN_MIN`/`DOMAIN_MAX`, 17³ + gray anchors) into a 4,160 B D2ML SD-card binary; `lut inspect <LUTn.BIN>` inspects an existing binary |
 | `stage [--config f] [--from dir] [--to card]` | copy images to the SD card and read them back |
-| `verify-m5 <Firm.bin>` | checksums, protected constants and emulated capture jobs |
+| `verify-m5 <Firm.bin\|out_dir>` | checksums, protected constants and emulated capture jobs |
 | `disasm-fr80 <Firm.bin> <va_start> <va_end>` | disassemble an FR80 address range (hex) |
 | `inspect <file>` | identify a package, `Firm.bin` or `C78FRM.bin`; print version or checksum |
 | `sim [--from dir] [--port p]` | serve the dual-CPU browser simulator on `127.0.0.1:p` (default `8080`) |
 | `sim-trace [pkg.bin] [--keys k1,k2,...] [--ppm f.ppm] [--watch-text]` | run headless dual-CPU key/capture steps, inspect AE/screen/OSD state, and export PPM frames |
 
-- `cargo test --release` runs the unit and integration tests (config, catalog, 36-film + 11-grid + DOOM link, FR80/ARM9 ISA, `.cube` PCG compiler, dual-CPU `dp2m-emu::sim` flow, DOOM E1M1 gameplay, Unicorn OSD parity, and the 506-check native M6M verifier).
-- `cargo test --release --workspace` needs no prior `out/`: `dp2m`'s `camera_flow` and `verify_m6m` integration tests each build firmware once through the matching CLI (`dp2m.example.fnl`) in a private temporary directory, ignore `dp2m.fnl` and `out/`, and remove their artifacts afterward (requiring `clang` and `ld.lld` on `PATH`, provided by `nix develop`). `cargo test --release -p dp2m-emu` tests only the pure-Rust emulation/RE/X3F core and needs neither `out/` nor a cross-compiler.
-- `cargo test --release -p dp2m ycc_bench -- --ignored --nocapture` prints the M5 engine cost per stage.
-- `cargo test --release -p dp2m m6m_bench -- --ignored --nocapture` prints M6M live-view overlay, label, and screen costs.
-
-Scripts in `tools/`:
-
-| Script | Purpose |
-| --- | --- |
-| `cube_to_lut.py in.cube LUT1.BIN [--grain --grain-profile --halo --halo-tint]` | convert a `.cube` 3D LUT into a `LUTn.BIN` for the SD LUT mode |
-| `pack_builder.py` | build `data/film_pack.bin` from calibration data |
-| `x3f_camf.py` | decode X3F CAMF sections |
-| `x3f_raw_dump.c` | decode Merrill X3F raw data to 16-bit samples |
-
-Python packages in `tools/` (deps in `tools/pyproject.toml`; run from the repository root):
-
-| Command | Purpose |
-| --- | --- |
-| `python -m tools.verify out` | emulated M6M suites on a build output: hooks, menus, settings, IPC, live view, updater, C1..C3, F1, F2, label icons; exits 1 on any failure |
-| `python -m tools.re [--fw f] [--image f] <cmd>` | M6M reverse engineering: `package`, `dis`, `xrefs`, `callers`, `sid`, `strings`, `menus`, `screens`, `icons`, `text`, `liveness`, `nvram` (`-h` per command) |
+- `cargo test --release --workspace` runs all unit and integration tests (config, catalog, 36-film + 11-grid + DOOM link, FR80/ARM9 ISA, `.cube` PCG compiler, dual-CPU `dp2m-emu::sim` flow, DOOM gameplay, Film menu OSD hash check, and the 506-check native M6M verifier). `dp2m`'s integration tests build firmware in a private temporary directory using `dp2m.example.fnl` and need no prior `out/` (requiring `clang` and `ld.lld` on `PATH`). `cargo test --release -p dp2m-emu` tests only the pure-Rust emulation/RE/X3F core.
+- `cargo test --release -p dp2m ycc_bench -- --ignored --nocapture` prints emulated M5 engine costs per stage.
+- `cargo test --release -p dp2m m6m_bench -- --ignored --nocapture` prints emulated M6M live-view overlay, label, and screen costs.
 
 ## Repository layout
 
@@ -159,7 +143,7 @@ crates/
   dp2m-web/              wasm32 bindings for the browser simulator
   dp2m/                  CLI & firmware builder
     lua/fennel.lua       Fennel compiler (embedded)
-    src/main.rs          CLI (`build`, `verify`, `re`, `lut`, `stage`, `sim`, `sim-trace`, `verify-m5`, `disasm-fr80`, `inspect`)
+    src/main.rs          CLI (`build`, `verify`, `re`, `x3f`, `lut`, `stage`, `sim`, `sim-trace`, `verify-m5`, `disasm-fr80`, `inspect`)
     src/lut.rs           zero-dep `.cube` -> D2ML sparse PCG compiler
     src/config.rs        Fennel config loader
     src/catalog.rs       films, papers, grids, packed mode ids
@@ -178,7 +162,6 @@ data/
   film_pack.bin          calibration tables (D2MP v1)
   npl_sigma_merrill.json Foveon X3 F20 spectral sensitivity
   ref/                   other Sigma firmware, for comparison
-tools/                   Python and C helpers
 docs/                    reference and research notes
 ```
 
@@ -192,4 +175,5 @@ docs/                    reference and research notes
 - [docs/research/custom-modes.md](docs/research/custom-modes.md): exposure modes and custom slots.
 - [docs/research/live-view.md](docs/research/live-view.md): refresh path, B2Y gamma and matrix, overlays.
 - [docs/research/simulator-and-pb.md](docs/research/simulator-and-pb.md): dual-CPU simulator, native AE solver, µITRON syscalls, Milbeaut IIP/DMA, `SCREEN_PB` (`0x19`), DCF and `exif_main`.
+- [docs/research/hillclimb.md](docs/research/hillclimb.md): current build metrics, region usage, and emulator benchmarks.
 - [docs/research/reference-firmware.md](docs/research/reference-firmware.md): other Sigma firmware in `data/ref/`.

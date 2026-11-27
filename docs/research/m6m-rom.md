@@ -4,7 +4,7 @@ The S3 image has no free space: the 158 zero runs of 1 KB or more (366,571 B in 
 
 ## Method
 
-1. **Code map.** Recursive descent with Capstone from the reset entry `0xA0000000` (ARM), the main entry `0xA01657EA` (Thumb) and the exception vectors (`0xA07FBC1C..+0x338`). Each byte is classed as ARM, Thumb, or literal / inline table. Switches are followed through ARM `ldr pc, [pc, rm, lsl #2]` tables and the Thumb byte-table helper (`blx 0xA0173358`, table after the call). A second phase adds functions found only by their prologue (orphans).
+1. **Code map.** Recursive descent (`crates/dp2m-emu/src/re/liveness.rs`) from the reset entry `0xA0000000` (ARM), the main entry `0xA01657EA` (Thumb) and the exception vectors (`0xA07FBC1C..+0x338`). Each byte is classed as ARM, Thumb, or literal / inline table. Switches are followed through ARM `ldr pc, [pc, rm, lsl #2]` tables and the Thumb byte-table helper (`blx 0xA0173358`, table after the call). A second phase adds functions found only by their prologue (orphans).
 2. **Pointer fixpoint.** Every word outside code and literal slots (excluding the FPGA bitstream) that points at a decoded function entry with the matching mode (Thumb bit set for Thumb code, word aligned for ARM) becomes a root. This covers the screen vtable, menu row getters / setters / handlers, the icon table, task config records and callback tables.
 3. **Liveness.** A breadth-first walk from the roots over call and literal edges marks live functions. The pass ran on the stock image and on the patched image (factory screens retired, factory submenu tables treated as dead data), so code that only factory screens reach shows up as "newly dead".
 4. **Risk checks per run.** What precedes the run (end of a function, literal pool, fall-through), how the run starts (ARM or Thumb prologue), and whether any data word anywhere points into it. Of the two ARM functions that load through `lr` (`0xA00EFD10`, `0xA0173358`), only `0xA0173358` is a switch helper, and the code map already follows it.
@@ -25,10 +25,15 @@ Defined in `REGIONS` in `crates/dp2m/src/m6m/mod.rs` and emitted as the linker `
 
 | Region | Range | Size | Origin |
 | --- | --- | --- | --- |
-| `CODE` | `0xA0059D50..0xA005D924` | 15,316 B | factory screens 33..49; their vtable slots `0xA07DEBAC..0xA07DEBEF` now point at `dp2m_ret0` |
+| `CODE` | `0xA0059D50..0xA005D924` | 15,316 B | factory screens 33..49; vtable slot 33 (`0xA07DEBAC`) points at `doom_screen` when `:doom` is enabled, slots 34..49 (`0xA07DEBB0..0xA07DEBEF`) at `dp2m_ret0` |
 | `DATA` | `0xA0265670..0xA0268870` | 12,800 B | f64 table referenced only from orphaned `0xA0034870` / `0xA00348CA` |
-| `LOOKS` | `0xA0094658..0xA009688C` | 8,756 B | orphaned Im_TFR driver, 23 functions, no references |
+| `LOOKS` | `0xA0094658..0xA009688C` | 8,756 B | orphaned Im_TFR driver, 23 functions, no references (data only; overlaps simulator HLE stub range) |
 | `MENU` | `0xA07EC9CC..0xA07EDC0C` | 4,672 B | factory service menus 0x18..0x22 and their submenus; menu 0xA3 at `0xA07EDC0C` stays |
+| `DOOM_A` | `0xA010AF44..0xA010C250` | 4,876 B | zero-xref stock-orphan code |
+| `DOOM_B` | `0xA0107BD8..0xA0108E14` | 4,668 B | zero-xref stock-orphan code |
+| `DOOM_C` | `0xA01360FC..0xA0136AB8` | 2,492 B | zero-xref stock-orphan code |
+| `DOOM_D` | `0xA0140CB0..0xA01415B0` | 2,304 B | zero-xref stock-orphan code |
+| `DOOM_E` | `0xA002A834..0xA002B5E0` | 3,500 B | zero-xref stock-orphan code |
 | `RAM` | `0xA1C00000..0xA1E00000` | 2 MB | unreferenced SDRAM (see [m6m-memory.md](m6m-memory.md)), `.bss` only |
 
 The `CODE` region is contiguous: `0xA0059D50..0xA005A400` (screen 33), `0xA005A400..0xA005BE38` (screens 34..43), `0xA005BE38..0xA005CDF4` (screens 44..47) and `0xA005CDF4..0xA005D924` (screens 48, 49). The builder refuses to retire a vtable slot that does not point into `CODE`.
@@ -62,4 +67,4 @@ Screen 50 looks factory-only from the menus, but `0xA0042CBC` / `0xA0042CCE` pos
 | `data:*` | data referenced only by dead code |
 | `menu:*` | factory menu tables |
 
-`python -m tools.re liveness` regenerates the analysis (`--image out/C78FRM.bin` re-checks a build).
+`cargo run --release -- re liveness --tsv` regenerates the analysis (`--image out/C78FRM.bin --stock data/DP2MV105.bin` re-checks a build).

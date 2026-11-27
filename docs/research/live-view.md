@@ -28,7 +28,7 @@ Addresses are M6M virtual addresses in the stock 1.05 image. The implementation 
 | `0xA003A1E6` | `lv_mono_hook` | maps films to stock mono (2) or standard (3); re-applies gamma when the packed mode changed, so the tone curve follows mode and paper changes live |
 | `0xA003A20A` | `lv_cmcm_hook` | film CMCM (Q10) times the live CCMatrix (Q7); mono films write Q7 channel weights directly |
 | `0xA0033F1C` | `lv_ycap_hook` | records the Y / Cb / Cr plane pointers and a frame counter in payload `.bss` |
-| `0xA016BC4E` | `osd_cm` | films read as Vivid (4) or B&W (2) for the OSD icon switch |
+| `0xA016BC4E` | `osd_cm` | routes films through Vivid (4) or B&W (2) via `osd_map`, then `osd_icon` (`0xA016BC86`) substitutes their `0xC00` label tile |
 
 Paper setters call `0xA003A260` so a paper change also marks the color dirty.
 
@@ -44,10 +44,26 @@ Paper setters call `0xA003A260` so a paper change also marks the color dirty.
 
 Knots sit at x = 0..128 step 16, 192..384 step 64, 512..1023 step 128 and are linearly expanded to the 1024-entry gamma table on the camera. The builder rejects non-monotonic knots.
 
-## Overlays (grid modes 7..16)
+## Overlays (grid modes 7..17)
 
-- The grid widget getter (word `0xA07FA4A4`) returns a dirty key; dp2m returns `mode << 16 | tilt` for level modes and `mode << 16 | frame / 2` for per-frame overlays, so the widget redraws only when needed. Overlays draw only on the LV screen (id 21) with LV active (`0xA00344F2 == 1`).
+From `crates/dp2m/src/catalog.rs` and `src/m6m/hud.c` (stock grids are `0..6`):
+
+| Id | Slug | Menu label | Drawing |
+| --- | --- | --- | --- |
+| `7` | `level` | Electronic Level | tilt horizon + center tick |
+| `8` | `xpan-21x9` | 21:9 XPan + Level | horiz 74 px matte + level |
+| `9` | `cinema-16x9` | 16:9 Cinema + Level | horiz 31 px matte + level |
+| `10` | `square-1x1` | 1:1 Square + Level | vert 107 px matte + level |
+| `11` | `peaking` | Focus Peaking | 2×2 edge pass (`NV_PEAKCOL`, `NV_PEAKSENS`) |
+| `12` | `peaking-level` | Peaking + Level | peaking + level |
+| `13` | `zebras` | Zebras (95% IRE) | 2×2 animated stripe pass (`NV_ZEBRALVL`) |
+| `14` | `rgb-hist` | RGB Hist + Level | level + 64-bin RGB histogram |
+| `15` | `frame-7x6` | 7:6 + Level | vert 70 px matte + level |
+| `16` | `frame-4x3` | 4:3 + Level | vert 37 px matte + level |
+| `17` | `false-color` | False Color (IRE) | 6-zone IRE heatmap + right-edge legend |
+
+- The grid widget getter (word `0xA07FA4A4`) returns a dirty key; `grid_widget_get` returns `mode << 16 | portrait << 8 | ((slope + 64) & 0xFF)` (deadband `|slope| <= 1`) for tilt modes (`7..10, 15, 16`) and `mode << 16 | ((fcnt >> 1) & 0xFFFF)` for per-frame modes (`11..14, 17`). Overlays draw only on `SCREEN_LV` (id 21) with LV active (`0xA00344F2 == 1`).
 - Grid draw call sites `0xA016C708` and `0xA004C5AE` (`0xA004C3EC`) are hooked.
-- Drawing goes to the 640x480 ARGB4444 overlay `0xA21D8C00` with fill `0xA00419A6` and flush `0xA0041C7A`. The LV image area is 640x424. Per-frame overlays (peaking, zebras) write 2x2 blocks as 32-bit pixel pairs.
-- Planes: Y 640 B per row, Cb / Cr 320 B per row. The pointers are only trusted inside `0xA0800000..0xB0000000`.
+- Drawing goes to the 640×480 BE RGBA4444 (`R:12..15, G:8..11, B:4..7, A:0..3`) overlay `0xA21D8C00` with fill `0xA00419A6` and flush `0xA0041C7A`, bracketed by `hw_dcache_sync()` (`SWI 10`). The LV image area is 640×424. Full-frame overlays (peaking, zebras, false color) write 2×2 blocks as 32-bit pixel pairs on a DMA-zeroed back-buffer.
+- Planes: Y 640 B per row, Cb / Cr 320 B per row. The pointers are only trusted inside `0xA0800000..0xB0000000` (4-byte aligned).
 - Accelerometer: MEMSIC MXC6226XC on I2C `0x15`, signed 8-bit X / Y getters `0xA001A38E` / `0xA001A3A2`.

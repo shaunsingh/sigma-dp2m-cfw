@@ -61,7 +61,7 @@ The generic driver stub range `0xA0070000..0xA00B8000` must override syscalls th
 | `0xA00752D4` | `ref_tsk` | `(tskid, T_RTSK *pk_rtsk)`: zero `0x24` B and set `pk_rtsk->tskstat = 0x10` (`TTS_DMT`). `0xA0045948` and `0xA0057C0E` check `tskstat == 0x10` before allowing `DISP` view changes in `SCREEN_PB` |
 | `0xA00729B8` / `3240` / `4808` / `4AC0` / `4C50` | `prcv_mbx` / `trcv_mbx` / `prcv_dtq` / `trcv_dtq` | Return `-50` (`E_TMOUT`) so polling loops exit immediately |
 
-C heap symbols (`0xA0A20000..0xA1F00000`): `malloc` `0xA003D9C0`, `free` `0xA003D9AC`, `calloc` `0xA003D990`, `realloc` `0xA003D9D8` (required by dynamic menu list builders when scrolling past row 6).
+C heap symbols (simulator recycling freelist + bump allocator in `[0xA0A20000, 0xA1C00000) U [0xA3000000, 0xA7F00000)`): `malloc` `0xA003D9C0`, `free` `0xA003D9AC`, `calloc` `0xA003D990`, `realloc` `0xA003D9D8` (required by dynamic menu list builders when scrolling past row 6).
 
 ## 4. Milbeaut 2D DMA, B2Y & IIP Hardware Wrappers
 
@@ -126,6 +126,6 @@ C heap symbols (`0xA0A20000..0xA1F00000`): `malloc` `0xA003D9C0`, `free` `0xA003
 | `+0x140` | `u8` | File format (`1` = JPEG) | `0xA00466B0` |
 | `+0x143` | `u8` | Drive mode (`3` = Single) | `0xA0046750` |
 | `+0x156` | `u8` | ColorSpace (`0` = sRGB, `1` = AdobeRGB) | `0xA004612C` |
-| `+0x157` | `u8` | Color mode ID (`1..8` stock, `9..` custom film decoded by `pb_cm_parse`) | `pb_info_cm` (`0xA00465C4` hook) |
+| `+0x157` | `u8` | Color mode ID (`1..8` stock, `9..` custom film decoded by `pb_cm_jpg`/`pb_cm_x3f`) | `pb_info_cm` (`0xA0048016` → `0xA0047734`, `osd_icon` @ `0xA0047774`) |
 | `+0x160` | `f64` | FocalLength (`30.0`) | `0xA0046810` |
 | `+0x170` / `+0x174` | `i32` / `u32` | Rational EV compensation (`steps` / `3`) when `+0x38 == 1` | `0xA004659C` |

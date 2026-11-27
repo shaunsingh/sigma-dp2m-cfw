@@ -446,7 +446,8 @@ impl Camera {
         insns
     }
 
-    /// Advances animated HUD overlays (such as diagonal zebra phase) or active applet screens by one frame.
+    /// Manually advances animated HUD overlays or active applet screens for tests.
+    /// Hardware does not autonomously post `(4,3)`; this call is the explicit test driver.
     pub fn tick(&mut self) -> bool {
         if self.last_screen_id == 0x21 {
             self.hw.borrow_mut().events.push_back((4, 3));

@@ -1,6 +1,6 @@
 # Sigma DP2 Merrill (C78) hardware and firmware reference
 
-Static analysis of stock `DP2MV105.bin` (1.05, May 2013) and emulator verification. Build `a441ed3` was installed on a DP2 Merrill and used by hand (film captures with the expected MakerNote tags, menus, live-view looks, DOOM). Nothing has been measured on the camera; later commits have only run in the emulators. Detailed evidence and addresses are in [research/](research/).
+Static analysis of stock `DP2MV105.bin` (1.05, May 2013), emulator verification, and the [on-camera probe](research/hardware-probe.md). Build `a441ed3` was installed on a DP2 Merrill and used by hand (film captures with the expected MakerNote tags, menus, live-view looks, DOOM). Probe V2 (`42cf7ec`) added synthetic hardware measurements; later capture-processing changes still await camera-validation feedback. Detailed evidence and addresses are in [research/](research/).
 
 | Chip | Image | CPU | Role |
 | --- | --- | --- | --- |
@@ -291,6 +291,6 @@ Verified in emulation (`dp2m build`, `dp2m verify out`, `dp2m verify-m5 out/Firm
 - Reinstall of stock 1.05.
 - Film names in playback info / Sigma Photo Pro for `"Film NN"` JPG and X3F files.
 - Custom QS film items, F1/F2 NOR persistence across power cycles, and payload `.bss` window `0xA1C00000..0xA1E00000` under LV, capture, playback, movie, and USB.
-- Actual on-camera M5 write times per `fx` combination and M6M overlay / DOOM frame rates.
+- Actual on-camera M5 write times per `fx` combination and end-to-end M6M overlay / DOOM frame rates. [Probe V2](research/hardware-probe.md) measured synthetic CPU, memory, display, and framebuffer operations, not full application frame rates.
 
 See [research/hillclimb.md](research/hillclimb.md) for current build sizes and emulated instruction counts.

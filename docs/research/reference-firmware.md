@@ -1,6 +1,6 @@
 # Reference firmware
 
-`data/ref/` holds other Sigma firmware images used for comparison and backports. The five Quattro color modes in `crates/dp2m/src/m5.rs` / `catalog.rs` / `data/film_pack.bin` (`dp2q_cmcm_4` for FOV Classic Yellow, Cinema, Sunset Red, Forest Green; `dp2q_to_mcas` for Teal & Orange) come from `DP2QV203.BIN`, and ISO 50 / 5-shot bracketing / ISO-auto minimum shutter follow sd Quattro H behaviour. All offsets below are file offsets into `data/ref/*`; "CAMF" denotes uncompressed `FCMb` v`0x20002` blocks parsed from each firmware.
+`data/ref/` holds other Sigma firmware images used for comparison and backports. The directory is gitignored and nothing in the build reads it; download the files from Sigma's support pages to repeat the analysis. The five Quattro color modes in `crates/dp2m/src/m5.rs` / `catalog.rs` / `data/film_pack.bin` (`dp2q_cmcm_4` for FOV Classic Yellow, Cinema, Sunset Red, Forest Green; `dp2q_to_mcas` for Teal & Orange) come from `DP2QV203.BIN`, and ISO 50 / 5-shot bracketing / ISO-auto minimum shutter follow sd Quattro H behaviour. All offsets below are file offsets into `data/ref/*`; "CAMF" denotes uncompressed `FCMb` v`0x20002` blocks parsed from each firmware.
 
 | File | Camera | Version | Size |
 | --- | --- | --- | --- |

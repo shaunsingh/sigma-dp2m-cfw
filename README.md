@@ -198,7 +198,7 @@ data/
   DP2MV105.bin           stock firmware 1.05
   film_pack.bin          calibration tables (D2MP v1)
   npl_sigma_merrill.json Foveon X3 F20 spectral sensitivity
-  ref/                   other Sigma firmware, for comparison
+  ref/                   other Sigma firmware, for comparison (gitignored, not needed to build)
 docs/                    reference and research notes
 ```
 
@@ -214,4 +214,4 @@ docs/                    reference and research notes
 - [docs/research/simulator-and-pb.md](docs/research/simulator-and-pb.md): dual-CPU simulator, native AE solver, µITRON syscalls, Milbeaut IIP/DMA, `SCREEN_PB` (`0x19`), DCF and `exif_main`.
 - [docs/research/hardware-probe.md](docs/research/hardware-probe.md): on-camera hardware probe measurements, MPU/cache findings, and `D2AP` standalone applet architecture.
 - [docs/research/hillclimb.md](docs/research/hillclimb.md): current build metrics, region usage, and emulator benchmarks.
-- [docs/research/reference-firmware.md](docs/research/reference-firmware.md): other Sigma firmware in `data/ref/`.
+- [docs/research/reference-firmware.md](docs/research/reference-firmware.md): other Sigma firmware (local, gitignored `data/ref/`).

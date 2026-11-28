@@ -9,14 +9,17 @@ dp2m.fnl
 *.elf
 *.map
 
-# Host-local offline crate vendoring
+# Host-local offline crate vendoring and doomgeneric checkout
 /vendor/
 /.cargo/
 
-# Proprietary Sigma firmware binaries & SD-card WAD/applet payloads
-# *.bin
-# *.BIN
-# !data/film_pack.bin
+# Local scratch: retired sources and experiments kept out of the repository
+/attic/
+
+# Other Sigma firmware kept locally for comparison (docs/research/reference-firmware.md)
+/data/ref/
+
+# SD-card payloads, raw files and archives
 DOOM.BIN
 *.wad
 *.WAD

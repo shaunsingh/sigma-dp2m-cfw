@@ -542,148 +542,34 @@ fn auto_iso_lower_limit_50_flow() {
 }
 
 #[test]
-fn doom_e1m1_full_gameplay_and_clean_exit() {
+fn doom_missing_applet_notice_and_clean_exit() {
     let pkg = pkg_bytes();
     let mut cam = Camera::from_package(pkg).expect("boot DP2M simulator");
     assert_eq!(cam.screen_id(), 0x15);
 
-    // 1. Navigate Menu -> Setup Page 4 (page 10, wrap Left from page 0) -> Row 3 (DOOM) -> Ok
     cam.press(Key::Menu);
-    assert_eq!(cam.screen_id(), 0x1B);
-    cam.press(Key::Left); // wraps from page 0 -> page 10 (Setup 4 = 0x17)
-    // Rows on Setup 4: 0 Firmware Update, 1 Camera Reset, 2 Imager Temp, 3 DOOM
+    cam.press(Key::Left); // Setup page 4
     for _ in 0..4 {
-        cam.press(Key::Down);
-    }
-    let open_insns = cam.press(Key::Ok);
-    assert_eq!(cam.screen_id(), 33, "Setup 4 -> DOOM must open SCREEN_DOOM (33 = 0x21)");
-    assert!(cam.cpu().last_error.is_none(), "DOOM open hit CPU error: {:?}", cam.cpu().last_error);
-
-    // 2. Verify OSD was cleared and 640x480 RGBA4444 ARGB_FB has rich non-black Doom rendering
-    let osd = &cam.cpu().sdram()[0x0213_0000..0x0213_0000 + LCD_W * LCD_H];
-    assert!(osd.iter().all(|&b| b == 0), "8bpp OSD plane must be cleared during DOOM");
-
-    let fb0 = cam.render_lcd().to_vec();
-    assert_eq!(fb0.len(), LCD_W * LCD_H * 4);
-    let mut unique_rgb = std::collections::HashSet::new();
-    let mut nonblack = 0usize;
-    for p in fb0.as_chunks::<4>().0 {
-        if p[0] > 0 || p[1] > 0 || p[2] > 0 {
-            nonblack += 1;
-        }
-        unique_rgb.insert([p[0] >> 4, p[1] >> 4, p[2] >> 4]);
-    }
-    assert!(nonblack > 250_000, "expected full 640x480 DOOM framebuffer, got {nonblack} non-black px");
-    assert!(unique_rgb.len() >= 20, "expected rich DOOM palette (>20 colors), got {}", unique_rgb.len());
-
-    // 3. Measure steady-state frame cost on real ARM926EJ-S instructions and exercise gameplay controls
-    let move_insns = cam.press(Key::Up);
-    assert_eq!(cam.screen_id(), 33);
-    assert!(cam.cpu().last_error.is_none(), "DOOM Up error: {:?}", cam.cpu().last_error);
-    let fb_moved = cam.render_lcd().to_vec();
-    assert_ne!(fb_moved, fb0, "Key::Up must advance player and render new perspective");
-
-    let turn_insns = cam.press(Key::Left);
-    let fb_turned = cam.render_lcd().to_vec();
-    assert_ne!(fb_turned, fb_moved, "Key::Left must rotate camera view");
-    cam.press(Key::Right);
-
-    // Cycle weapon to Shotgun (DialRight) and fire with Shutter (0xFE) — must NOT capture a camera photo!
-    let caps_before = cam.capture_count();
-    cam.press(Key::DialRight);
-    let fire_insns = cam.press(Key::Shutter);
-    assert_eq!(cam.screen_id(), 33, "Shutter inside DOOM must fire weapon, not open Playback");
-    assert_eq!(cam.capture_count(), caps_before, "Shutter inside DOOM must not trigger photo capture");
-    let fb_fire = cam.render_lcd().to_vec();
-    assert_ne!(fb_fire, fb_moved, "Firing Shotgun must render muzzle flash & recoil");
-
-    // Periodic timer tick (UI_DISPATCH(4, 3)) must advance simulation cleanly
-    let steps_before = cam.cpu().total_steps;
-    assert!(cam.tick(), "Camera::tick() must drive SCREEN_DOOM animation");
-    let tick_insns = cam.cpu().total_steps - steps_before;
-    assert!(cam.cpu().last_error.is_none(), "DOOM tick error: {:?}", cam.cpu().last_error);
-
-    // Toggle Doom Automap with Key::Disp and toggle back
-    cam.press(Key::Disp);
-    let fb_map = cam.render_lcd().to_vec();
-    assert_ne!(fb_map, fb_fire, "Key::Disp must toggle Doom Automap overlay");
-    cam.press(Key::Disp);
-
-    // Exercise Use (AEL) and Restart (QS)
-    cam.press(Key::Ael);
-    cam.press(Key::Qs);
-    assert_eq!(cam.screen_id(), 33);
-
-    println!(
-        "DOOM ARM9 insns: open={open_insns}, move={move_insns}, turn={turn_insns}, fire={fire_insns}, tick={tick_insns}, unique_colors={}",
-        unique_rgb.len()
-    );
-    assert!(
-        tick_insns < 2_500_000,
-        "DOOM frame exceeded 2.5M ARM9 instruction budget: {tick_insns}"
-    );
-
-    // 4. Press Menu to exit cleanly back to Live View (SCREEN_LV = 0x15)
-    cam.press(Key::Menu);
-    assert_eq!(cam.screen_id(), 0x15, "Key::Menu in DOOM must exit cleanly back to SCREEN_LV");
-    assert!(cam.cpu().last_error.is_none(), "DOOM exit error: {:?}", cam.cpu().last_error);
-
-    // Verify ARGB_FB was wiped clean (outside stock LV center AF bracket if any) and Live View resumed
-    let argb_after = &cam.cpu().sdram()[0x021D_8C00..0x021D_8C00 + LCD_W * 120 * 2];
-    assert!(argb_after.iter().all(|&b| b == 0), "ARGB_FB top 120 rows must be wiped clean after DOOM exit");
-    let osd_after = &cam.cpu().sdram()[0x0213_0000..0x0213_0000 + LCD_W * LCD_H];
-    let lv_osd_nz = osd_after.iter().filter(|&&b| b != 0).count();
-    assert!(lv_osd_nz > 500 && lv_osd_nz < 40_000, "Live View OSD must resume cleanly: lv_osd_nz={lv_osd_nz}");
-}
-
-#[test]
-#[ignore]
-fn dump_doom_previews() {
-    let pkg = pkg_bytes();
-    let mut cam = Camera::from_package(pkg).expect("boot DP2M simulator");
-
-    let dir = std::env::temp_dir().join("dp2m-doom-previews");
-    std::fs::create_dir_all(&dir).expect("create preview dir");
-    let write_ppm = |name: &str, rgba: &[u8]| {
-        let mut out = format!("P6\n{LCD_W} {LCD_H}\n255\n").into_bytes();
-        for p in rgba.as_chunks::<4>().0 {
-            out.extend_from_slice(&p[..3]);
-        }
-        let p = dir.join(name);
-        std::fs::write(&p, out).expect("write ppm");
-        println!("wrote {}", p.display());
-    };
-
-    // Navigate Menu -> Setup 4 -> DOOM
-    cam.press(Key::Menu);
-    cam.press(Key::Left);
-    for _ in 0..4 {
-        cam.press(Key::Down);
+        cam.press(Key::Down); // Firmware Update, Camera Reset, Imager Temp, DOOM
     }
     cam.press(Key::Ok);
-    assert_eq!(cam.screen_id(), 33);
+    assert_eq!(cam.screen_id(), 33, "Setup 4 must open SCREEN_DOOM");
+    assert!(cam.cpu().last_error.is_none(), "DOOM open hit CPU error: {:?}", cam.cpu().last_error);
 
-    // 1. Opening Hangar view (Blue carpet, foyer, Zombieman, Pistol, Status Bar)
-    let fb_start = cam.render_lcd().to_vec();
-    write_ppm("doom_frame.ppm", &fb_start);
+    let osd = &cam.cpu().sdram()[0x0213_0000..0x0213_0000 + LCD_W * LCD_H];
+    assert!(osd.iter().all(|&b| b == 0), "8bpp OSD plane must be cleared");
+    let argb = &cam.cpu().sdram()[0x021D_8C00..0x021D_8C00 + LCD_W * LCD_H * 2];
+    let px = |x: usize, y: usize| u16::from_be_bytes([argb[(y * LCD_W + x) * 2], argb[(y * LCD_W + x) * 2 + 1]]);
+    assert_eq!(px(0, 0), 0x111F, "missing-applet notice must paint its background");
+    let text_px = (0..LCD_H).flat_map(|y| (0..LCD_W).map(move |x| (x, y))).filter(|&(x, y)| matches!(px(x, y), 0xF7BF | 0xDDEF)).count();
+    assert!(text_px > 1_000, "missing-applet notice must render both text lines: {text_px} pixels");
 
-    // 2. Walk forward into Foyer (cross S0 -> S1 portal at x=256), switch to Shotgun, fire!
-    for _ in 0..10 {
-        cam.press(Key::Up);
-    }
-    cam.press(Key::DialRight);
-    cam.press(Key::Shutter);
-    write_ppm("doom_fire.ppm", cam.render_lcd());
-
-    // 3. Turn North toward Courtyard (open sky + mountains + Imp + Green Armor!)
-    for _ in 0..8 {
-        cam.press(Key::Left);
-    }
-    cam.press(Key::Up);
-    cam.press(Key::Up);
-    write_ppm("doom_sky.ppm", cam.render_lcd());
-
-    // 4. Automap overlay
-    cam.press(Key::Disp);
-    write_ppm("doom_map.ppm", cam.render_lcd());
+    cam.press(Key::Play);
+    assert_eq!(cam.screen_id(), 0x15, "PLAY must dismiss the notice back to Live View");
+    assert_eq!(cam.capture_count(), 0, "DOOM notice must not capture a photo");
+    let argb_after = &cam.cpu().sdram()[0x021D_8C00..0x021D_8C00 + LCD_W * 120 * 2];
+    assert!(argb_after.iter().all(|&b| b == 0), "ARGB_FB must be wiped after DOOM exit");
+    let osd_after = &cam.cpu().sdram()[0x0213_0000..0x0213_0000 + LCD_W * LCD_H];
+    let lv_osd_nz = osd_after.iter().filter(|&&b| b != 0).count();
+    assert!(lv_osd_nz > 500 && lv_osd_nz < 40_000, "Live View OSD must resume: {lv_osd_nz}");
 }

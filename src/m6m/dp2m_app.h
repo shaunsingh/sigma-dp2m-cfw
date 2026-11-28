@@ -11,7 +11,7 @@
 #define DP2M_APP_LIMIT_VA 0xA1E00000u
 
 enum {
-    DP2M_APP_INIT     = 0u, /* init engine + open WAD + draw frame 0; ret 0 ok, <0 fallback */
+    DP2M_APP_INIT     = 0u, /* init engine + open WAD + draw frame 0; ret 0 ok, <0 not started */
     DP2M_APP_STEP     = 1u, /* step 1 frame (arg = sim key or 0); ret 0 continue, 1 exit */
     DP2M_APP_SHUTDOWN = 2u, /* close files + release all heap blocks */
 };
@@ -81,7 +81,7 @@ struct dp2m_app_api {
     uint32_t is_autonomous; /* 1 = real hardware UI task, 0 = simulator event-driven */
     uint16_t *argb_fb;      /* 0xA21D8C00 (640x480 BE RGBA4444) */
     void (*present_argb)(void);
-    void (*upscale_2x2)(const uint8_t *src, uint16_t *dst, const uint32_t *pal32);
+    void *reserved0;        /* always 0; keeps the v1 table layout */
     uint32_t (*get_ms)(void);
     void (*sleep_ms)(uint32_t ms);
     void (*poll_input)(struct dp2m_input_snapshot *out);

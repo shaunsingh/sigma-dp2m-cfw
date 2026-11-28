@@ -75,7 +75,6 @@ pub struct M6mCfg {
     pub iso50: bool,
     pub bkt5: bool,
     pub doom: bool,
-    pub probe: bool,
     pub peaking_threshold: u32,
     pub zebra_threshold: u8,
     /// APEX Tv Q16 for Auto(stock), 1/15 .. 1/500.
@@ -132,7 +131,6 @@ impl Default for M6mCfg {
             iso50: true,
             bkt5: true,
             doom: true,
-            probe: false,
             peaking_threshold: 44,
             zebra_threshold: 242,
             min_shutter_q16: [0x0005_AAAA, 0x0004_0000, 0x0005_0000, 0x0006_0000, 0x0007_0000, 0x0008_0000, 0x0009_0000],

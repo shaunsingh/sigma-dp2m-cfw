@@ -15,26 +15,15 @@ const APP_LOAD_VA: u32 = 0xA1CC_0000;
 const SCREEN_LV: u32 = 0x15;
 const SCREEN_DOOM: u32 = 0x21;
 
-/// Freshly built package and the address of the built-in engine's `doom_st` (`src/m6m/doom.h`).
-fn pkg() -> &'static (Vec<u8>, u32) {
-    static PACKAGE: OnceLock<(Vec<u8>, u32)> = OnceLock::new();
+fn pkg_bytes() -> &'static [u8] {
+    static PACKAGE: OnceLock<Vec<u8>> = OnceLock::new();
     PACKAGE.get_or_init(|| {
         common::with_fresh_build(|out, _| {
-            let map = std::fs::read_to_string(out.join("m6m/m6m.map")).expect("read M6M payload map");
-            (
-                std::fs::read(out.join("DP2MV200.bin")).expect("read freshly built package"),
-                linked_map_symbol(&map, "doom_st"),
-            )
+            std::fs::read(out.join("DP2MV200.bin")).expect("read freshly built package")
         })
     })
 }
 
-fn pkg_bytes() -> &'static [u8] {
-    &pkg().0
-}
-
-/// Offset of `ammo` (`int16_t`) in `struct d_state`.
-const DOOM_ST_AMMO_OFF: u32 = 36;
 
 /// Encode `KEY0` (`0xA07FAA1C`) 2-bit held field for key index `k` (`0..12`).
 const fn key0_bit(k: u32) -> u32 {
@@ -44,8 +33,6 @@ const fn key0_bit(k: u32) -> u32 {
 const K0_OK: u32 = key0_bit(0);
 const K0_UP: u32 = key0_bit(1);
 const K0_DOWN: u32 = key0_bit(2);
-const K0_LEFT: u32 = key0_bit(3);
-const K0_DISP: u32 = key0_bit(6);
 const K0_AEL: u32 = key0_bit(7);
 const K0_QS: u32 = key0_bit(8);
 const K0_MODE: u32 = key0_bit(9);
@@ -109,7 +96,6 @@ const SW28_CHANGED: u32 = SW28_IDLE | 0x8400_0000;
 const RLS_STATE: u32 = 0xA07A_F398;
 const RLS_PORT: u32 = 0x9000_1018;
 const RLS_PORT_IDLE: u32 = 0xC;
-const RLS_PORT_HALF: u32 = 0x4;
 const RLS_PORT_FULL: u32 = 0x0;
 const RLS_STATE_HALF: u32 = 0x0100;
 
@@ -222,92 +208,51 @@ fn build_synthetic_d2ap_applet() -> Vec<u8> {
 }
 
 #[test]
-fn builtin_autonomous_loop_controls_psave_mbx_and_shutter_sync() {
+fn autonomous_missing_applet_notice_controls_psave_mbx_and_input_sync() {
     let mut cam = Camera::from_package(pkg_bytes()).expect("boot simulator");
     cam.cpu_mut().set_write_watch(Some((0xA000_0000, 0xA017_9000)));
 
-    // Poison DOOM payload .bss region to ensure cold init handles dirty SDRAM
-    cam.cpu_mut().sdram_mut()[0x01C1_0000..0x01CB_0000].fill(0xA5);
-
-    // Enqueue 3 dummy UI packets into MBX 0x11 and hold shutter switch bit before exit
+    // The notice still owns the UI task: drain UI packets, inhibit power saving, and resync input on exit.
     cam.enqueue_mbx_packet(0xA080_2000);
     cam.enqueue_mbx_packet(0xA080_2040);
     cam.enqueue_mbx_packet(0xA080_2080);
     assert_eq!(cam.pending_mbx_packets(), 3);
-
     cam.cpu_mut().w32(0xA07F_AB20, 0);
     cam.cpu_mut().w32(0xA07F_AA28, SW28_IDLE);
     cam.cpu_mut().w8(0xA07A_F38C, 1);
 
     let saw_psave = Rc::new(Cell::new(false));
     let saw_psave_cb = Rc::clone(&saw_psave);
-    let insns = cam
-        .run_autonomous_open(SCREEN_DOOM, 7, 120_000_000, move |cpu, step| {
-            let psave = cpu.r32_be(0xA07D_D73C);
-            if psave & 0x4000_0000 != 0 {
-                saw_psave_cb.set(true);
-            }
-            match step {
-                0 => {
-                    cpu.w32(0xA07F_AA1C, K0_UP);
-                    cpu.w32(RLS_PORT, RLS_PORT_HALF);      // Shutter half-press fire
-                    cpu.w8(RLS_STATE, 1);
-                }
-                1 => {
-                    cpu.w32(0xA07F_AA1C, K0_QS | K0_LEFT); // QS+Left strafe chord
-                    cpu.w32(RLS_PORT, RLS_PORT_FULL);      // Shutter full press
-                    cpu.w8(RLS_STATE + 1, 1);
-                    cpu.w32(0xA07F_AA28, SW28_CHANGED);    // SW28 changes while DOOM is open
-                    cpu.w8(0xA07A_F38C, 2);                // QS+Dial weapon cycle
-                }
-                2 => {
-                    cpu.w32(0xA07F_AA1C, K0_DISP);         // Toggle automap
-                    cpu.w32(RLS_PORT, RLS_PORT_IDLE);      // Shutter released
-                    cpu.w8(RLS_STATE, 0);
-                    cpu.w8(RLS_STATE + 1, 0);
-                    cpu.w8(0xA07A_F38C, 3);                // Command dial turn
-                }
-                _ => {
-                    cpu.w32(0xA07F_AA1C, K0_PLAY);         // Exit back to Live View
-                }
-            }
-        })
-        .expect("builtin autonomous DOOM run");
+    cam.run_autonomous_open(SCREEN_DOOM, 7, 10_000_000, move |cpu, step| {
+        if cpu.r32_be(0xA07D_D73C) & 0x4000_0000 != 0 {
+            saw_psave_cb.set(true);
+        }
+        if step == 0 {
+            cpu.w32(0xA07F_AA1C, K0_PLAY);
+            cpu.w32(0xA07F_AA28, SW28_CHANGED);
+            cpu.w32(RLS_PORT, RLS_PORT_FULL);
+        }
+    })
+    .expect("autonomous missing-applet notice");
 
-    assert!(saw_psave.get(), "PSAVE_DOOM_MASK must be set during autonomous DOOM loop");
-    assert!(insns > 1_000_000, "autonomous DOOM loop must render real frames: insns={insns}");
+    assert!(saw_psave.get(), "PSAVE_DOOM_MASK must be set while the notice owns the UI task");
     assert!(cam.cpu().watch_hits.is_empty(), ".text write watch hits: {:?}", cam.cpu().watch_hits);
     assert!(cam.cpu().last_error.is_none(), "CPU error: {:?}", cam.cpu().last_error);
-    assert_eq!(cam.screen_id(), SCREEN_LV, "PLAY must exit autonomous DOOM back to SCREEN_LV");
-    assert_eq!(cam.capture_count(), 0, "Shutter inside DOOM must not trigger photo capture");
-    // No frame held OK, so every round spent was fired through the release switches.
-    let ammo = cam.cpu().r32_be(pkg().1 + DOOM_ST_AMMO_OFF) >> 16;
-    assert!((1..50).contains(&ammo), "release switches must fire the built-in engine: ammo={ammo}");
-    assert_eq!(cam.pending_mbx_packets(), 0, "doom_poll_ui_mbx/exit must drain normal MBX 0x11 packets");
-    assert_eq!(
-        cam.cpu().r32_be(0xA07D_D73C) & 0x4000_0000,
-        0,
-        "PSAVE_DOOM_MASK (0x40000000) must be released on exit"
-    );
-    assert_eq!(
-        cam.cpu().r32_be(0xA07F_AB20),
-        SW28_CHANGED,
-        "SW28 edge snapshot 0xA07FAB20 must sync with 0xA07FAA28 on exit"
-    );
-    assert_eq!(
-        cam.cpu().r32_be(0xA07F_AB24),
-        K0_PLAY,
-        "Key edge snapshot 0xA07FAB24 must sync with 0xA07FAA1C on exit"
-    );
+    assert_eq!(cam.screen_id(), SCREEN_LV, "PLAY must dismiss the notice back to SCREEN_LV");
+    assert_eq!(cam.capture_count(), 0, "shutter input on the notice must not capture a photo");
+    assert_eq!(cam.pending_mbx_packets(), 0, "notice/exit must drain normal MBX 0x11 packets");
+    assert_eq!(cam.cpu().r32_be(0xA07D_D73C) & 0x4000_0000, 0, "PSAVE_DOOM_MASK must be released on exit");
+    assert_eq!(cam.cpu().r32_be(0xA07F_AB20), SW28_CHANGED, "SW28 edge snapshot must sync on exit");
+    assert_eq!(cam.cpu().r32_be(0xA07F_AB24), K0_PLAY, "key edge snapshot must sync on exit");
 
-    // Clear held registers and verify normal camera Shutter capture works again in Live View
+    // Clear held registers and verify normal camera Shutter capture works again in Live View.
     cam.cpu_mut().w32(0xA07F_AA1C, 0);
     cam.cpu_mut().w32(0xA07F_AA28, 0);
+    cam.cpu_mut().w32(RLS_PORT, RLS_PORT_IDLE);
     cam.press(Key::Shutter);
     assert_eq!(cam.capture_count(), 1, "Live View shutter capture must work normally after DOOM exit");
 
-    // Verify system power-off UI packet (type == 6 at +8) breaks out immediately and is re-queued
-    // to MBX 0x11 via stock_snd_mbx instead of navigating to SCREEN_LV or freeing the packet.
+    // A system power-off packet breaks before the first notice sleep and is re-queued for the UI task.
     let sys_pkt = 0xA080_2100;
     cam.cpu_mut().fill_bytes(sys_pkt, 0, 16);
     cam.cpu_mut().w8(sys_pkt + 8, 6);
@@ -318,28 +263,19 @@ fn builtin_autonomous_loop_controls_psave_mbx_and_shutter_sync() {
         sleep_cnt_cb.set(sleep_cnt_cb.get() + 1);
     })
     .expect("power-off packet autonomous break");
-    assert_eq!(sleep_cnt.get(), 0, "type == 6 power-off packet must break before first frame sleep");
-    assert_eq!(
-        cam.pending_mbx_packets(),
-        1,
-        "type == 6 power-off packet must be re-posted to MBX 0x11 via stock_snd_mbx"
-    );
-    assert_eq!(
-        cam.screen_id(),
-        SCREEN_DOOM,
-        "power-off exit must leave UI task to shut down without posting SCREEN_LV"
-    );
+    assert_eq!(sleep_cnt.get(), 0, "type == 6 power-off packet must break before first notice sleep");
+    assert_eq!(cam.pending_mbx_packets(), 1, "power-off packet must be re-posted to MBX 0x11");
+    assert_eq!(cam.screen_id(), SCREEN_DOOM, "power-off exit must not post SCREEN_LV");
 }
-
 #[test]
-fn synthetic_d2ap_applet_and_bad_header_fallback_zero_leak() {
+fn synthetic_d2ap_applet_and_bad_header_notice_zero_leak() {
     let mut cam = Camera::from_package(pkg_bytes()).expect("boot simulator");
     // Warm stock SCREEN_MENU once so its one-time persistent UI/font allocations settle
     cam.press(Key::Menu);
     cam.press(Key::Menu);
     let heap_base = cam.live_heap_allocations();
 
-    // 1. Corrupt header must be rejected cleanly and fall back to built-in E1M1 engine
+    // 1. Corrupt header must be rejected with the notice and without a heap leak
     let mut bad = build_synthetic_d2ap_applet();
     bad[0..4].copy_from_slice(b"NOPE");
     cam.mount_sd_file("DOOM.BIN", bad);
@@ -352,6 +288,7 @@ fn synthetic_d2ap_applet_and_bad_header_fallback_zero_leak() {
     cam.press(Key::Ok);
     assert_eq!(cam.screen_id(), SCREEN_DOOM);
     assert_eq!(cam.live_heap_allocations(), heap_base, "rejected header must not leak heap");
+    assert_eq!(cam.cpu().r16_be(0xA21D_8C00), 0x111F, "bad header must show the notice");
     cam.press(Key::Play);
     assert_eq!(cam.screen_id(), SCREEN_LV);
 
@@ -449,7 +386,7 @@ fn standalone_doom_bin_and_shareware_wad_full_demo_flow() {
     let heap_base = cam.live_heap_allocations();
 
     // A) DOOM.BIN mounted WITHOUT DOOM1.WAD must fail INIT cleanly with zero leaked heap
-    //    and fall back seamlessly to the built-in E1M1 engine!
+    //    and show the missing/invalid-applet notice.
     cam.mount_sd_file("DOOM.BIN", doom_std.clone());
     cam.press(Key::Menu);
     cam.press(Key::Left);
@@ -461,9 +398,9 @@ fn standalone_doom_bin_and_shareware_wad_full_demo_flow() {
     assert_eq!(
         cam.live_heap_allocations(),
         heap_base,
-        "missing WAD fallback must leave zero leaked heap allocations"
+        "missing WAD notice must leave zero leaked heap allocations"
     );
-    assert_eq!(cam.open_sd_fds(), 0, "missing WAD fallback must leave zero open SD fds");
+    assert_eq!(cam.open_sd_fds(), 0, "missing WAD notice must leave zero open SD fds");
     cam.press(Key::Play);
     assert_eq!(cam.screen_id(), SCREEN_LV);
 
@@ -701,7 +638,8 @@ fn standalone_doom_bin_and_shareware_wad_full_demo_flow() {
         }
         cam.press(Key::Ok);
     }
-    assert_eq!(cam.screen_id(), SCREEN_DOOM, "bad WAD must fall back to built-in DOOM");
+    assert_eq!(cam.screen_id(), SCREEN_DOOM, "bad WAD must leave the notice open");
+    assert_eq!(cam.cpu().r16_be(0xA21D_8C00), 0x111F, "bad WAD must show the notice");
     assert_eq!(cam.open_sd_fds(), 0, "bad WAD must close all SD descriptors");
     assert_eq!(
         cam.live_heap_allocations(),

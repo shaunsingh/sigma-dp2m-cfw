@@ -315,7 +315,7 @@ pub fn generate(s3: &S3, pack: &FilmPack, cfg: &Config) -> Result<Generated, Str
     menus.push((0x0F, ".data.menu", page(STOCK_SHOOT_P2, 0x09, &[Row::page(MENU_PEAKSENS, t_peaksens)])?));
     menus.push((0x10, ".data.menu", page(STOCK_SHOOT_P3, u32::MAX, &[Row::page(MENU_PEAKCOL, t_peak)])?));
     menus.push((0x14, ".data.menu", page(STOCK_SETUP_P1, u32::MAX, &[Row::page(MENU_ZEBRALVL, t_zebralvl)])?));
-    let doom_entry = cfg.m6m.doom || cfg.m6m.probe;
+    let doom_entry = cfg.m6m.doom;
     let mut setup_p4_add = vec![Row::page(0xA3, SID_IMAGER_TEMP)];
     if doom_entry {
         let t_doom = st.add("DOOM");

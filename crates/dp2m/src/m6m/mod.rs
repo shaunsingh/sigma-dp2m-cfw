@@ -30,12 +30,10 @@ const REGIONS: &[(&str, u32, u32)] = &[
     ("LOOKS", 0xA009_4658, 0xA009_688C),
     // factory service menus 0x18..0x22 + their submenus; menu 0xA3 at 0xA07EDC0C stays
     ("MENU", 0xA07E_C9CC, 0xA07E_DC0C),
-    // verified zero-xref stock-orphan code runs outside 0xA0070000..0xA00B8000 for DOOM applet
-    ("DOOM_A", 0xA010_AF44, 0xA010_C250),
-    ("DOOM_B", 0xA010_7BD8, 0xA010_8E14),
-    ("DOOM_C", 0xA013_60FC, 0xA013_6AB8),
-    ("DOOM_D", 0xA014_0CB0, 0xA014_15B0),
-    ("DOOM_E", 0xA002_A834, 0xA002_B5E0),
+    // verified zero-xref stock-orphan code runs outside 0xA0070000..0xA00B8000:
+    // the D2AP applet loader (doom.c) and the overlay code that does not fit in CODE
+    ("APPLET", 0xA002_A834, 0xA002_B5E0),
+    ("LVCODE", 0xA014_0CB0, 0xA014_15B0),
 ];
 // unreferenced SDRAM between the uITRON task stacks (0xA1B5717C) and the OSD planes (0xA2130000)
 const RAM: (u32, u32) = (0xA1C0_0000, 0xA1E0_0000);
@@ -181,15 +179,6 @@ pub fn build_m6m(fw_raw: &[u8], pack: &FilmPack, src: &Path, work: &Path, cfg: &
         .map_err(|e| format!("{}: {e}", src.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| matches!(p.extension().and_then(|e| e.to_str()), Some("c" | "S")))
-        .filter(|p| {
-            let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if cfg.m6m.probe {
-                // Keep the portal upscaler for direct timing; GC drops the unused renderer.
-                name != "doom.c"
-            } else {
-                name != "probe.c"
-            }
-        })
         .collect();
     sources.sort();
     sources.push(work.join("catalog.c"));

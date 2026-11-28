@@ -905,7 +905,7 @@ static void app_poll_input(struct dp2m_input_snapshot *out) {
         if (((k0 >> (30u - 2u * k)) & 3u) != 0u)
             mask |= (1u << k);
     }
-    if ((sw & 0x84000000u) != 0u)
+    if ((sw & DP2M_SW28_SHUTTER) != 0u)
         mask |= DP2M_BTN_SHUTTER;
 
     int32_t d_delta = 0;

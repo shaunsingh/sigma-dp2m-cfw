@@ -192,8 +192,14 @@ static void apply_sim_arg(uint32_t arg, struct dp2m_input_snapshot *inp) {
 static int poll_and_translate_controls(uint32_t sim_arg) {
     struct dp2m_input_snapshot inp;
     memset(&inp, 0, sizeof(inp));
-    if (g_dp2m_api->poll_input)
+    if (g_dp2m_api->poll_input) {
         g_dp2m_api->poll_input(&inp);
+        /* Decode the shutter from the raw word instead of trusting the firmware's bit: firmware built
+         * with bit 30 in its mask reports the shutter as held forever, which mutes it for the session. */
+        inp.held_mask &= ~DP2M_BTN_SHUTTER;
+        if (inp.raw_sw28 & DP2M_SW28_SHUTTER)
+            inp.held_mask |= DP2M_BTN_SHUTTER;
+    }
     if (!g_dp2m_api->is_autonomous && sim_arg != 0u)
         apply_sim_arg(sim_arg, &inp);
     g_doom_tel.inp = inp;

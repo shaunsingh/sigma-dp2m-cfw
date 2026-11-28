@@ -31,6 +31,10 @@ enum {
 #define DP2M_BTN_PLAY    (1u << 11)
 #define DP2M_BTN_SHUTTER (1u << 12)
 
+/* Shutter contacts in dp2m_input_snapshot.raw_sw28: bit 31 = half-press, bit 26 = full press.
+ * Bit 30 follows an unrelated line that reads 1 at idle on the camera, so it is not a contact. */
+#define DP2M_SW28_SHUTTER 0x84000000u
+
 struct dp2m_app_hdr {
     uint32_t magic;      /* DP2M_APP_MAGIC */
     uint32_t abi_ver;    /* DP2M_APP_ABI_VER */

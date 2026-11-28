@@ -891,10 +891,12 @@ static int32_t app_mdf_read(int32_t fd, void *buf, uint32_t len, uint32_t *got) 
 
 __attribute__((noinline, section(".doom.hud")))
 static void app_poll_input(struct dp2m_input_snapshot *out) {
-    /* Verified stock polarity (0xA016D88C..0xA016DB64, 0xA016E47A):
+    /* Stock polarity (0xA016D88C..0xA016DB64, 0xA016E47A; SW28 is assembled by 0xA016DD94):
      * - 0xA07FAA1C (KEY0): 0x00000000 when idle; 2-bit slot (k0 >> (30 - 2*k)) & 3
      *   is 1 on press and 3 on auto-repeat for k = 0..11 (OK,UP,DN,LF,RT,MENU,DISP,AEL,QS,MODE,DEL,PLAY).
-     * - 0xA07FAA28 (SW28): active-high bits 31 (S1 half-press), 30 (S2 full-press), 26 (switch 3). */
+     * - 0xA07FAA28 (SW28): bit 31 = half-press (S1 only), bit 26 = full press (S1 and S2). Bit 30 mirrors an
+     *   unrelated active-low line and reads 1 at idle on camera (probe V2: SW28 = 0x40000000), so it must
+     *   stay out of the shutter mask. */
     uint32_t k0 = REG32(0xA07FAA1Cu);
     uint32_t sw = REG32(0xA07FAA28u);
     uint32_t dial = REG8(0xA07AF38Cu);
@@ -903,7 +905,7 @@ static void app_poll_input(struct dp2m_input_snapshot *out) {
         if (((k0 >> (30u - 2u * k)) & 3u) != 0u)
             mask |= (1u << k);
     }
-    if ((sw & 0xC4000000u) != 0u)
+    if ((sw & 0x84000000u) != 0u)
         mask |= DP2M_BTN_SHUTTER;
 
     int32_t d_delta = 0;

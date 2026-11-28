@@ -135,7 +135,7 @@ The applet uses the first of `DOOM1.WAD`, `DOOM.WAD`, `DOOMU.WAD`, `DOOM2.WAD`, 
 | QS | | restart after the level is won |
 | PLAY | exit to live view | exit to live view |
 
-Buttons already held when DOOM opens are ignored until they are all released. The shutter does not take pictures while DOOM is open, and auto power off is suspended until exit.
+A button already held when DOOM opens is ignored until it is released. The shutter does not take pictures while DOOM is open, and auto power off is suspended until exit.
 
 ## Commands
 

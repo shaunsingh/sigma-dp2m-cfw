@@ -58,7 +58,39 @@ fn stack_probe_high_water(cam: &mut Camera) -> usize {
 
 const APP_STACK_LEN: usize = 8192;
 const APP_STACK_GUARD: u32 = 0x4432_5347;
+// Offsets into `struct dp2m_doom_telemetry` (`src/doom/dp2m_doom.h`); `inp` starts at 248.
+const TELEMETRY_HUD_MODE_OFF: u32 = 52;
+const TELEMETRY_TILT_STRAFE_OFF: u32 = 56;
+const TELEMETRY_PEEK_IDX_OFF: u32 = 60;
 const TELEMETRY_ENTRY_SP_OFF: u32 = 76;
+const TELEMETRY_RAW_KEY0_OFF: u32 = 248 + 16;
+const TELEMETRY_RAW_SW28_OFF: u32 = 248 + 20;
+const TELEMETRY_RAW_DIAL_OFF: u32 = 248 + 24;
+
+/// Stages of the autonomous `DOOM.BIN` input script, named by the effect each one waits for.
+const AUTO_SCRIPT: [&str; 15] = [
+    "applet polls the inherited OK+MODE hold",
+    "applet polls OK released with MODE still held",
+    "fresh OK opens the menu",
+    "OK release polled",
+    "shutter half-press polled (New Game)",
+    "half-press release polled",
+    "shutter full press polled (episode)",
+    "full-press release polled",
+    "OK confirms the skill and the level starts",
+    "UP and a dial detent polled after the melt",
+    "QS+AEL turns tilt-strafe on",
+    "MODE selects HUD mode 1",
+    "MODE release polled",
+    "MODE selects HUD mode 2 (explorer)",
+    "QS+DOWN steps the explorer region",
+];
+
+/// `SW28` (`0xA07FAA28`) as the camera reports it: bit 30 is set at idle and is not a shutter contact,
+/// bit 31 is half-press, and bit 26 is full press.
+const SW28_IDLE: u32 = 0x4000_0000;
+const SW28_HALF: u32 = SW28_IDLE | 0x8000_0000;
+const SW28_FULL: u32 = SW28_IDLE | 0x0400_0000;
 
 fn linked_map_symbol(map: &str, name: &str) -> u32 {
     for line in map.lines() {
@@ -183,6 +215,7 @@ fn builtin_autonomous_loop_controls_psave_mbx_and_shutter_sync() {
     assert_eq!(cam.pending_mbx_packets(), 3);
 
     cam.cpu_mut().w32(0xA07F_AB20, 0);
+    cam.cpu_mut().w32(0xA07F_AA28, SW28_IDLE);
     cam.cpu_mut().w8(0xA07A_F38C, 1);
 
     let saw_psave = Rc::new(Cell::new(false));
@@ -196,11 +229,11 @@ fn builtin_autonomous_loop_controls_psave_mbx_and_shutter_sync() {
             match step {
                 0 => {
                     cpu.w32(0xA07F_AA1C, K0_UP);
-                    cpu.w32(0xA07F_AA28, 0x4000_0000); // S2 full-press shutter fire
+                    cpu.w32(0xA07F_AA28, SW28_HALF);       // Shutter half-press fire
                 }
                 1 => {
                     cpu.w32(0xA07F_AA1C, K0_QS | K0_LEFT); // QS+Left strafe chord
-                    cpu.w32(0xA07F_AA28, 0x8400_0000);     // S1 + SW3 shutter bits
+                    cpu.w32(0xA07F_AA28, SW28_FULL);       // Shutter full press
                     cpu.w8(0xA07A_F38C, 2);                // QS+Dial weapon cycle
                 }
                 2 => {
@@ -228,7 +261,7 @@ fn builtin_autonomous_loop_controls_psave_mbx_and_shutter_sync() {
     );
     assert_eq!(
         cam.cpu().r32_be(0xA07F_AB20),
-        0x8400_0000,
+        SW28_FULL,
         "Shutter edge snapshot 0xA07FAB20 must sync with 0xA07FAA28 on exit"
     );
     assert_eq!(
@@ -374,6 +407,7 @@ fn standalone_doom_bin_and_shareware_wad_full_demo_flow() {
     let std_stack = linked_map_symbol(&std_map, "g_app_stack");
     let std_telemetry = linked_map_symbol(&std_map, "g_doom_tel");
     let std_menuactive = linked_map_symbol(&std_map, "menuactive");
+    let std_gamestate = linked_map_symbol(&std_map, "gamestate");
     let wad_bytes = std::fs::read(wad_path).expect("read DOOM1.WAD");
     let _ = std::fs::remove_dir_all(&tmp_out);
 
@@ -477,49 +511,90 @@ fn standalone_doom_bin_and_shareware_wad_full_demo_flow() {
     assert_eq!(cam.cpu().r32_be(warp_stack), APP_STACK_GUARD, "private stack guard overwritten");
 
     // C) Autonomous hardware UI-task flow (`tid = 7`) with standard Title-Screen DOOM.BIN + DOOM1.WAD
-    //    plus re-entry check: exercises Menu -> New Game, Command Dial turning, QS+AEL Tilt-Strafe,
-    //    Explorer region stepping (`QS+Down`), MBX drain, PSAVE bit release, and zero heap leak!
+    //    plus re-entry check: inherited holds, the camera's idle SW28 level, shutter half/full press and OK
+    //    through Menu -> New Game, dial polling, QS+AEL Tilt-Strafe, HUD modes, Explorer region stepping
+    //    (`QS+Down`), MBX drain, PSAVE bit release, and zero heap leak.
     cam.mount_sd_file("DOOM.BIN", doom_std.clone());
     cam.set_tilt(28, 64);
     cam.enqueue_mbx_packet(0xA080_3000);
+    cam.cpu_mut().w32(0xA07F_AA28, SW28_IDLE);
     cam.cpu_mut().w8(0xA07A_F38C, 1);
     stack_probe_arm(&mut cam);
 
+    // Held by the user while DOOM opens: both must stay inert until they are released.
+    cam.cpu_mut().w32(0xA07F_AA1C, K0_OK | K0_MODE);
+    let stage = Rc::new(Cell::new(0usize));
+    let stage_cb = Rc::clone(&stage);
+
+    // Each stage drives its inputs until the applet shows the stated effect, so the script does not
+    // depend on how many `dly_tsk` calls a frame makes (the level-start melt sleeps without polling).
     let auto_insns = cam
         .run_autonomous_open(SCREEN_DOOM, 7, 450_000_000, move |cpu, step| {
-            match step {
-                0 => cpu.w32(0xA07F_AA1C, K0_OK),              // Inherited OK hold must be ignored
-                1 => {
-                    assert_eq!(cpu.r32_be(std_menuactive), 0, "inherited OK opened the DOOM menu");
-                    let sp = cpu.r32_be(std_telemetry + TELEMETRY_ENTRY_SP_OFF);
-                    assert!((std_stack..std_stack + APP_STACK_LEN as u32).contains(&sp));
-                    cpu.w32(0xA07F_AA1C, 0);                   // Release inherited hold
+            let tel = |off: u32| cpu.r32_be(std_telemetry + off);
+            let polled = |key0: u32, sw28: u32| {
+                tel(TELEMETRY_RAW_KEY0_OFF) == key0 && tel(TELEMETRY_RAW_SW28_OFF) == sw28
+            };
+            let menu = cpu.r32_be(std_menuactive);
+            let hud = tel(TELEMETRY_HUD_MODE_OFF);
+            let mut s = stage_cb.get();
+            let done = match s {
+                0 => polled(K0_OK | K0_MODE, SW28_IDLE),
+                1 => polled(K0_MODE, SW28_IDLE),
+                2 => menu != 0,
+                3 => polled(0, SW28_IDLE),
+                4 => polled(0, SW28_HALF),
+                5 => polled(0, SW28_IDLE),
+                6 => polled(0, SW28_FULL),
+                7 => polled(0, SW28_IDLE),
+                8 => cpu.r32_be(std_gamestate) == 0 && menu == 0,
+                9 => polled(K0_UP, SW28_IDLE) && tel(TELEMETRY_RAW_DIAL_OFF) == 2,
+                10 => tel(TELEMETRY_TILT_STRAFE_OFF) == 1,
+                11 => hud == 1,
+                12 => polled(0, SW28_IDLE),
+                13 => hud == 2,
+                14 => tel(TELEMETRY_PEEK_IDX_OFF) == 1,
+                _ => false,
+            };
+            if done {
+                match s {
+                    1 => {
+                        assert_eq!(menu, 0, "inherited OK opened the DOOM menu");
+                        assert_eq!(hud, 0, "inherited MODE cycled the HUD");
+                        let sp = tel(TELEMETRY_ENTRY_SP_OFF);
+                        assert!((std_stack..std_stack + APP_STACK_LEN as u32).contains(&sp));
+                    }
+                    2 => assert_eq!(hud, 0, "MODE acted although its inherited hold was never released"),
+                    _ => {}
                 }
-                2 => cpu.w32(0xA07F_AA1C, K0_OK),              // Open menu on Title Screen
-                3 => {
-                    assert_ne!(cpu.r32_be(std_menuactive), 0, "fresh OK did not open the DOOM menu");
-                    cpu.w32(0xA07F_AA1C, 0);
-                }
-                4 => cpu.w32(0xA07F_AA1C, K0_OK),              // New Game
-                5 => cpu.w32(0xA07F_AA1C, 0),
-                6 => cpu.w32(0xA07F_AA1C, K0_OK),              // Knee-Deep in the Dead
-                7 => cpu.w32(0xA07F_AA1C, 0),
-                8 => cpu.w32(0xA07F_AA1C, K0_OK),              // Hurt Me Plenty -> 33-tic melt -> E1M1
-                9..=46 => {
-                    cpu.w32(0xA07F_AA1C, K0_UP);               // Advance through melt into live E1M1
-                    cpu.w8(0xA07A_F38C, ((step % 3) + 1) as u8); // Proportional Command Dial turn
-                }
-                47 => cpu.w32(0xA07F_AA1C, K0_QS | K0_AEL),    // Toggle accelerometer Tilt-Strafe ON
-                48 => cpu.w32(0xA07F_AA1C, K0_MODE),           // Mode 1
-                49 => cpu.w32(0xA07F_AA1C, 0),
-                50 => cpu.w32(0xA07F_AA1C, K0_MODE),           // Mode 2 (Live HW Explorer)
-                51 => cpu.w32(0xA07F_AA1C, K0_QS | K0_DOWN),   // Step Explorer hex peek region
-                52 => cpu.w32(0xA07F_AA1C, 0),
-                _ => cpu.w32(0xA07F_AA1C, K0_PLAY),            // Clean exit to Live View
+                s += 1;
+                stage_cb.set(s);
             }
+            assert!(
+                step < 200,
+                "DOOM input script stalled at stage {s}: {}",
+                AUTO_SCRIPT.get(s).copied().unwrap_or("PLAY exit")
+            );
+            let (key0, sw28, dial) = match s {
+                0 => (K0_OK | K0_MODE, SW28_IDLE, 1),
+                1 => (K0_MODE, SW28_IDLE, 1),
+                2 => (K0_OK | K0_MODE, SW28_IDLE, 1),
+                3 | 5 | 7 => (0, SW28_IDLE, 1),
+                4 => (0, SW28_HALF, 1),
+                6 => (0, SW28_FULL, 1),
+                8 => (K0_OK, SW28_IDLE, 1),
+                9 => (K0_UP, SW28_IDLE, 2),
+                10 => (K0_QS | K0_AEL, SW28_IDLE, 2),
+                11 | 13 => (K0_MODE, SW28_IDLE, 2),
+                12 => (0, SW28_IDLE, 2),
+                14 => (K0_QS | K0_DOWN, SW28_IDLE, 2),
+                _ => (K0_PLAY, SW28_IDLE, 2),
+            };
+            cpu.w32(0xA07F_AA1C, key0);
+            cpu.w32(0xA07F_AA28, sw28);
+            cpu.w8(0xA07A_F38C, dial);
         })
         .expect("autonomous DOOM.BIN + DOOM1.WAD run");
-
+    assert_eq!(stage.get(), AUTO_SCRIPT.len(), "autonomous input script did not run to completion");
     let stack_auto = stack_probe_high_water(&mut cam);
     assert_eq!(cam.cpu().r32_be(std_stack), APP_STACK_GUARD, "autonomous stack guard overwritten");
     println!(

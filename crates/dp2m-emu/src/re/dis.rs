@@ -253,6 +253,22 @@ fn dis_arm(img: &Image, names: &HashMap<u32, String>, va: u32) -> (usize, String
     if (w & 0x0FFF_FFF0) == 0x012F_FF30 {
         return (4, format!("blx{cc}"), REG[(w & 0xF) as usize].into(), String::new());
     }
+    if (w & 0x0F00_0010) == 0x0E00_0010 {
+        let mn = if (w >> 20) & 1 != 0 { "mrc" } else { "mcr" };
+        let ops = format!(
+            "p{}, {}, {}, c{}, c{}, {}",
+            (w >> 8) & 0xF,
+            (w >> 21) & 7,
+            REG[((w >> 12) & 0xF) as usize],
+            (w >> 16) & 0xF,
+            w & 0xF,
+            (w >> 5) & 7
+        );
+        return (4, format!("{mn}{cc}"), ops, String::new());
+    }
+    if (w & 0x0E00_0090) == 0x0000_0090 {
+        return dis_arm_ext(w, cc);
+    }
     match (w >> 25) & 7 {
         0b101 => {
             let link = (w >> 24) & 1 != 0;
@@ -324,5 +340,76 @@ fn dis_arm(img: &Image, names: &HashMap<u32, String>, va: u32) -> (usize, String
             (4, mn, ops, String::new())
         }
         _ => (4, ".word".into(), format!("{w:#010x}"), String::new()),
+    }
+}
+
+/// ARM class 000 with bits 7 and 4 set: multiplies and halfword, signed, and doubleword transfers.
+/// These share the data-processing class bits, so decoding them as ALU operations prints valid-looking nonsense.
+fn dis_arm_ext(w: u32, cc: &str) -> (usize, String, String, String) {
+    let rn = REG[((w >> 16) & 0xF) as usize];
+    let rd = REG[((w >> 12) & 0xF) as usize];
+    let rs = REG[((w >> 8) & 0xF) as usize];
+    let rm = REG[(w & 0xF) as usize];
+    let sh = (w >> 5) & 3;
+    if sh == 0 {
+        let s = if (w >> 20) & 1 != 0 { "s" } else { "" };
+        return match (w >> 21) & 0xF {
+            0 => (4, format!("mul{s}{cc}"), format!("{rn}, {rm}, {rs}"), String::new()),
+            1 => (4, format!("mla{s}{cc}"), format!("{rn}, {rm}, {rs}, {rd}"), String::new()),
+            op @ 4..=7 => {
+                let mn = ["umull", "umlal", "smull", "smlal"][(op - 4) as usize];
+                (4, format!("{mn}{s}{cc}"), format!("{rd}, {rn}, {rm}, {rs}"), String::new())
+            }
+            _ => (4, ".word".into(), format!("{w:#010x}"), String::new()),
+        };
+    }
+    let mn = match ((w >> 20) & 1 != 0, sh) {
+        (true, 1) => "ldrh",
+        (true, 2) => "ldrsb",
+        (true, _) => "ldrsh",
+        (false, 1) => "strh",
+        (false, 2) => "ldrd",
+        (false, _) => "strd",
+    };
+    let sign = if (w >> 23) & 1 != 0 { "" } else { "-" };
+    let off = if (w >> 22) & 1 != 0 {
+        format!("#{sign}{:#x}", ((w >> 4) & 0xF0) | (w & 0xF))
+    } else {
+        format!("{sign}{rm}")
+    };
+    let ops = if (w >> 24) & 1 != 0 {
+        format!("{rd}, [{rn}, {off}]{}", if (w >> 21) & 1 != 0 { "!" } else { "" })
+    } else {
+        format!("{rd}, [{rn}], {off}")
+    };
+    (4, format!("{mn}{cc}"), ops, String::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::dis_range;
+    use crate::re::ReCtx;
+
+    #[test]
+    fn arm_decodes_coprocessor_and_extended_transfers() {
+        let fw = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../data/DP2MV105.bin");
+        let ctx = ReCtx::load(&fw, None).expect("stock DP2MV105.bin");
+        let arm = |va: u32| dis_range(&ctx.img, &ctx.names, va, va + 4, None, true).join("\n");
+        for (va, want) in [
+            (0xA007_4610, "ldrd    r0, [r0, #0x0]"),              // get_tim reads the 64-bit tick
+            (0xA007_4614, "strd    r0, [r4, #0x0]"),
+            (0xA007_3B90, "ldrh    r0, [r0, #0x0]"),              // get_tid
+            (0xA007_3B94, "strh    r0, [r4, #0x0]"),
+            (0xA007_2A04, "ldrsh   r1, [r0, #-0x10]"),            // prcv_mbx existence check
+            (0xA017_2174, "mcr     p15, 0, r0, c2, c0, 1"),       // boot MPU: instruction-cacheable regions
+            (0xA017_21A8, "mcr     p15, 0, r0, c5, c0, 3"),       // boot MPU: instruction access permissions
+            (0xA017_21DC, "mrc     p15, 0, r0, c1, c0, 0"),
+            (0xA007_4600, "mvn     r1, #0x4d"),                   // plain data processing is unchanged
+        ] {
+            let got = arm(va);
+            assert!(got.contains(want), "{va:#010x}: expected `{want}` in `{got}`");
+        }
     }
 }

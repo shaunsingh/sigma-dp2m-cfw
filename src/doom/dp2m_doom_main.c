@@ -202,10 +202,10 @@ static int poll_and_translate_controls(uint32_t sim_arg) {
     if (!g_boot_primed) {
         g_boot_held = m;
         g_boot_primed = 1u;
-    } else if ((m & g_boot_held) == 0u) {
-        g_boot_held = 0u;
     }
-    /* Buttons used to open DOOM do nothing until every inherited hold is released. */
+    /* A button inherited from the screen that opened DOOM does nothing until that button is released.
+     * Each button is tracked on its own so one stuck line cannot keep the others disabled. */
+    g_boot_held &= m;
     m &= ~g_boot_held;
     uint32_t pressed = m & ~g_prev_hw_mask;
     g_prev_hw_mask = m;

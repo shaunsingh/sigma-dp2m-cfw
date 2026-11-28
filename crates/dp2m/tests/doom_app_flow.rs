@@ -15,14 +15,26 @@ const APP_LOAD_VA: u32 = 0xA1CC_0000;
 const SCREEN_LV: u32 = 0x15;
 const SCREEN_DOOM: u32 = 0x21;
 
-fn pkg_bytes() -> &'static [u8] {
-    static PACKAGE: OnceLock<Vec<u8>> = OnceLock::new();
+/// Freshly built package and the address of the built-in engine's `doom_st` (`src/m6m/doom.h`).
+fn pkg() -> &'static (Vec<u8>, u32) {
+    static PACKAGE: OnceLock<(Vec<u8>, u32)> = OnceLock::new();
     PACKAGE.get_or_init(|| {
         common::with_fresh_build(|out, _| {
-            std::fs::read(out.join("DP2MV200.bin")).expect("read freshly built package")
+            let map = std::fs::read_to_string(out.join("m6m/m6m.map")).expect("read M6M payload map");
+            (
+                std::fs::read(out.join("DP2MV200.bin")).expect("read freshly built package"),
+                linked_map_symbol(&map, "doom_st"),
+            )
         })
     })
 }
+
+fn pkg_bytes() -> &'static [u8] {
+    &pkg().0
+}
+
+/// Offset of `ammo` (`int16_t`) in `struct d_state`.
+const DOOM_ST_AMMO_OFF: u32 = 36;
 
 /// Encode `KEY0` (`0xA07FAA1C`) 2-bit held field for key index `k` (`0..12`).
 const fn key0_bit(k: u32) -> u32 {
@@ -64,8 +76,9 @@ const TELEMETRY_TILT_STRAFE_OFF: u32 = 56;
 const TELEMETRY_PEEK_IDX_OFF: u32 = 60;
 const TELEMETRY_ENTRY_SP_OFF: u32 = 76;
 const TELEMETRY_RAW_KEY0_OFF: u32 = 248 + 16;
-const TELEMETRY_RAW_SW28_OFF: u32 = 248 + 20;
 const TELEMETRY_RAW_DIAL_OFF: u32 = 248 + 24;
+const TELEMETRY_RAW_RLS_STATE_OFF: u32 = 276;
+const TELEMETRY_RAW_RLS_PORT_OFF: u32 = 280;
 
 /// Stages of the autonomous `DOOM.BIN` input script, named by the effect each one waits for.
 const AUTO_SCRIPT: [&str; 15] = [
@@ -73,9 +86,9 @@ const AUTO_SCRIPT: [&str; 15] = [
     "applet polls OK released with MODE still held",
     "fresh OK opens the menu",
     "OK release polled",
-    "shutter half-press polled (New Game)",
-    "half-press release polled",
-    "shutter full press polled (episode)",
+    "half-press polled from the release state while the lines still read closed (New Game)",
+    "half-press release and idle release lines polled",
+    "full press polled from the release lines (episode)",
     "full-press release polled",
     "OK confirms the skill and the level starts",
     "UP and a dial detent polled after the melt",
@@ -86,11 +99,19 @@ const AUTO_SCRIPT: [&str; 15] = [
     "QS+DOWN steps the explorer region",
 ];
 
-/// `SW28` (`0xA07FAA28`) as the camera reports it: bit 30 is set at idle and is not a shutter contact,
-/// bit 31 is half-press, and bit 26 is full press.
+/// `SW28` (`0xA07FAA28`) as the camera reports it at idle. It carries no shutter contact; DOOM only
+/// resynchronises its edge snapshot on exit.
 const SW28_IDLE: u32 = 0x4000_0000;
-const SW28_HALF: u32 = SW28_IDLE | 0x8000_0000;
-const SW28_FULL: u32 = SW28_IDLE | 0x0400_0000;
+const SW28_CHANGED: u32 = SW28_IDLE | 0x8400_0000;
+
+/// Release switches: the stock handlers keep `RLS_STATE[0]` (S1) and `[1]` (S2) at 1 while the switch is
+/// closed, and `RLS_PORT` bits 3 (S1) and 2 (S2) read 0 while closed.
+const RLS_STATE: u32 = 0xA07A_F398;
+const RLS_PORT: u32 = 0x9000_1018;
+const RLS_PORT_IDLE: u32 = 0xC;
+const RLS_PORT_HALF: u32 = 0x4;
+const RLS_PORT_FULL: u32 = 0x0;
+const RLS_STATE_HALF: u32 = 0x0100;
 
 fn linked_map_symbol(map: &str, name: &str) -> u32 {
     for line in map.lines() {
@@ -229,15 +250,21 @@ fn builtin_autonomous_loop_controls_psave_mbx_and_shutter_sync() {
             match step {
                 0 => {
                     cpu.w32(0xA07F_AA1C, K0_UP);
-                    cpu.w32(0xA07F_AA28, SW28_HALF);       // Shutter half-press fire
+                    cpu.w32(RLS_PORT, RLS_PORT_HALF);      // Shutter half-press fire
+                    cpu.w8(RLS_STATE, 1);
                 }
                 1 => {
                     cpu.w32(0xA07F_AA1C, K0_QS | K0_LEFT); // QS+Left strafe chord
-                    cpu.w32(0xA07F_AA28, SW28_FULL);       // Shutter full press
+                    cpu.w32(RLS_PORT, RLS_PORT_FULL);      // Shutter full press
+                    cpu.w8(RLS_STATE + 1, 1);
+                    cpu.w32(0xA07F_AA28, SW28_CHANGED);    // SW28 changes while DOOM is open
                     cpu.w8(0xA07A_F38C, 2);                // QS+Dial weapon cycle
                 }
                 2 => {
                     cpu.w32(0xA07F_AA1C, K0_DISP);         // Toggle automap
+                    cpu.w32(RLS_PORT, RLS_PORT_IDLE);      // Shutter released
+                    cpu.w8(RLS_STATE, 0);
+                    cpu.w8(RLS_STATE + 1, 0);
                     cpu.w8(0xA07A_F38C, 3);                // Command dial turn
                 }
                 _ => {
@@ -253,6 +280,9 @@ fn builtin_autonomous_loop_controls_psave_mbx_and_shutter_sync() {
     assert!(cam.cpu().last_error.is_none(), "CPU error: {:?}", cam.cpu().last_error);
     assert_eq!(cam.screen_id(), SCREEN_LV, "PLAY must exit autonomous DOOM back to SCREEN_LV");
     assert_eq!(cam.capture_count(), 0, "Shutter inside DOOM must not trigger photo capture");
+    // No frame held OK, so every round spent was fired through the release switches.
+    let ammo = cam.cpu().r32_be(pkg().1 + DOOM_ST_AMMO_OFF) >> 16;
+    assert!((1..50).contains(&ammo), "release switches must fire the built-in engine: ammo={ammo}");
     assert_eq!(cam.pending_mbx_packets(), 0, "doom_poll_ui_mbx/exit must drain normal MBX 0x11 packets");
     assert_eq!(
         cam.cpu().r32_be(0xA07D_D73C) & 0x4000_0000,
@@ -261,8 +291,8 @@ fn builtin_autonomous_loop_controls_psave_mbx_and_shutter_sync() {
     );
     assert_eq!(
         cam.cpu().r32_be(0xA07F_AB20),
-        SW28_FULL,
-        "Shutter edge snapshot 0xA07FAB20 must sync with 0xA07FAA28 on exit"
+        SW28_CHANGED,
+        "SW28 edge snapshot 0xA07FAB20 must sync with 0xA07FAA28 on exit"
     );
     assert_eq!(
         cam.cpu().r32_be(0xA07F_AB24),
@@ -511,8 +541,9 @@ fn standalone_doom_bin_and_shareware_wad_full_demo_flow() {
     assert_eq!(cam.cpu().r32_be(warp_stack), APP_STACK_GUARD, "private stack guard overwritten");
 
     // C) Autonomous hardware UI-task flow (`tid = 7`) with standard Title-Screen DOOM.BIN + DOOM1.WAD
-    //    plus re-entry check: inherited holds, the camera's idle SW28 level, shutter half/full press and OK
-    //    through Menu -> New Game, dial polling, QS+AEL Tilt-Strafe, HUD modes, Explorer region stepping
+    //    plus re-entry check: inherited holds (OK, MODE and release lines that read closed), shutter
+    //    half-press from the release state, full press from the release lines and OK through
+    //    Menu -> New Game, dial polling, QS+AEL Tilt-Strafe, HUD modes, Explorer region stepping
     //    (`QS+Down`), MBX drain, PSAVE bit release, and zero heap leak.
     cam.mount_sd_file("DOOM.BIN", doom_std.clone());
     cam.set_tilt(28, 64);
@@ -521,8 +552,9 @@ fn standalone_doom_bin_and_shareware_wad_full_demo_flow() {
     cam.cpu_mut().w8(0xA07A_F38C, 1);
     stack_probe_arm(&mut cam);
 
-    // Held by the user while DOOM opens: both must stay inert until they are released.
+    // Active while DOOM opens: OK, MODE and the release lines must all stay inert until they go idle.
     cam.cpu_mut().w32(0xA07F_AA1C, K0_OK | K0_MODE);
+    cam.cpu_mut().w32(RLS_PORT, RLS_PORT_FULL);
     let stage = Rc::new(Cell::new(0usize));
     let stage_cb = Rc::clone(&stage);
 
@@ -531,26 +563,28 @@ fn standalone_doom_bin_and_shareware_wad_full_demo_flow() {
     let auto_insns = cam
         .run_autonomous_open(SCREEN_DOOM, 7, 450_000_000, move |cpu, step| {
             let tel = |off: u32| cpu.r32_be(std_telemetry + off);
-            let polled = |key0: u32, sw28: u32| {
-                tel(TELEMETRY_RAW_KEY0_OFF) == key0 && tel(TELEMETRY_RAW_SW28_OFF) == sw28
+            let polled = |key0: u32, rls_state: u32, rls_port: u32| {
+                tel(TELEMETRY_RAW_KEY0_OFF) == key0
+                    && tel(TELEMETRY_RAW_RLS_STATE_OFF) == rls_state
+                    && tel(TELEMETRY_RAW_RLS_PORT_OFF) == rls_port
             };
             let menu = cpu.r32_be(std_menuactive);
             let hud = tel(TELEMETRY_HUD_MODE_OFF);
             let mut s = stage_cb.get();
             let done = match s {
-                0 => polled(K0_OK | K0_MODE, SW28_IDLE),
-                1 => polled(K0_MODE, SW28_IDLE),
+                0 => polled(K0_OK | K0_MODE, 0, RLS_PORT_FULL),
+                1 => polled(K0_MODE, 0, RLS_PORT_FULL),
                 2 => menu != 0,
-                3 => polled(0, SW28_IDLE),
-                4 => polled(0, SW28_HALF),
-                5 => polled(0, SW28_IDLE),
-                6 => polled(0, SW28_FULL),
-                7 => polled(0, SW28_IDLE),
+                3 => polled(0, 0, RLS_PORT_FULL),
+                4 => polled(0, RLS_STATE_HALF, RLS_PORT_FULL),
+                5 => polled(0, 0, RLS_PORT_IDLE),
+                6 => polled(0, 0, RLS_PORT_FULL),
+                7 => polled(0, 0, RLS_PORT_IDLE),
                 8 => cpu.r32_be(std_gamestate) == 0 && menu == 0,
-                9 => polled(K0_UP, SW28_IDLE) && tel(TELEMETRY_RAW_DIAL_OFF) == 2,
+                9 => polled(K0_UP, 0, RLS_PORT_IDLE) && tel(TELEMETRY_RAW_DIAL_OFF) == 2,
                 10 => tel(TELEMETRY_TILT_STRAFE_OFF) == 1,
                 11 => hud == 1,
-                12 => polled(0, SW28_IDLE),
+                12 => polled(0, 0, RLS_PORT_IDLE),
                 13 => hud == 2,
                 14 => tel(TELEMETRY_PEEK_IDX_OFF) == 1,
                 _ => false,
@@ -558,7 +592,7 @@ fn standalone_doom_bin_and_shareware_wad_full_demo_flow() {
             if done {
                 match s {
                     1 => {
-                        assert_eq!(menu, 0, "inherited OK opened the DOOM menu");
+                        assert_eq!(menu, 0, "inherited OK or release lines opened the DOOM menu");
                         assert_eq!(hud, 0, "inherited MODE cycled the HUD");
                         let sp = tel(TELEMETRY_ENTRY_SP_OFF);
                         assert!((std_stack..std_stack + APP_STACK_LEN as u32).contains(&sp));
@@ -574,23 +608,25 @@ fn standalone_doom_bin_and_shareware_wad_full_demo_flow() {
                 "DOOM input script stalled at stage {s}: {}",
                 AUTO_SCRIPT.get(s).copied().unwrap_or("PLAY exit")
             );
-            let (key0, sw28, dial) = match s {
-                0 => (K0_OK | K0_MODE, SW28_IDLE, 1),
-                1 => (K0_MODE, SW28_IDLE, 1),
-                2 => (K0_OK | K0_MODE, SW28_IDLE, 1),
-                3 | 5 | 7 => (0, SW28_IDLE, 1),
-                4 => (0, SW28_HALF, 1),
-                6 => (0, SW28_FULL, 1),
-                8 => (K0_OK, SW28_IDLE, 1),
-                9 => (K0_UP, SW28_IDLE, 2),
-                10 => (K0_QS | K0_AEL, SW28_IDLE, 2),
-                11 | 13 => (K0_MODE, SW28_IDLE, 2),
-                12 => (0, SW28_IDLE, 2),
-                14 => (K0_QS | K0_DOWN, SW28_IDLE, 2),
-                _ => (K0_PLAY, SW28_IDLE, 2),
+            let (key0, s1_state, rls_port, dial) = match s {
+                0 => (K0_OK | K0_MODE, 0, RLS_PORT_FULL, 1),
+                1 => (K0_MODE, 0, RLS_PORT_FULL, 1),
+                2 => (K0_OK | K0_MODE, 0, RLS_PORT_FULL, 1),
+                3 => (0, 0, RLS_PORT_FULL, 1),
+                4 => (0, 1, RLS_PORT_FULL, 1),
+                5 | 7 => (0, 0, RLS_PORT_IDLE, 1),
+                6 => (0, 0, RLS_PORT_FULL, 1),
+                8 => (K0_OK, 0, RLS_PORT_IDLE, 1),
+                9 => (K0_UP, 0, RLS_PORT_IDLE, 2),
+                10 => (K0_QS | K0_AEL, 0, RLS_PORT_IDLE, 2),
+                11 | 13 => (K0_MODE, 0, RLS_PORT_IDLE, 2),
+                12 => (0, 0, RLS_PORT_IDLE, 2),
+                14 => (K0_QS | K0_DOWN, 0, RLS_PORT_IDLE, 2),
+                _ => (K0_PLAY, 0, RLS_PORT_IDLE, 2),
             };
             cpu.w32(0xA07F_AA1C, key0);
-            cpu.w32(0xA07F_AA28, sw28);
+            cpu.w8(RLS_STATE, s1_state);
+            cpu.w32(RLS_PORT, rls_port);
             cpu.w8(0xA07A_F38C, dial);
         })
         .expect("autonomous DOOM.BIN + DOOM1.WAD run");

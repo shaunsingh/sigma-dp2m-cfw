@@ -309,9 +309,10 @@ fn qs_sel_clamp
     hook HOOK_WORD, 0xA0172170, 0xE3A0000C, 0xE3A00008
     hook HOOK_WORD, 0xA0172190, 0xE3800C06, 0xE3800000
 
-// Shutter scan 0xA01690B6 (`bl 0xA00363AE`): report busy (1) while SCREEN_DOOM (0x21) is active
-// so half/full shutter acts as a pure game fire button without S1 LV unwind or S2 capture.
-fn shutter_guard_hook
+// SW28 change scan 0xA01690B4 (`bl 0xA00363AE` at 0xA01690B6): report busy (1) while SCREEN_DOOM (0x21)
+// is active so the stock handlers for SW28 bits 31/26 (0xA0168F04 / 0xA016901C) stay idle during the game.
+// SW28 is not the shutter: the release switches are handled by the stock release task (0xA001FEB0).
+fn sw28_guard_hook
     push {r4, lr}
     bl   stock_ui_screen_id
     cmp  r0, #0x21
@@ -320,4 +321,4 @@ fn shutter_guard_hook
     pop  {r4, pc}
 1:  bl   stock_busy_check
     pop  {r4, pc}
-    hook HOOK_CALL, 0xA01690B6, shutter_guard_hook, 0xA00363AE
+    hook HOOK_CALL, 0xA01690B6, sw28_guard_hook, 0xA00363AE

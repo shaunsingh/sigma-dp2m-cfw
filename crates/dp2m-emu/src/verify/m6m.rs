@@ -184,9 +184,9 @@ fn check_hooks(b: &Build, r: &mut Report) -> Result<(), String> {
     let mut m = Machine::new(&b.img, 0);
     r.eq(m.call(b.sym("dp2m_ret0"), &[])?, 0, "dp2m_ret0 returns 0");
 
-    // Verify shutter_guard_hook @ 0xA01690B6 blocks S1/S2 on SCREEN_DOOM (0x21) and delegates on LV (0x15)
-    let sg = b.sym("shutter_guard_hook");
-    r.eq(b.img.bl_target(0xA016_90B6), Some(sg), "BL @ 0xA01690B6 -> shutter_guard_hook");
+    // Verify sw28_guard_hook @ 0xA01690B6 reports busy on SCREEN_DOOM (0x21) and delegates on LV (0x15)
+    let sg = b.sym("sw28_guard_hook");
+    r.eq(b.img.bl_target(0xA016_90B6), Some(sg), "BL @ 0xA01690B6 -> sw28_guard_hook");
     let cur_scr = Rc::new(std::cell::Cell::new(0x21u32));
     {
         let cs = cur_scr.clone();
@@ -196,7 +196,7 @@ fn check_hooks(b: &Build, r: &mut Report) -> Result<(), String> {
     let sg_doom = m.call(sg, &[])?;
     cur_scr.set(0x15);
     let sg_lv = m.call(sg, &[])?;
-    r.eq((sg_doom, sg_lv), (1, 0), "shutter_guard_hook returns busy (1) on SCREEN_DOOM and delegates (0) on SCREEN_LV");
+    r.eq((sg_doom, sg_lv), (1, 0), "sw28_guard_hook returns busy (1) on SCREEN_DOOM and delegates (0) on SCREEN_LV");
     Ok(())
 }
 

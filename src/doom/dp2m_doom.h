@@ -20,6 +20,8 @@ enum {
     DP2M_HUD_MODE_COUNT = 3,
 };
 
+#define DP2M_PEEK_REGIONS 7u /* live hex-peek regions in the explorer */
+
 struct dp2m_doom_telemetry {
     char     wad_name[16];
     uint32_t wad_size_bytes;
@@ -43,6 +45,8 @@ struct dp2m_doom_telemetry {
     uint32_t hist_pos;
     char     last_err[96];
     struct dp2m_input_snapshot inp;
+    uint32_t raw_rls_state; /* DP2M_RLS_STATE[0] << 8 | DP2M_RLS_STATE[1] */
+    uint32_t raw_rls_port;  /* REG32(DP2M_RLS_PORT) */
 };
 
 extern const struct dp2m_app_api *g_dp2m_api;

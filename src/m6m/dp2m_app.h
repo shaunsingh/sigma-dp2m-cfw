@@ -31,9 +31,29 @@ enum {
 #define DP2M_BTN_PLAY    (1u << 11)
 #define DP2M_BTN_SHUTTER (1u << 12)
 
-/* Shutter contacts in dp2m_input_snapshot.raw_sw28: bit 31 = half-press, bit 26 = full press.
- * Bit 30 follows an unrelated line that reads 1 at idle on the camera, so it is not a contact. */
-#define DP2M_SW28_SHUTTER 0x84000000u
+/* Shutter release switches, from the stock release task (0xA001FEB0). It arms interrupts 0x27 (S1,
+ * half-press) and 0x28 (S2, full press); their handlers (0xA001FB70/0xA001FB94, 0xA001FBF0/0xA001FC0E)
+ * hold DP2M_RLS_STATE[0] (S1) and [1] (S2) at 1 while the switch is closed. The task picks the edge
+ * to arm from bits 3 (S1) and 2 (S2) of DP2M_RLS_PORT, which read 0 while the switch is closed. */
+#define DP2M_RLS_STATE   0xA07AF398u
+#define DP2M_RLS_PORT    0x90001018u
+#define DP2M_RLS_PORT_S1 0x8u
+#define DP2M_RLS_PORT_S2 0x4u
+
+/* dp2m_release_sources() bits: two independent readings of "S1 or S2 is closed" */
+#define DP2M_RLS_SRC_STATE 1u
+#define DP2M_RLS_SRC_LINES 2u
+
+static inline uint32_t dp2m_release_sources(void) {
+    const volatile uint8_t *st = (const volatile uint8_t *)(uintptr_t)DP2M_RLS_STATE;
+    uint32_t lines = *(const volatile uint32_t *)(uintptr_t)DP2M_RLS_PORT & (DP2M_RLS_PORT_S1 | DP2M_RLS_PORT_S2);
+    uint32_t src = 0u;
+    if ((st[0] | st[1]) != 0u)
+        src |= DP2M_RLS_SRC_STATE;
+    if (lines != (DP2M_RLS_PORT_S1 | DP2M_RLS_PORT_S2))
+        src |= DP2M_RLS_SRC_LINES;
+    return src;
+}
 
 struct dp2m_app_hdr {
     uint32_t magic;      /* DP2M_APP_MAGIC */
@@ -52,7 +72,7 @@ struct dp2m_input_snapshot {
     int32_t  accel_x;    /* signed body roll X */
     int32_t  accel_y;    /* signed body pitch Y */
     uint32_t raw_key0;   /* REG32(0xA07FAA1C) */
-    uint32_t raw_sw28;   /* REG32(0xA07FAA28) */
+    uint32_t raw_sw28;   /* REG32(0xA07FAA28): detect-line word, not the shutter */
     uint32_t raw_dial;   /* REG8(0xA07AF38C) */
 };
 

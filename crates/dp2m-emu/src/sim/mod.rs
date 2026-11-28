@@ -18,7 +18,7 @@ use crate::stock::{
     MN_CM_END, MN_CM_SITE, NV_BLOCK, NV_CONTRAST, NV_CUR, NV_DEFAULTS, NV_DISPLAY_MODE, NV_EXPO,
     NV_FLUSH, NV_ISO_STEP, NV_LEN, NV_LOAD, NV_LUT_ENABLE, NV_LUT_SLOT, NV_SAT, NV_SHARP, NV_WB,
     OSD, PB_CM_PARSE_END, PB_CM_PARSE_START, PB_CUR_INDEX, PB_VBUF_DEFAULT_VA, PB_VBUFS,
-    SET_CARD_READY, SET_CM, SET_GRID, UI_DISPATCH, UI_INIT_A, UI_INIT_B, UI_SCREEN_ID,
+    RELEASE_PORT, SET_CARD_READY, SET_CM, SET_GRID, UI_DISPATCH, UI_INIT_A, UI_INIT_B, UI_SCREEN_ID,
 };
 mod hooks;
 mod isp;
@@ -316,6 +316,8 @@ impl Camera {
         self.call_thumb(AE_ENABLE_LV_METER, &[1, 1]);
         self.cpu.w8(FLASH_STATE, 1);
         self.call_thumb(SET_CARD_READY, &[2]);
+        // Shutter release lines (bits 3 and 2) read 1 while the switches are open
+        self.cpu.w32(RELEASE_PORT, 0x0000_000C);
 
         self.refresh_lv_isp_and_ycap();
         {

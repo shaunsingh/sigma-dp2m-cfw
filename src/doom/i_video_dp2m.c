@@ -244,6 +244,18 @@ static int fb_draw_str(uint16_t *fb, int x, int y, const char *s, uint16_t col) 
     return x;
 }
 
+/* Draws "LABEL : value" telemetry rows: the first `label_len` characters in the label colour */
+static void fb_draw_kv(uint16_t *fb, int x, int y, const char *s, size_t label_len, uint16_t val_col) {
+    char label[12];
+    size_t n = strlen(s);
+    if (label_len > n) label_len = n;
+    if (label_len > sizeof(label) - 1u) label_len = sizeof(label) - 1u;
+    memcpy(label, s, label_len);
+    label[label_len] = '\0';
+    x = fb_draw_str(fb, x, y, label, COL_BLUE);
+    fb_draw_str(fb, x, y, s + label_len, val_col);
+}
+
 static int fb_draw_pill(uint16_t *fb, int x, int y, const char *label, int active, uint16_t on_bg) {
     int len = (int)strlen(label);
     int pw = len * 6 + 5;
@@ -258,8 +270,8 @@ void dp2m_draw_boot_progress(const char *stage, uint32_t done, uint32_t total) {
     if (!g_dp2m_api || !g_dp2m_api->argb_fb || !g_dp2m_api->present_argb) return;
     uint16_t *fb = g_dp2m_api->argb_fb;
     fb_fill_rect(fb, 0, 0, LCD_W, LCD_H, COL_BG_DARK);
-    fb_draw_box(fb, 60, 168, 520, 144, COL_ACCENT, COL_BG_BAR);
-    fb_fill_rect(fb, 61, 169, 518, 22, COL_HDR_TR);
+    fb_fill_rect(fb, 60, 168, 520, 144, COL_BG_BAR);
+    fb_fill_rect(fb, 60, 168, 520, 23, COL_HDR_TR);
 
     fb_draw_str(fb, 76, 177, "SIGMA DP2 MERRILL // DOOM.BIN STANDALONE ENGINE", COL_ACCENT);
 
@@ -387,8 +399,7 @@ static void draw_dashboard_bars(uint16_t *fb) {
     uint32_t tick_lo = rd_reg32(0xA07F378Cu);
 
     /* Top 40px bar (y = 0..39) */
-    fb_fill_rect(fb, 0, 0, LCD_W, 39, COL_BG_BAR);
-    fb_fill_rect(fb, 0, 39, LCD_W, 1, COL_ACCENT);
+    fb_fill_rect(fb, 0, 0, LCD_W, 40, COL_BG_BAR);
 
     char line[112];
     fb_draw_str(fb, 6, 4, "SIGMA DP2M // ARM946E-S BE", COL_ACCENT);
@@ -397,7 +408,7 @@ static void draw_dashboard_bars(uint16_t *fb) {
     fb_draw_str(fb, 176, 4, line, COL_BLUE);
     snprintf(line, sizeof(line), "FPS:%2u (%2uMS) TIC:%5u",
              (unsigned)g_doom_tel.fps, (unsigned)g_doom_tel.frame_ms, (unsigned)gametic);
-    fb_draw_str(fb, 492, 4, line, COL_GREEN);
+    fb_draw_str(fb, 492, 4, line, COL_CYAN);
 
     snprintf(line, sizeof(line), "PC:%08X SP:%08X CPSR:%08X  TICK:%08X/%08X  PSAVE:%08X",
              (unsigned)pc_here, (unsigned)sp_now, (unsigned)cpsr,
@@ -416,25 +427,27 @@ static void draw_dashboard_bars(uint16_t *fb) {
     fb_draw_str(fb, 6, 28, line, COL_MUTED);
 
     /* Bottom 40px bar (y = 440..479) */
-    fb_fill_rect(fb, 0, 440, LCD_W, 1, COL_ACCENT);
-    fb_fill_rect(fb, 0, 441, LCD_W, 39, COL_BG_BAR);
+    fb_fill_rect(fb, 0, 440, LCD_W, 40, COL_BG_BAR);
 
     uint32_t m = g_doom_tel.inp.held_mask;
     int x = 6;
-    x = fb_draw_pill(fb, x, 444, "UP",   (m & DP2M_BTN_UP) != 0,      COL_GREEN);
-    x = fb_draw_pill(fb, x, 444, "DN",   (m & DP2M_BTN_DOWN) != 0,    COL_GREEN);
-    x = fb_draw_pill(fb, x, 444, "LF",   (m & DP2M_BTN_LEFT) != 0,    COL_GREEN);
-    x = fb_draw_pill(fb, x, 444, "RT",   (m & DP2M_BTN_RIGHT) != 0,   COL_GREEN);
-    x = fb_draw_pill(fb, x, 444, "SHUT", (m & DP2M_BTN_SHUTTER) != 0, COL_RED_LIT);
-    x = fb_draw_pill(fb, x, 444, "OK",   (m & DP2M_BTN_OK) != 0,      COL_GREEN);
-    x = fb_draw_pill(fb, x, 444, "AEL",  (m & DP2M_BTN_AEL) != 0,     COL_GREEN);
+    x = fb_draw_pill(fb, x, 444, "UP",   (m & DP2M_BTN_UP) != 0,      COL_BLUE);
+    x = fb_draw_pill(fb, x, 444, "DN",   (m & DP2M_BTN_DOWN) != 0,    COL_BLUE);
+    x = fb_draw_pill(fb, x, 444, "LF",   (m & DP2M_BTN_LEFT) != 0,    COL_BLUE);
+    x = fb_draw_pill(fb, x, 444, "RT",   (m & DP2M_BTN_RIGHT) != 0,   COL_BLUE);
+    x = fb_draw_pill(fb, x, 444, "SHUT", (m & DP2M_BTN_SHUTTER) != 0, COL_ACCENT);
+    x = fb_draw_pill(fb, x, 444, "OK",   (m & DP2M_BTN_OK) != 0,      COL_ACCENT);
+    x = fb_draw_pill(fb, x, 444, "AEL",  (m & DP2M_BTN_AEL) != 0,     COL_CYAN);
     x = fb_draw_pill(fb, x, 444, "QS",   (m & DP2M_BTN_QS) != 0,      COL_PURPLE);
     x = fb_draw_pill(fb, x, 444, "DISP", (m & DP2M_BTN_DISP) != 0,    COL_CYAN);
     x = fb_draw_pill(fb, x, 444, "MODE", (m & DP2M_BTN_MODE) != 0,    COL_CYAN);
 
-    snprintf(line, sizeof(line), "K0:%08X SW:%08X DL:%u TILT:%+3d/%+3d",
+    /* S1/S2 are the stock release-state bytes, P6 the low byte of the port that carries both lines */
+    snprintf(line, sizeof(line), "K0:%08X S1:%u S2:%u P6:%02X DL:%u TILT:%+3d/%+3d",
              (unsigned)g_doom_tel.inp.raw_key0,
-             (unsigned)g_doom_tel.inp.raw_sw28,
+             (unsigned)((g_doom_tel.raw_rls_state >> 8) & 0xFFu),
+             (unsigned)(g_doom_tel.raw_rls_state & 0xFFu),
+             (unsigned)(g_doom_tel.raw_rls_port & 0xFFu),
              (unsigned)g_doom_tel.inp.raw_dial,
              (int)g_doom_tel.inp.accel_x,
              (int)g_doom_tel.inp.accel_y);
@@ -467,9 +480,10 @@ struct peek_region {
     const char *title;
 };
 
-/* All 6 live hex-peek regions reside in hardware-proven SDRAM (zero MMIO read side-effects) */
-static const struct peek_region g_peek_regions[6] = {
-    { 0xA07FAA00u, "KEYPAD / SHUTTER / SWITCH MATRIX" },
+/* Every live hex-peek region is SDRAM, so reading it has no MMIO side effects */
+static const struct peek_region g_peek_regions[DP2M_PEEK_REGIONS] = {
+    { 0xA07AF380u, "COMMAND DIAL / RELEASE SWITCH STATE" },
+    { 0xA07FAA00u, "KEYPAD / SW28 SWITCH WORDS" },
     { 0xA07DD700u, "UI SCREEN / ARGB DIRTY / PSAVE STATE" },
     { 0xA0939684u, "ACTIVE CAMERA NVRAM MIRROR" },
     { 0xA1C00000u, "CFW PAYLOAD BASE & LV PLANES" },
@@ -478,8 +492,8 @@ static const struct peek_region g_peek_regions[6] = {
 };
 
 static void draw_explorer_overlay(uint16_t *fb) {
-    fb_draw_box(fb, 20, 50, 600, 378, COL_ACCENT, COL_PANEL_TR);
-    fb_fill_rect(fb, 21, 51, 598, 18, COL_HDR_TR);
+    fb_fill_rect(fb, 20, 50, 600, 378, COL_PANEL_TR);
+    fb_fill_rect(fb, 20, 50, 600, 19, COL_HDR_TR);
     fb_draw_str(fb, 30, 56,
                 "DP2M LIVE HARDWARE & MEMORY EXPLORER  [QS+UP/DN: REGION | MODE: CLOSE]",
                 COL_ACCENT);
@@ -497,7 +511,7 @@ static void draw_explorer_overlay(uint16_t *fb) {
              "CPU   : ARM946E-S BE (%s IRQ:%s FIQ:%s)  CPSR:0x%08X  SP:0x%08X  ENTRY:0x%08X",
              cpu_mode, (cpsr & 0x80u) ? "MASK" : "EN", (cpsr & 0x40u) ? "MASK" : "EN",
              (unsigned)cpsr, (unsigned)rd_sp(), (unsigned)g_doom_tel.entry_sp);
-    fb_draw_str(fb, 30, y, line, COL_WHITE); y += 12;
+    fb_draw_kv(fb, 30, y, line, 8u, COL_WHITE); y += 12;
 
     snprintf(line, sizeof(line),
              "ARENA : LOAD 0xA1CC0000..0x%08X (%u KB)  BSS..0x%08X (%u KB)  LIMIT 0xA1E00000",
@@ -505,7 +519,7 @@ static void draw_explorer_overlay(uint16_t *fb) {
              (unsigned)(((uintptr_t)__image_end - 0xA1CC0000u) >> 10),
              (unsigned)(uintptr_t)__bss_end,
              (unsigned)(((uintptr_t)__bss_end - (uintptr_t)__image_end) >> 10));
-    fb_draw_str(fb, 30, y, line, COL_BLUE); y += 12;
+    fb_draw_kv(fb, 30, y, line, 8u, COL_LIGHT); y += 12;
 
     snprintf(line, sizeof(line),
              "CLOCK : 0x9000010C=0x%08X  0x90000110=0x%08X  TICK=%08X:%08X  OS_MS=%u",
@@ -514,7 +528,7 @@ static void draw_explorer_overlay(uint16_t *fb) {
              (unsigned)rd_reg32(0xA07F3788u),
              (unsigned)rd_reg32(0xA07F378Cu),
              (unsigned)(g_dp2m_api->get_ms ? g_dp2m_api->get_ms() : 0u));
-    fb_draw_str(fb, 30, y, line, COL_LIGHT); y += 12;
+    fb_draw_kv(fb, 30, y, line, 8u, COL_LIGHT); y += 12;
 
     snprintf(line, sizeof(line),
              "CAM   : SCR=0x%02X  PSAVE=0x%08X  CM=%u  ISO=%u  EXPO=%u  ENG=%u  EXEC=%s",
@@ -525,18 +539,19 @@ static void draw_explorer_overlay(uint16_t *fb) {
              (unsigned)rd_reg8(0xA09396ACu),
              (unsigned)rd_reg8(0xA0939689u),
              g_dp2m_api->is_autonomous ? "HW_UI_TASK" : "SIM_EVENT");
-    fb_draw_str(fb, 30, y, line, COL_LIGHT); y += 12;
+    fb_draw_kv(fb, 30, y, line, 8u, COL_LIGHT); y += 12;
 
     snprintf(line, sizeof(line),
-             "INPUT : KEY0=0x%08X  SW28=0x%08X  SNAP=0x%08X  DIAL=%u(%+d)  ACCEL=%+d/%+d",
+             "INPUT : KEY0=0x%08X  SW28=0x%08X  RLS=%04X  P6=0x%08X  DIAL=%u(%+d)  ACCEL=%+d/%+d",
              (unsigned)g_doom_tel.inp.raw_key0,
              (unsigned)g_doom_tel.inp.raw_sw28,
-             (unsigned)rd_reg32(0xA07FAB20u),
+             (unsigned)g_doom_tel.raw_rls_state,
+             (unsigned)g_doom_tel.raw_rls_port,
              (unsigned)g_doom_tel.inp.raw_dial,
              (int)g_doom_tel.inp.dial_delta,
              (int)g_doom_tel.inp.accel_x,
              (int)g_doom_tel.inp.accel_y);
-    fb_draw_str(fb, 30, y, line, COL_GREEN); y += 12;
+    fb_draw_kv(fb, 30, y, line, 8u, COL_CYAN); y += 12;
 
     snprintf(line, sizeof(line),
              "MEM   : ZONE=%u KB  HEAP=%u KB (PEAK %u KB, %u BLKS)  WAD=%s (%s, OFF=0x%X)",
@@ -547,17 +562,17 @@ static void draw_explorer_overlay(uint16_t *fb) {
              g_doom_tel.wad_name,
              g_doom_tel.wad_preloaded ? "SDRAM" : "STREAM",
              (unsigned)g_doom_tel.wad_last_off);
-    fb_draw_str(fb, 30, y, line, COL_PURPLE); y += 16;
+    fb_draw_kv(fb, 30, y, line, 8u, COL_LIGHT); y += 16;
 
     /* Divider + Live 128-byte Hex/ASCII Memory Inspector (8 rows x 16 bytes) */
     fb_fill_rect(fb, 30, y, 580, 1, COL_GRID); y += 6;
-    uint32_t ridx = g_doom_tel.peek_idx % 6u;
+    uint32_t ridx = g_doom_tel.peek_idx % DP2M_PEEK_REGIONS;
     uint32_t base = g_peek_regions[ridx].base_va;
     snprintf(line, sizeof(line),
-             "LIVE HEX PEEK [%u/6]: 0x%08X .. 0x%08X  --  %s",
-             (unsigned)(ridx + 1u), (unsigned)base, (unsigned)(base + 0x7Fu),
+             "LIVE HEX PEEK [%u/%u]: 0x%08X .. 0x%08X  --  %s",
+             (unsigned)(ridx + 1u), (unsigned)DP2M_PEEK_REGIONS, (unsigned)base, (unsigned)(base + 0x7Fu),
              g_peek_regions[ridx].title);
-    fb_draw_str(fb, 30, y, line, COL_CYAN); y += 14;
+    fb_draw_str(fb, 30, y, line, COL_ACCENT); y += 14;
 
     for (uint32_t row = 0; row < 8u; row++, y += 12) {
         uint32_t va = base + row * 16u;
@@ -577,10 +592,12 @@ static void draw_explorer_overlay(uint16_t *fb) {
             asc[b] = (bytes[b] >= 0x20u && bytes[b] <= 0x7Eu) ? (char)bytes[b] : '.';
         }
         asc[16] = '\0';
+        snprintf(line, sizeof(line), "%08X:", (unsigned)va);
+        int hx = fb_draw_str(fb, 30, y, line, COL_BLUE);
         snprintf(line, sizeof(line),
-                 "%08X: %08X %08X %08X %08X  |%s|",
-                 (unsigned)va, (unsigned)w0, (unsigned)w1, (unsigned)w2, (unsigned)w3, asc);
-        fb_draw_str(fb, 30, y, line, (row & 1u) ? COL_LIGHT : COL_WHITE);
+                 " %08X %08X %08X %08X  |%s|",
+                 (unsigned)w0, (unsigned)w1, (unsigned)w2, (unsigned)w3, asc);
+        fb_draw_str(fb, hx, y, line, (row & 1u) ? COL_LIGHT : COL_WHITE);
     }
 
     y += 6;
@@ -592,7 +609,7 @@ static void draw_explorer_overlay(uint16_t *fb) {
              (int)gamestate, gameepisode, gamemap, health, armor,
              players[consoleplayer].killcount, totalkills,
              players[consoleplayer].secretcount, totalsecret);
-    fb_draw_str(fb, 30, y, line, COL_GREEN);
+    fb_draw_kv(fb, 30, y, line, 8u, COL_PURPLE);
 }
 
 void dp2m_video_present_frame(void) {
@@ -605,7 +622,7 @@ void dp2m_video_present_frame(void) {
         char badge[16];
         snprintf(badge, sizeof(badge), "FPS:%2u", (unsigned)g_doom_tel.fps);
         fb_fill_rect(fb, 594, 4, 42, 11, COL_HDR_TR);
-        fb_draw_str(fb, 597, 6, badge, COL_GREEN);
+        fb_draw_str(fb, 597, 6, badge, COL_CYAN);
     } else {
         blit_640x400_centered(I_VideoBuffer, fb);
         draw_dashboard_bars(fb);

@@ -117,6 +117,11 @@ static const uint8_t g_vk_doom[VK_COUNT] = {
     KEY_RSHIFT,
 };
 
+/* Private held-mask bits above DP2M_BTN_*: one per shutter reading */
+#define HW_SHUT_STATE (1u << 29)
+#define HW_SHUT_LINES (1u << 30)
+#define HW_SHUT_SIM   (1u << 31)
+
 static uint32_t g_prev_vk_mask = 0u;
 static uint32_t g_prev_hw_mask = 0xFFFFFFFFu;
 static uint32_t g_boot_held = 0u;
@@ -192,19 +197,28 @@ static void apply_sim_arg(uint32_t arg, struct dp2m_input_snapshot *inp) {
 static int poll_and_translate_controls(uint32_t sim_arg) {
     struct dp2m_input_snapshot inp;
     memset(&inp, 0, sizeof(inp));
+    uint32_t rls = 0u;
     if (g_dp2m_api->poll_input) {
         g_dp2m_api->poll_input(&inp);
-        /* Decode the shutter from the raw word instead of trusting the firmware's bit: firmware built
-         * with bit 30 in its mask reports the shutter as held forever, which mutes it for the session. */
+        /* Read the release switches here instead of trusting the firmware's bit: firmware that
+         * derives the shutter from SW28 never reports it. */
+        rls = dp2m_release_sources();
         inp.held_mask &= ~DP2M_BTN_SHUTTER;
-        if (inp.raw_sw28 & DP2M_SW28_SHUTTER)
+        if (rls != 0u)
             inp.held_mask |= DP2M_BTN_SHUTTER;
+        const volatile uint8_t *st = (const volatile uint8_t *)(uintptr_t)DP2M_RLS_STATE;
+        g_doom_tel.raw_rls_state = ((uint32_t)st[0] << 8) | st[1];
+        g_doom_tel.raw_rls_port = *(const volatile uint32_t *)(uintptr_t)DP2M_RLS_PORT;
     }
     if (!g_dp2m_api->is_autonomous && sim_arg != 0u)
         apply_sim_arg(sim_arg, &inp);
     g_doom_tel.inp = inp;
 
-    uint32_t m = inp.held_mask;
+    /* Each shutter reading is latched on its own bit so one that never idles cannot mute the other */
+    uint32_t m = inp.held_mask & ~DP2M_BTN_SHUTTER;
+    if (rls & DP2M_RLS_SRC_STATE) m |= HW_SHUT_STATE;
+    if (rls & DP2M_RLS_SRC_LINES) m |= HW_SHUT_LINES;
+    if (!g_dp2m_api->is_autonomous && sim_arg == 0xFEu) m |= HW_SHUT_SIM;
     if (!g_boot_primed) {
         g_boot_held = m;
         g_boot_primed = 1u;
@@ -213,6 +227,8 @@ static int poll_and_translate_controls(uint32_t sim_arg) {
      * Each button is tracked on its own so one stuck line cannot keep the others disabled. */
     g_boot_held &= m;
     m &= ~g_boot_held;
+    if (m & (HW_SHUT_STATE | HW_SHUT_LINES | HW_SHUT_SIM))
+        m |= DP2M_BTN_SHUTTER;
     uint32_t pressed = m & ~g_prev_hw_mask;
     g_prev_hw_mask = m;
 
@@ -238,9 +254,9 @@ static int poll_and_translate_controls(uint32_t sim_arg) {
         if (m & DP2M_BTN_RIGHT) vk |= (1u << VK_STRAFE_R);
         if (g_doom_tel.hud_mode == DP2M_HUD_EXPLORER) {
             if (pressed & DP2M_BTN_UP)
-                g_doom_tel.peek_idx = (g_doom_tel.peek_idx + 5u) % 6u;
+                g_doom_tel.peek_idx = (g_doom_tel.peek_idx + DP2M_PEEK_REGIONS - 1u) % DP2M_PEEK_REGIONS;
             if (pressed & DP2M_BTN_DOWN)
-                g_doom_tel.peek_idx = (g_doom_tel.peek_idx + 1u) % 6u;
+                g_doom_tel.peek_idx = (g_doom_tel.peek_idx + 1u) % DP2M_PEEK_REGIONS;
         } else {
             if (m & DP2M_BTN_UP)   { vk |= (1u << VK_UP) | (1u << VK_RUN); }
             if (m & DP2M_BTN_DOWN) { vk |= (1u << VK_DOWN) | (1u << VK_RUN); }

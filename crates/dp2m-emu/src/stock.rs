@@ -54,6 +54,8 @@ pub const MENU_ISO: u32 = 0x01;
 pub const MENU_ISO_MIN: u32 = 0xD2;
 pub const AE_COMMITTED_ISO: u32 = 0xA093_9A51;
 pub const FLASH_STATE: u32 = 0xA07A_F360;
+/// GPIO word whose bits 3 (S1) and 2 (S2) read 0 while the shutter release switch is closed.
+pub const RELEASE_PORT: u32 = 0x9000_1018;
 pub const NV_EXPO: u32 = 0xA093_96AC;
 pub const NV_CUR: u32 = 0xA093_96C0;
 pub const NV_LOAD: u32 = 0xA004_0110;

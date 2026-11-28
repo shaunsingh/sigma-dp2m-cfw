@@ -838,6 +838,7 @@ static struct {
     volatile uint32_t active_magic;
     dp2m_app_entry_fn entry;
     uint8_t dial_prev;
+    uint8_t rls_inherit; /* DP2M_RLS_SRC_* readings still held from before DOOM opened */
 } app_rt;
 
 static void app_present_argb(void) {
@@ -891,12 +892,15 @@ static int32_t app_mdf_read(int32_t fd, void *buf, uint32_t len, uint32_t *got) 
 
 __attribute__((noinline, section(".doom.hud")))
 static void app_poll_input(struct dp2m_input_snapshot *out) {
-    /* Stock polarity (0xA016D88C..0xA016DB64, 0xA016E47A; SW28 is assembled by 0xA016DD94):
+    /* Stock polarity (0xA016D88C..0xA016DB64, 0xA016E47A):
      * - 0xA07FAA1C (KEY0): 0x00000000 when idle; 2-bit slot (k0 >> (30 - 2*k)) & 3
      *   is 1 on press and 3 on auto-repeat for k = 0..11 (OK,UP,DN,LF,RT,MENU,DISP,AEL,QS,MODE,DEL,PLAY).
-     * - 0xA07FAA28 (SW28): bit 31 = half-press (S1 only), bit 26 = full press (S1 and S2). Bit 30 mirrors an
-     *   unrelated active-low line and reads 1 at idle on camera (probe V2: SW28 = 0x40000000), so it must
-     *   stay out of the shutter mask. */
+     * - 0xA07FAA28 (SW28, built by 0xA016DD94) carries no shutter contact: bits 31/26 follow GPIO pins
+     *   0x44/0x43 and drive the stock handlers 0xA0168F04/0xA016901C, bit 30 follows pin 0x42 and
+     *   bits 19..25 copy the level byte at 0xA07DD74C. It is reported raw for the HUD only.
+     * - The shutter comes from the release switches (dp2m_release_sources). A reading that is already
+     *   active when DOOM opens stays ignored until it clears, so a line that never idles cannot hold
+     *   the fire button down. */
     uint32_t k0 = REG32(0xA07FAA1Cu);
     uint32_t sw = REG32(0xA07FAA28u);
     uint32_t dial = REG8(0xA07AF38Cu);
@@ -905,7 +909,9 @@ static void app_poll_input(struct dp2m_input_snapshot *out) {
         if (((k0 >> (30u - 2u * k)) & 3u) != 0u)
             mask |= (1u << k);
     }
-    if ((sw & DP2M_SW28_SHUTTER) != 0u)
+    uint32_t rls = dp2m_release_sources();
+    app_rt.rls_inherit &= (uint8_t)rls;
+    if ((rls & ~(uint32_t)app_rt.rls_inherit) != 0u)
         mask |= DP2M_BTN_SHUTTER;
 
     int32_t d_delta = 0;
@@ -1006,6 +1012,7 @@ static int32_t doom_try_load_app(uint32_t autonomous) {
     hw_icache_inv_all();
 
     app_rt.dial_prev = REG8(0xA07AF38Cu);
+    app_rt.rls_inherit = (uint8_t)dp2m_release_sources();
     dp2m_app_entry_fn entry = (dp2m_app_entry_fn)(uintptr_t)hdr.entry_va;
     const struct dp2m_app_api *api = app_build_api(autonomous);
     if (entry(api, DP2M_APP_INIT, 0u) != 0) {
@@ -1060,7 +1067,7 @@ static int doom_poll_ui_mbx(void **sys_msg, int app_active) {
 __attribute__((noinline, section(".doom.hud")))
 static void doom_hw_exit_to_lv(void *sys_msg) {
     stock_psave_release(PSAVE_DOOM_MASK);
-    /* Sync shutter & key edge snapshots so held buttons on exit never fire spurious LV edges */
+    /* Sync the SW28 & key edge snapshots so changes made during DOOM never replay as LV edges */
     REG32(0xA07FAB20u) = REG32(0xA07FAA28u);
     REG32(0xA07FAB24u) = REG32(0xA07FAA1Cu);
     /* Drain any final queued UI messages accumulated in MBX 0x11 back to MPF 0x10 */
@@ -1087,6 +1094,7 @@ __attribute__((noinline, section(".doom.hud")))
 static void doom_run_builtin_autonomous(void **sys_msg) {
     doom_ensure_init();
     app_rt.dial_prev = REG8(0xA07AF38Cu);
+    app_rt.rls_inherit = (uint8_t)dp2m_release_sources();
     uint32_t prev_held = 0xFFFFFFFFu;
     for (;;) {
         uint32_t t0 = app_get_ms();

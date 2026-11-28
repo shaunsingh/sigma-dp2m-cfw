@@ -1,6 +1,6 @@
 # Build metrics & benchmarks
 
-Except for [the on-camera probe results](hardware-probe.md), performance numbers below were measured in the built-in ARM9 and FR80 emulators (`dp2m-emu`). Build `a441ed3` was installed on a DP2 Merrill and used by hand (film captures with the expected MakerNote tags, menus, live-view looks, DOOM). Probe V2 (`42cf7ec`) subsequently measured synthetic memory, display, CPU, input, and write-pattern operations on hardware; end-to-end application frame rates remain unmeasured.
+Except for [the on-camera probe results](hardware-probe.md), performance numbers below were measured in the built-in ARM9 and FR80 emulators (`dp2m-emu`). Build `a441ed3` was installed on a DP2 Merrill and used by hand (film captures with the expected MakerNote tags, menus, live-view looks, DOOM). Probes V2 (`42cf7ec`) and V3 (`dd67465`) subsequently measured synthetic memory, display, CPU, input, write-pattern, and direct portal-upscale operations on hardware; end-to-end application frame rates remain unmeasured.
 
 ## 1. Hardware & build invariants
 
@@ -55,7 +55,7 @@ Default config (`dp2m.example.fnl`: `24/36` films, `11/11` grids, DOOM enabled):
 | `black` | `852,888` | `410,026` | `-51.9%` |
 | `fine-detail` | — | `435,718` | — |
 
-  These are emulator instruction counts, not measured hardware frame times. The dual threshold is the compile-time `ZEBRA_THRESH=242`, not a runtime argument. Two additional full-frame oracles cover all `65,536` ordered adjacent-luma pairs, including every shadow/highlight boundary and SWAR lane carry/borrow combination. Visual and end-to-end camera A/B remains pending; the [V2 write-pattern probe](hardware-probe.md#framebuffer-write-patterns) found no severe dense-burst store penalty on hardware.
+  These are emulator instruction counts, not measured hardware frame times. The dual threshold is the compile-time `ZEBRA_THRESH=242`, not a runtime argument. Two additional full-frame oracles cover all `65,536` ordered adjacent-luma pairs, including every shadow/highlight boundary and SWAR lane carry/borrow combination. Visual and end-to-end camera A/B remains pending; the [V2/V3 write-pattern probes](hardware-probe.md#framebuffer-write-patterns) found no severe dense-burst store penalty on hardware.
 
 - **False Color, direct draw (`m6m_bench`)**: nonzero blocks now use four 16-byte burst stores (two per FB row) instead of eight compare/conditional-store pairs. The all-zero LUT block skip is unchanged; writes of zero-valued words are exact because the caller DMA-zeroes the framebuffer. Independent poisoned full-frame oracles cover all 256 luma values, same-zone/nonuniform-luma blocks, adversarial mixed patterns, one-nonzero-sample blocks, and all-midtone preservation.
 
@@ -64,10 +64,10 @@ Default config (`dp2m.example.fnl`: `24/36` films, `11/11` grids, DOOM enabled):
 | `default` | `316,856` | `252,896` | `-20.2%` |
 | `checker` / `white` / `black` | `443,512` | `273,912` | `-38.2%` |
 
-  The path removes `80 B` from `DOOM_D`. Sparse nonzero blocks write 64 B rather than only their nonzero words. The [V2 write-pattern probe](hardware-probe.md#framebuffer-write-patterns) found no severe hardware penalty from this traffic; visual and end-to-end camera A/B remains pending, and emulated instruction counts are not frame times.
+  The path removes `80 B` from `DOOM_D`. Sparse nonzero blocks write 64 B rather than only their nonzero words. The [V2/V3 write-pattern probes](hardware-probe.md#framebuffer-write-patterns) found no severe hardware penalty from this traffic; visual and end-to-end camera A/B remains pending, and emulated instruction counts are not frame times.
 
 - **Label renderer (`labels.c`, `m6m_bench`)**: `41` emulated insns cached (`O(1)` `(class, sid)` table), `271,272..3,108,375` cold across classes 1..6. Cold renders clean `22..242` tile cache lines instead of SWI 10's `512`, with no whole-cache invalidate. Cache CP15 cost is not modeled: the extra `9` cold emulated instructions are address setup, not a hardware timing measurement. On-camera visual and latency A/B remain pending.
-- **Custom DOOM applet (`SCREEN_DOOM`, `0x21`)**: custom 2.5D sector/portal renderer with a hand-built 13-sector map (not a port of id DOOM); `320×240` 8bpp → `640×480` `RGBA4444` 2×2 upscale. `camera_flow` enforces `< 2.5M` emulated ARM9 insns/tick and clean exit back to `SCREEN_LV` (`0x15`). [Probe V2](hardware-probe.md#input-and-frame-pacing) confirmed that hardware supplies no autonomous UI tick, so the portal currently advances on input rather than autonomously; real frame pacing remains to be implemented.
+- **Custom DOOM applet (`SCREEN_DOOM`, `0x21`)**: custom 2.5D sector/portal renderer with a hand-built 13-sector map (not a port of id DOOM); `320×240` 8bpp → `640×480` `RGBA4444` 2×2 upscale. `camera_flow` enforces `< 2.5M` emulated ARM9 insns/tick and clean exit back to `SCREEN_LV` (`0x15`). [Probe V2](hardware-probe.md#input-and-frame-pacing) confirmed that hardware supplies no autonomous UI tick, so the portal currently advances on input rather than autonomously; real frame pacing remains to be implemented. [Probe V3](hardware-probe.md#v3-repeated-display-timing) measured the retained upscaler at 5.2 ms/frame and minimum-of-three present at 2.3 ms/frame, excluding scene rendering, game work, and pacing.
 
 ## 3. Emulator & verification commands
 

@@ -1,6 +1,6 @@
 # On-camera hardware probe
 
-Probe V2 (`42cf7ec`, package SHA-256 `1ef3dc3a239659454eacd6f1abf005ab9d4b27c9a0ed85baccbb113bee351c71`) was run on a DP2 Merrill on 2026-11-27. These are synthetic on-camera measurements, not emulator instruction counts and not end-to-end application frame rates.
+Probe V2 (`42cf7ec`, package SHA-256 `1ef3dc3a239659454eacd6f1abf005ab9d4b27c9a0ed85baccbb113bee351c71`) and Probe V3 (`dd67465`, package SHA-256 `5dae1e2084e8e90d09e23fa42387f6c22e91db7dd1d9daaa75d5a0986e343783`) were run on a DP2 Merrill on 2026-11-27. These are synthetic on-camera measurements, not emulator instruction counts and not end-to-end application frame rates.
 
 The probe replaces the custom DOOM applet when built with `dp2m.probe.fnl`. It writes only its own RAM, the overlay framebuffer, display dirty state, and a probe-exclusive power-save bit. It does not write NOR, NVRAM, or the SD file system. The normal build remains byte-identical when probe support is disabled.
 
@@ -25,7 +25,28 @@ The first screen message was `(4,0)` at 9,178 ms. After 16.655 seconds without i
 | 10 flush+ARGB commits | 21 ms |
 | 10 D-cache sync+flush+ARGB commits | 16 ms |
 
-The final two rows violate their superset relationship, so single-shot present/commit values have at least 24% uncertainty. The 320x200 blit cost is 5.3 ms per frame; a rough blit-plus-present budget is 7-9 ms, before any game or renderer work. This is not an engine FPS measurement.
+The final two rows violate their superset relationship, so single-shot present/commit values have at least 24% uncertainty. The 320x200 blit cost is 5.3 ms per frame; a rough blit-plus-present budget is 7-9 ms, before any game or renderer work. This is not an engine FPS measurement. V3 below directly measures the retained portal upscaler instead of estimating it from the generic blit.
+
+### V3 repeated display timing
+
+V3 retained the V2 single-shot CPU and memory kernels, added direct portal-upscale and DMA-clear tests, and measured commit/present as minima of three cells with alternating order.
+
+| Operation | V3 measured total |
+| --- | ---: |
+| 2,000,000-iteration ARM ALU loop | 120 ms |
+| 16 MiB sequential SDRAM read | 184 ms |
+| 4 MiB repeated 64 KiB cached/write-buffer writes | 30 ms |
+| 524,288 random reads | 227 ms |
+| 10 indexed 320x200 to 640x400 ARGB blits | 60 ms |
+| 10 direct 320x240 to 640x480 portal 2x2 upscales | 52 ms |
+| 10 D-cache sync plus 640x424 DMA clears | 30 ms |
+| 5,000 full D-cache syncs | 155 ms |
+| 10 flush+ARGB commits, minimum of three | 17 ms |
+| 10 D-cache sync+flush+ARGB commits, minimum of three | 23 ms |
+
+The unchanged single-shot kernels are 13-25% slower than their V2 cells. This is timing variability across runs and builds, not an algorithmic kernel regression, and reinforces the need for repeated timing. The direct portal upscale is **5.2 ms/frame** and the clear is **3.0 ms/frame**. Minimum-of-three commit and present are **1.7 and 2.3 ms/frame**, respectively; `PRESENT >= COMMIT` now holds as required. Their 0.6 ms/frame difference is not a precise SWI 10 cost because the two minima can come from different repetitions.
+
+The arithmetic sum of the separately measured portal upscale and present cells is 7.5 ms before game and scene-rendering work. Adding the full clear gives 10.5 ms. These are component budgets, not measured end-to-end pipeline times or application frame rates.
 
 ## Framebuffer write patterns
 
@@ -39,9 +60,26 @@ Each value is the total for eight complete 640x424 passes. Every pass has 16,960
 | W4: dense burst, one colour plus seven zeros | 9 | 135,680 | 27 ms | 36 ms |
 | W5: eight conditional stores, one taken | 21 | 16,960 | 27 ms | 34 ms |
 
-W4 versus W5 is the cleanest comparison: identical source loads and test shape, but eight times the write bytes. Their pair means are 3.94 and 3.81 ms per pass, only 3% apart, and the warm cells tie. W1 also costs less than W2 despite eight times the write volume. **Dense and zero-filled burst stores do not show the severe hardware penalty that the emulator-only analysis could not rule out.** Keep the optimized overlay writers; further store-avoidance work is not a priority.
+W4 versus W5 is the cleanest available comparison: the same two source loads and one taken colour store per block, but different instruction counts and eight times the write bytes. Their pair means are 3.94 and 3.81 ms per pass, only 3% apart, and the warm cells tie. W1 also costs less than W2 despite eight times the write volume. **Dense and zero-filled burst stores do not show the severe hardware penalty that the emulator-only analysis could not rule out.** Keep the optimized overlay writers; further store-avoidance work is not a priority.
 
-The exact magnitude is less certain. Cells were single-shot and ordered warm then cold, producing 25-35% inconsistencies. W2-W5 read only two of the four source words per block, there is no store-free baseline, and the source cannot fit in the 16 KiB D-cache. Future timing should alternate repeated cells and report minima or medians, add a store-free W0, and measure `clear_dma` plus a real zebra frame end to end. Histogram counter read-modify-write cost is not modeled by these patterns.
+The exact magnitude is less certain. V2 cells were single-shot and ordered warm then cold, producing 25-35% inconsistencies. W2-W5 read only two of the four source words per block, and the source cannot fit in the 16 KiB D-cache. Histogram counter read-modify-write cost is not modeled by these patterns.
+
+### V3 W0-W5 repeated cells
+
+V3 added the store-free W0 baseline. Each value below is the minimum of three cells, with eight complete 640x424 passes per cell. Pattern order reverses on odd repetitions, and warm/cold order also alternates.
+
+| Pattern | ARM insns/block | Word stores/pass | Warm, eight passes | Cold, eight passes |
+| --- | ---: | ---: | ---: | ---: |
+| W0: two luma loads plus OR, no stores | 6 | 0 | 18 ms | 25 ms |
+| W1: dense eight-word bursts | 4 | 135,680 | 12 ms | 20 ms |
+| W2: sparse conditional single store | 7 | 16,960 | 21 ms | 19 ms |
+| W3: eight-word burst every eighth block | 8 | 16,960 | 26 ms | 28 ms |
+| W4: dense burst, one colour plus seven zeros | 9 | 135,680 | 35 ms | 34 ms |
+| W5: eight conditional stores, one taken | 21 | 16,960 | 33 ms | 33 ms |
+
+The W0 sanity check passes: cold is 25 ms versus warm at 18 ms. W1 is faster than W0 in both cells and faster than W2 on pair mean despite its dense stores, so instruction and store counts alone do not predict hardware time. W4 versus W5 gives warm/cold means of **4.31 and 4.13 ms/pass**, only 4.5% apart. This repeats the V2 conclusion on a new run: **there is no severe dense/zero-burst store penalty, and further store-avoidance work is not a priority.** W4/W5 still differ in instruction count, so this is evidence against a severe penalty rather than a pure store-volume isolation.
+
+W2-W0 is +3 ms warm but -6 ms cold across eight passes, so it does not isolate a reliable single-store cost. W2 and W4 also invert the expected cold/warm ordering and W5 ties. Minimum-of-three sampling reduced single-shot noise but did not eliminate it; these small differences must not be overinterpreted. Representative LV overlays, histogram counter traffic, and complete application frames still need end-to-end measurement.
 
 ## Memory and ownership evidence
 
@@ -71,5 +109,5 @@ A future execution test must use an arena that first passes an operation-matrix 
 1. Find an SD-loaded code and heap arena that stays unchanged across screen entry/exit, capture, playback/zoom, LV, SD, USB, and power-save transitions. Until then, stream the WAD and shrink the engine footprint; do not use the rejected `0xA6000000` window.
 2. Exercise a timed, yielding frame loop and clean exit without relying on `(4,3)`.
 3. Measure the stock 216 MHz clock mode rather than assuming its scaling.
-4. V3 adds alternating minimum-of-three cells, W0, direct portal-upscale and DMA-clear measurements. Its minima are not directly comparable to the V2 single-shot table. Representative LV overlays still need end-to-end timing.
+4. V3 completed alternating minimum-of-three cells, W0, direct portal-upscale and DMA-clear measurements. Its minima are not directly comparable to the V2 single-shot table. Representative LV overlays still need end-to-end timing.
 5. SD storage still needs a successful read test with `DOOM1.WAD` at the card root; the absent-file path returned `-1` as expected.

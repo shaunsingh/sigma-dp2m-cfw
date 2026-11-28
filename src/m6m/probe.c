@@ -45,6 +45,9 @@ struct t_rmpf {
 #define FN_PSAVE_RELEASE ((void (*)(uint32_t))0xA004056Fu)                                 /* Thumb */
 /* Shared stock bitmask has no refcount; keep this probe-only bit exclusive. */
 #define PSAVE_PROBE_MASK 0x40000000u
+
+/* Retained from doom_render.c in probe builds for a direct portal-upscale benchmark. */
+extern void doom_upscale_2x2(const uint8_t *src, uint16_t *dst, const uint32_t *pal32);
 #define FN_MDF_OPEN      ((int32_t (*)(const char *, uint32_t, uint32_t))0xA01111D1u)      /* Thumb */
 #define FN_MDF_CLOSE     ((int32_t (*)(int32_t))0xA011125Bu)                               /* Thumb */
 #define FN_MDF_READ      ((int32_t (*)(int32_t, void *, uint32_t, uint32_t *))0xA01112B7u) /* Thumb */
@@ -76,6 +79,8 @@ struct p2_res {
     uint32_t wr_ms;
     uint32_t rnd_ms, rnd_sink;
     uint32_t blit_ms;
+    uint32_t portal_ms;
+    uint32_t clear_ms;
     uint32_t dcache_ms;
     uint32_t commit_ms;
     uint32_t pres_ms;
@@ -83,8 +88,8 @@ struct p2_res {
 
 struct p2b_res {
     uint32_t ran;
-    uint32_t warm_ms[5];
-    uint32_t cold_ms[5];
+    uint32_t warm_ms[6];
+    uint32_t cold_ms[6];
     uint32_t sink;
 };
 
@@ -143,7 +148,7 @@ static uint32_t p3_snap[P3_NWIN * P3_NSAMP];
 static uint16_t p3_zero[P3_NWIN];
 static uint16_t p3_chg[P3_NWIN];
 static uint32_t p_scratch64k[16384]; /* 64 KiB shared by P2 write bench & P4 SD read */
-static uint8_t  p2_blit_src[320 * 200];
+static uint8_t  p2_blit_src[320 * 240] __attribute__((aligned(4)));
 static uint32_t p2_pal32[256];
 static uint8_t  p2b_luma[640 * 424] __attribute__((aligned(4)));
 static uint32_t p4_stat_buf[0x90]; /* 0x240 B >= 0x230 B */
@@ -318,6 +323,26 @@ static void bench_blit_320x200_arm(const uint8_t *src, uint16_t *dst_fb, const u
 }
 
 /* ---------- P2B Overlay Write-Pattern Kernels (ARM, 640x424 = 16960 x 32B blocks, placed in DOOM_A) ---------- */
+
+/* W0 store-free baseline: 6 insns/blk, same two luma loads as W2-W5. */
+__attribute__((noinline, target("arm"), section(".probe.a")))
+static uint32_t bench_w0_loads_arm(const uint32_t *src, uint32_t blocks) {
+    register uint32_t r0 __asm__("r0") = 0u;
+    register uint32_t r1 __asm__("r1") = (uint32_t)(uintptr_t)src;
+    register uint32_t r2 __asm__("r2") = blocks;
+    __asm__ volatile(
+        "1:\n"
+        "ldr   r4, [r1], #4\n"
+        "ldr   r5, [r1], #12\n"
+        "orr   r0, r0, r4\n"
+        "orr   r0, r0, r5\n"
+        "subs  r2, r2, #1\n"
+        "bne   1b\n"
+        : "+r"(r0), "+r"(r1), "+r"(r2)
+        :
+        : "r4", "r5", "cc", "memory");
+    return r0;
+}
 
 /* W1 dense: 4 insns/blk, 8 word stores/blk (2x 4-word stmia) */
 __attribute__((noinline, target("arm"), section(".probe.a")))
@@ -701,12 +726,31 @@ static void probe_p3_scan(void) {
 }
 
 __attribute__((noinline, section(".probe.e")))
+static uint32_t probe_time_present10(uint32_t with_sync) {
+    uint64_t t0 = read_tick_ms();
+    for (uint32_t i = 0; i < 10u; i++) {
+        if (with_sync) hw_dcache_sync();
+        stock_flush_rect(0, 0, 640, 480);
+        stock_argb_commit();
+    }
+    uint64_t t1 = read_tick_ms();
+    return (uint32_t)(t1 - t0);
+}
+
+__attribute__((noinline, section(".probe.e")))
+static void probe_clear424(void) {
+    const uint16_t rect[4] = { 0u, 0u, 640u, 424u }, zero[4] = { 0u, 0u, 0u, 0u };
+    hw_dcache_sync();
+    stock_fill_rect(rect, zero);
+}
+
+__attribute__((noinline, section(".probe.e")))
 static void probe_p2_run(void) {
     for (uint32_t i = 0; i < 256u; i++) {
         uint16_t c = (uint16_t)((((i >> 4) & 0xFu) << 12) | ((i & 0xFu) << 8) | (((i ^ 0x5Au) & 0xFu) << 4) | 0xFu);
         p2_pal32[i] = ((uint32_t)c << 16) | c;
     }
-    for (uint32_t i = 0; i < 320u * 200u; i++)
+    for (uint32_t i = 0; i < 320u * 240u; i++)
         p2_blit_src[i] = (uint8_t)i;
 
     FN_PSAVE_INHIBIT(PSAVE_PROBE_MASK);
@@ -740,27 +784,38 @@ static void probe_p2_run(void) {
     pst.p2.blit_ms = (uint32_t)(t1 - t0);
 
     t0 = read_tick_ms();
+    for (uint32_t f = 0; f < 10u; f++)
+        doom_upscale_2x2(p2_blit_src, ARGB_FB, p2_pal32);
+    t1 = read_tick_ms();
+    pst.p2.portal_ms = (uint32_t)(t1 - t0);
+
+    t0 = read_tick_ms();
+    for (uint32_t f = 0; f < 10u; f++)
+        probe_clear424();
+    t1 = read_tick_ms();
+    pst.p2.clear_ms = (uint32_t)(t1 - t0);
+
+    t0 = read_tick_ms();
     for (uint32_t i = 0; i < 5000u; i++)
         hw_dcache_sync();
     t1 = read_tick_ms();
     pst.p2.dcache_ms = (uint32_t)(t1 - t0);
 
-    t0 = read_tick_ms();
-    for (uint32_t i = 0; i < 10u; i++) {
-        stock_flush_rect(0, 0, 640, 480);
-        stock_argb_commit();
+    pst.p2.commit_ms = 0xFFFFFFFFu;
+    pst.p2.pres_ms = 0xFFFFFFFFu;
+    for (uint32_t rep = 0; rep < 3u; rep++) {
+        if (rep & 1u) {
+            uint32_t p = probe_time_present10(1u);
+            uint32_t c = probe_time_present10(0u);
+            if (p < pst.p2.pres_ms) pst.p2.pres_ms = p;
+            if (c < pst.p2.commit_ms) pst.p2.commit_ms = c;
+        } else {
+            uint32_t c = probe_time_present10(0u);
+            uint32_t p = probe_time_present10(1u);
+            if (c < pst.p2.commit_ms) pst.p2.commit_ms = c;
+            if (p < pst.p2.pres_ms) pst.p2.pres_ms = p;
+        }
     }
-    t1 = read_tick_ms();
-    pst.p2.commit_ms = (uint32_t)(t1 - t0);
-
-    t0 = read_tick_ms();
-    for (uint32_t i = 0; i < 10u; i++) {
-        hw_dcache_sync();
-        stock_flush_rect(0, 0, 640, 480);
-        stock_argb_commit();
-    }
-    t1 = read_tick_ms();
-    pst.p2.pres_ms = (uint32_t)(t1 - t0);
 
     FN_PSAVE_RELEASE(PSAVE_PROBE_MASK);
     pst.p2.ran = 1u;
@@ -776,10 +831,11 @@ static uint32_t run_p2b_one(uint32_t pat, uint32_t cold, uint32_t *sink) {
     uint64_t t0 = read_tick_ms();
     for (uint32_t r = 0; r < P2B_RUNS; r++) {
         switch (pat) {
-        case 0u: s += bench_w1_dense_arm(dst, P2B_BLOCKS, col); break;
-        case 1u: s += bench_w2_sparse_single_arm(dst, src, P2B_BLOCKS, col); break;
-        case 2u: s += bench_w3_sparse_burst_arm(dst, src, P2B_BLOCKS, col); break;
-        case 3u: s += bench_w4_mixed_burst_arm(dst, src, P2B_BLOCKS, col); break;
+        case 0u: s += bench_w0_loads_arm(src, P2B_BLOCKS); break;
+        case 1u: s += bench_w1_dense_arm(dst, P2B_BLOCKS, col); break;
+        case 2u: s += bench_w2_sparse_single_arm(dst, src, P2B_BLOCKS, col); break;
+        case 3u: s += bench_w3_sparse_burst_arm(dst, src, P2B_BLOCKS, col); break;
+        case 4u: s += bench_w4_mixed_burst_arm(dst, src, P2B_BLOCKS, col); break;
         default: s += bench_w5_mixed_cond_arm(dst, src, P2B_BLOCKS, col); break;
         }
     }
@@ -801,9 +857,25 @@ static void probe_p2b_run(void) {
 
     FN_PSAVE_INHIBIT(PSAVE_PROBE_MASK);
     uint32_t sink = 0u;
-    for (uint32_t p = 0; p < 5u; p++) {
-        pst.p2b.warm_ms[p] = run_p2b_one(p, 0u, &sink);
-        pst.p2b.cold_ms[p] = run_p2b_one(p, 1u, &sink);
+    for (uint32_t p = 0; p < 6u; p++) {
+        pst.p2b.warm_ms[p] = 0xFFFFFFFFu;
+        pst.p2b.cold_ms[p] = 0xFFFFFFFFu;
+    }
+    for (uint32_t rep = 0; rep < 3u; rep++) {
+        for (uint32_t i = 0; i < 6u; i++) {
+            uint32_t p = (rep & 1u) ? 5u - i : i;
+            if (rep & 1u) {
+                uint32_t c = run_p2b_one(p, 1u, &sink);
+                uint32_t w = run_p2b_one(p, 0u, &sink);
+                if (c < pst.p2b.cold_ms[p]) pst.p2b.cold_ms[p] = c;
+                if (w < pst.p2b.warm_ms[p]) pst.p2b.warm_ms[p] = w;
+            } else {
+                uint32_t w = run_p2b_one(p, 0u, &sink);
+                uint32_t c = run_p2b_one(p, 1u, &sink);
+                if (w < pst.p2b.warm_ms[p]) pst.p2b.warm_ms[p] = w;
+                if (c < pst.p2b.cold_ms[p]) pst.p2b.cold_ms[p] = c;
+            }
+        }
     }
     FN_PSAVE_RELEASE(PSAVE_PROBE_MASK);
 
@@ -888,7 +960,7 @@ static void draw_chrome(void) {
     fb_fill_rect_arm(0, 0, 640, 480, COL_BG);
     fb_fill_rect_arm(0, 0, 640, 28, COL_HDR_BG);
     fb_fill_rect_arm(0, 438, 640, 42, COL_FTR_BG);
-    p_printf(0, 0, COL_YELLOW, COL_HDR_BG, "PROBE V2 D2EDE84 P%u/%u %s",
+    p_printf(0, 0, COL_YELLOW, COL_HDR_BG, "PROBE V3 D2EDE84 P%u/%u %s",
              pst.page + 1u, PROBE_PAGES, page_titles[pst.page]);
     draw_str(0, 24, "L/R,DIAL:PAGE  OK:ACT  MENU/PLAY:EXIT", COL_WHITE, COL_FTR_BG);
 }
@@ -950,48 +1022,52 @@ static void draw_p2_time_cpu(void) {
     p_printf(0, 11, COL_GREEN, COL_BG, "B) SDRAM WR  4M: %u MS (64K X 64)", pst.p2.wr_ms);
     p_printf(0, 12, COL_GREEN, COL_BG, "C) RND RD 512K:  %u MS SINK=%8X", pst.p2.rnd_ms, pst.p2.rnd_sink);
     p_printf(0, 13, COL_GREEN, COL_BG, "D) BLIT 320X200: %u MS (10 FRAMES)", pst.p2.blit_ms);
-    p_printf(0, 15, COL_WHITE, COL_BG, "E1) DCACHE 5000: %u MS (SVC 10)", pst.p2.dcache_ms);
-    p_printf(0, 16, COL_WHITE, COL_BG, "E2) COMMIT  10:  %u MS (FLUSH+ARGB)", pst.p2.commit_ms);
-    p_printf(0, 17, COL_WHITE, COL_BG, "E3) PRESENT 10:  %u MS (DC+FL+CMT)", pst.p2.pres_ms);
+    p_printf(0, 14, COL_GREEN, COL_BG, "D2) PORTAL 240:  %u MS (10 FRAMES)", pst.p2.portal_ms);
+    p_printf(0, 15, COL_GREEN, COL_BG, "D3) CLEAR 424:   %u MS (10 FRAMES)", pst.p2.clear_ms);
+    p_printf(0, 17, COL_WHITE, COL_BG, "E1) DCACHE 5000: %u MS (SVC 10)", pst.p2.dcache_ms);
+    p_printf(0, 18, COL_WHITE, COL_BG, "E2) COMMIT 10 MIN3: %u MS (FL+ARGB)", pst.p2.commit_ms);
+    p_printf(0, 19, COL_WHITE, COL_BG, "E3) PRESENT10 MIN3: %u MS (DC+FL+CMT)", pst.p2.pres_ms);
 }
 
 static void draw_p2b_write_patterns(void) {
-    static const uint8_t insns[5] = { 4u, 7u, 8u, 9u, 21u };
-    static const uint32_t stores[5] = {
-        P2B_BLOCKS * 8u, /* W1: 135,680 word stores / run */
-        P2B_BLOCKS,      /* W2:  16,960 word stores / run */
-        P2B_BLOCKS,      /* W3:  16,960 word stores / run (2120 blks x 8W) */
-        P2B_BLOCKS * 8u, /* W4: 135,680 word stores / run */
-        P2B_BLOCKS       /* W5:  16,960 word stores / run */
+    static const uint8_t insns[6] = { 6u, 4u, 7u, 8u, 9u, 21u };
+    static const uint32_t stores[6] = {
+        0u,              /* W0: store-free */
+        P2B_BLOCKS * 8u, /* W1: 135,680 word stores / pass */
+        P2B_BLOCKS,      /* W2:  16,960 word stores / pass */
+        P2B_BLOCKS,      /* W3:  16,960 word stores / pass */
+        P2B_BLOCKS * 8u, /* W4: 135,680 word stores / pass */
+        P2B_BLOCKS       /* W5:  16,960 word stores / pass */
     };
 
-    draw_str(0, 2, "640X424 ARGB_FB (16960 BLKS X 8 RUNS, ARM)", COL_CYAN, COL_BG);
+    draw_str(0, 2, "640X424 ARGB_FB (8 RUNS X MIN3, ARM)", COL_CYAN, COL_BG);
     draw_str(0, 3, "1 BLK=16PX (32B=8W)  PSAV INHIBITED ON OK", COL_GRAY, COL_BG);
 
     if (!pst.p2b.ran) {
-        draw_str(0, 6, "PRESS OK TO RUN W1..W5 (WARM + COLD)", COL_YELLOW, COL_BG);
+        draw_str(0, 6, "PRESS OK TO RUN W0..W5 (WARM + COLD)", COL_YELLOW, COL_BG);
         draw_str(0, 7, "COLD = RIGHT AFTER HW_DCACHE_SYNC (SVC 10)", COL_GRAY, COL_BG);
         return;
     }
 
-    draw_str(0, 5, "PAT  INSN/B  STORES/RUN  WARM     COLD", COL_YELLOW, COL_BG);
-    for (uint32_t i = 0; i < 5u; i++) {
+    draw_str(0, 5, "PAT INSN/B STORES/PASS WARM/8P COLD/8P", COL_YELLOW, COL_BG);
+    for (uint32_t i = 0; i < 6u; i++) {
         uint32_t row = 6u + i;
-        p_printf(0,  row, COL_GREEN, COL_BG, "W%u", i + 1u);
+        p_printf(0,  row, COL_GREEN, COL_BG, "W%u", i);
         p_printf(5,  row, COL_WHITE, COL_BG, "%u", (uint32_t)insns[i]);
         p_printf(13, row, COL_WHITE, COL_BG, "%u", stores[i]);
         p_printf(25, row, COL_GREEN, COL_BG, "%uMS", pst.p2b.warm_ms[i]);
         p_printf(34, row, COL_CYAN,  COL_BG, "%uMS", pst.p2b.cold_ms[i]);
     }
 
-    draw_str(0, 12, "PATTERNS (8 RUNS EACH, 640X424 LUMA SRC):", COL_CYAN, COL_BG);
-    draw_str(0, 13, "W1: DENSE 2X STMIA (8W/BLK)", COL_WHITE, COL_BG);
-    draw_str(0, 14, "W2: SPARSE 1X STR + 2X LUMA LD", COL_WHITE, COL_BG);
-    draw_str(0, 15, "W3: SPARSE 2X STMIA EVERY 8TH BLK", COL_WHITE, COL_BG);
-    draw_str(0, 16, "W4: MIXED 2X STMIA (1 COL + 7 ZERO)", COL_WHITE, COL_BG);
-    draw_str(0, 17, "W5: MIXED 8X TST+STRNE (1 TAKEN)", COL_WHITE, COL_BG);
-    draw_str(0, 19, "COLD = AFTER HW_DCACHE_SYNC (SVC 10)", COL_GRAY, COL_BG);
-    p_printf(0, 20, COL_YELLOW, COL_BG, "SINK:%8X  (OK=RE-RUN)", pst.p2b.sink);
+    draw_str(0, 13, "PATTERNS (MIN OF 3 CELLS, 8 PASSES/CELL):", COL_CYAN, COL_BG);
+    draw_str(0, 14, "W0: 2X LUMA LD + OR, NO STORES", COL_WHITE, COL_BG);
+    draw_str(0, 15, "W1: DENSE 2X STMIA (8W/BLK)", COL_WHITE, COL_BG);
+    draw_str(0, 16, "W2: SPARSE 1X STR + 2X LUMA LD", COL_WHITE, COL_BG);
+    draw_str(0, 17, "W3: SPARSE 2X STMIA EVERY 8TH BLK", COL_WHITE, COL_BG);
+    draw_str(0, 18, "W4: MIXED 2X STMIA (1 COL + 7 ZERO)", COL_WHITE, COL_BG);
+    draw_str(0, 19, "W5: MIXED 8X TST+STRNE (1 TAKEN)", COL_WHITE, COL_BG);
+    draw_str(0, 21, "COLD = AFTER HW_DCACHE_SYNC (SVC 10)", COL_GRAY, COL_BG);
+    p_printf(0, 22, COL_YELLOW, COL_BG, "SINK:%8X  (OK=RE-RUN)", pst.p2b.sink);
 }
 
 static void draw_p3_pools(void) {

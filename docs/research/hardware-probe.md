@@ -50,16 +50,26 @@ The exact magnitude is less certain. Cells were single-shot and ordered warm the
 - Two variable-memory pools responded: MPL1 free/max `0x68D58` (429,400 B) and MPL2 free/max `0x8548` (34,120 B). MPL3-10 returned `-42`.
 - Twenty fixed-block pools responded. These uITRON pools are distinct from the 17 MiB stock C heap.
 - No one-MiB window had all 256 sampled words equal to zero. Fourteen windows changed between two passes. High memory through `0xAF5xxxxx` was mostly stable and nonzero; `0xAF7xxxxx` contained changing samples.
-- **Zero or stable contents do not prove that RAM is free.** The candidate `0xA6000000` capture/updater arena and execution permissions require independent stock-code review and a separate hardware gate.
+- **Zero or stable contents do not prove that RAM is free.** An independent review subsequently refuted the proposed `0xA6000000..0xA79FFFFF` arena; see below.
 
 The first 64 KiB after `.bss` contained 65,536 nonzero bytes at both entry and rescan. Initial bytes were `FF DF F7 FF FF FF E7 B7 FF FF FB FE DE FF FD FF`. Payload RAM is dirty at boot, not zero-filled.
 
 V1 skipped initialization because it tested an uninitialized `pst.inited` as a boolean. V2 clears the state and uses an explicit magic value. `probe_flow` now poisons `pst` before exercising all pages, so this camera failure is covered by a regression test.
 
+## MPU and arena review
+
+Independent DeepSeek review of the stock ARM946E-S boot sequence confirmed:
+
+- Region 3 is **8 MB** (`0xA0000000..0xA07FFFFF`), not 32 MB. Region 2 has instruction AP 0, so instruction fetch above `0xA0800000` aborts in every mode. Payload tasks run in user mode and cannot reprogram CP15.
+- The proposed patches at `0xA0172170` (`E3A00008` to `E3A0000C`) and `0xA0172190` (`E3800000` to `E3800C06`) have the intended encodings: enable Region 2 I-cache and set its instruction AP to read/execute in both modes. They have **not** been applied or tested on hardware. Resizing Region 3 is unnecessary.
+- `0xA6000000..0xA79FFFFF` is **not available for DOOM**. Stock descriptor routine `0xA0035AAC` installs capture plane bases `0xA53132C0`, `0xA6A622C0`, `0xA81B12C0`, and further planes with exact stride `0x174F000`. The rejected window overlaps the first two stock capture buffers. Playback and shared scratch paths also reference this arena.
+
+A future execution test must use an arena that first passes an operation-matrix ownership test. After a legitimate patched-firmware install, a minimal stub can test return value and I-cache behavior with SWI 9 followed by SWI 15. A missing or incorrect MPU patch can hang or reset the camera, so battery-pull recovery is required. The emulator does not model CP15 and cannot validate this test.
+
 ## Remaining hardware gates
 
-1. Verify the ARM946E-S MPU execute permissions and candidate SD-loaded code arena before running an external engine.
+1. Find an SD-loaded code and heap arena that stays unchanged across screen entry/exit, capture, playback/zoom, LV, SD, USB, and power-save transitions. Until then, stream the WAD and shrink the engine footprint; do not use the rejected `0xA6000000` window.
 2. Exercise a timed, yielding frame loop and clean exit without relying on `(4,3)`.
 3. Measure the stock 216 MHz clock mode rather than assuming its scaling.
-4. Repeat present and full-overlay clear timings, then measure the actual portal upscale and representative LV overlays.
+4. V3 adds alternating minimum-of-three cells, W0, direct portal-upscale and DMA-clear measurements. Its minima are not directly comparable to the V2 single-shot table. Representative LV overlays still need end-to-end timing.
 5. SD storage still needs a successful read test with `DOOM1.WAD` at the card root; the absent-file path returned `-1` as expected.

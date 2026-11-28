@@ -38,6 +38,18 @@ fn build_probe_package() -> (Vec<u8>, u32, u32, u32, u32) {
 
     let pkg = std::fs::read(out.0.join("DP2MV200.bin")).expect("read probe DP2MV200.bin");
     let syms = std::fs::read_to_string(out.0.join("m6m/m6m.syms")).expect("read probe m6m.syms");
+    for required in ["doom_upscale_2x2", "bench_w0_loads_arm"] {
+        assert!(
+            syms.lines().any(|line| line.ends_with(&format!(" {required}"))),
+            "probe must retain {required}"
+        );
+    }
+    for collected in ["emit_visplane", "zbuf", "job_ytop"] {
+        assert!(
+            !syms.lines().any(|line| line.ends_with(&format!(" {collected}"))),
+            "unused portal renderer symbol {collected} must be garbage-collected"
+        );
+    }
     let sym = |name: &str| -> (u32, u32) {
         syms.lines()
             .find_map(|line| {
@@ -184,7 +196,10 @@ fn probe_applet_all_pages_actions_write_safety_and_clean_exit() {
     cam.cpu_mut().start_write_log(&p2_allowed);
     let p2_steps = cam.press(Key::Ok);
     assert!(cam.cpu().last_error.is_none(), "P2 benchmark fault: {:?}", cam.cpu().last_error);
-    assert!(p2_steps > 5_000_000, "expected real benchmark work on P2, got {p2_steps} steps");
+    assert!(
+        p2_steps > 42_000_000,
+        "expected P2 to include direct portal-upscale work, got {p2_steps} steps"
+    );
     assert_eq!(
         cam.cpu().r32_be(0xA07D_D73C),
         0,
@@ -209,10 +224,10 @@ fn probe_applet_all_pages_actions_write_safety_and_clean_exit() {
     cam.cpu_mut().start_write_log(&p2_allowed);
     let p2b_steps = cam.press(Key::Ok);
     assert!(cam.cpu().last_error.is_none(), "P2B benchmark fault: {:?}", cam.cpu().last_error);
-    // 5 patterns x 8 runs x 2 (warm+cold) x 16960 blocks x (4+7+8+9+21 = 49 insns/blk) ~= 13.3M insns
+    // W0..W5 x 3 repetitions x 2 cache states x 8 passes exercises the new min-of-three path.
     assert!(
-        p2b_steps > 12_000_000,
-        "expected W1..W5 warm+cold ARM loops on P2B, got {p2b_steps} steps"
+        p2b_steps > 40_000_000,
+        "expected W0..W5 repeated warm+cold ARM loops on P2B, got {p2b_steps} steps"
     );
     assert_eq!(
         cam.cpu().r32_be(0xA07D_D73C),
@@ -221,7 +236,7 @@ fn probe_applet_all_pages_actions_write_safety_and_clean_exit() {
     );
     check_header_and_footer(&cam, "p3/11 results");
     let fb_p2b_done = cam.render_lcd().to_vec();
-    assert_ne!(fb_p2b_done, fb_p2b_idle, "P2B OK must display W1..W5 timing table");
+    assert_ne!(fb_p2b_done, fb_p2b_idle, "P2B OK must display W0..W5 timing table");
     let log = cam.cpu_mut().stop_write_log();
     check_no_stray_writes(&log, "P2B write patterns");
     page_fbs.push(fb_p2b_done);

@@ -184,7 +184,8 @@ pub fn build_m6m(fw_raw: &[u8], pack: &FilmPack, src: &Path, work: &Path, cfg: &
         .filter(|p| {
             let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
             if cfg.m6m.probe {
-                !matches!(name, "doom.c" | "doom_render.c")
+                // Keep the portal upscaler for direct timing; GC drops the unused renderer.
+                name != "doom.c"
             } else {
                 name != "probe.c"
             }

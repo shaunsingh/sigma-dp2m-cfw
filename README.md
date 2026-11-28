@@ -9,7 +9,7 @@ The camera has two processors, both updated from one package:
 
 dp2m starts from the stock 1.05 package (`DP2MV105.bin`). It assembles FR80 code into free M5 flash, compiles a C/asm payload and links it into unused parts of the M6M image, and writes a new package for the stock updater.
 
-> **Status**: Build `a441ed3` was installed on a DP2 Merrill and used by hand (film captures with the expected MakerNote tags, menus, live-view looks, DOOM). Nothing has been measured on the camera: all verification suites, integration tests, and performance numbers come from the built-in ARM9 and FR80 emulators.
+> **Status**: Build `a441ed3` was installed on a DP2 Merrill and used by hand (film captures with the expected MakerNote tags, menus, live-view looks, DOOM). Probe V2 (`42cf7ec`) and V3 (`dd67465`) later made synthetic CPU, memory, input, framebuffer, and display measurements on camera. The current standalone `DOOM.BIN` platform and later capture-processing changes remain emulator-verified only; end-to-end application frame rates and the current package still need on-camera validation.
 
 ## Features
 
@@ -22,7 +22,7 @@ dp2m starts from the stock 1.05 package (`DP2MV105.bin`). It assembles FR80 code
 - ISO 50, Auto-ISO lower limit down to ISO 50, 5-shot bracketing, minimum shutter speed for ISO auto.
 - 11 live-view overlays as extra grid modes (7..17): electronic level (7), aspect masks with level (21:9 XPan, 16:9 Cinema, 1:1 Square, 7:6, 4:3), focus peaking and peaking + level (runtime Medium / High / Low / Auto MF sensitivity + Red / Yellow / White / Black color), zebras (runtime 95% / 90% Safe / 100% Clip / Dual Hi+Lo), RGB histogram + level, and False Color (IRE heatmap + legend).
 - Bare-metal ARM946E-S **DOOM** platform (`SCREEN_DOOM`, Setup page 4):
-  - **SD-loaded full id DOOM engine** (`DOOM.BIN` + `DOOM1.WAD` via `dp2m build-doom`, `D2AP` v1 applet ABI at `0xA1CC0000..0xA1E00000` outside `C78FRM.bin`): runs genuine shareware/commercial `.WAD` files at 35 Hz (`get_tim`/`dly_tsk` tic-boundary pacing, 2×2 Bayer RGBA4444 dithering, `<= 6 MB` SDRAM WAD preload on the 17 MiB stock C heap with a 16 KB MDF sector cache fallback) with a 3-mode DP2M Tech Demo HUD (Mode 0 Camera Telemetry Dashboard + 60-frame frametime sparkline, Mode 1 640×480 4:3 CRT, Mode 2 Live Hardware & Memory Explorer), Shutter fire, Command Dial proportional turning, `QS` button chording, and optional MXC6226XC accelerometer Tilt-Strafe.
+  - **SD-loaded full id DOOM engine** (`DOOM.BIN` + `DOOM1.WAD` via `dp2m build-doom`, `D2AP` v1 applet ABI at `0xA1CC0000..0xA1E00000` outside `C78FRM.bin`): targets a 35 Hz loop for genuine shareware/commercial `.WAD` files (`get_tim`/`dly_tsk` tic-boundary pacing, 2×2 Bayer RGBA4444 dithering, `<= 6 MB` SDRAM WAD preload on the 17 MiB stock C heap with a 16 KB MDF sector cache fallback) with a 3-mode DP2M Tech Demo HUD (Mode 0 Camera Telemetry Dashboard + 60-frame frametime sparkline, Mode 1 640×480 4:3 CRT, Mode 2 Live Hardware & Memory Explorer), Shutter fire, Command Dial proportional turning, `QS` button chording, and optional MXC6226XC accelerometer Tilt-Strafe.
   - **Built-in ROM fallback**: when `DOOM.BIN` or a `.WAD` is absent from the SD card, `SCREEN_DOOM` falls back automatically to the self-contained 2.5D sector/portal E1M1 engine in ROM with the same autonomous 35 Hz loop and hardware controls.
 
 ## Requirements
@@ -106,6 +106,37 @@ The updater accepts any package version from 1.05 up.
 
 `cargo run --release -- stage --to <card>` copies the files enabled under `:sd` and reads them back.
 
+### DOOM
+
+Setup page 4 > DOOM opens `SCREEN_DOOM`. With no extra files on the card it runs the built-in ROM engine. The full engine is a separate applet built from [doomgeneric](https://github.com/ozkl/doomgeneric), whose GPL-2.0 sources stay outside this repository:
+
+```sh
+git clone https://github.com/ozkl/doomgeneric vendor/doomgeneric   # or pass --doomgeneric <dir> / set DOOMGENERIC_DIR
+cargo run --release -- build-doom                                   # writes out/DOOM.BIN
+cargo run --release -- stage --to <card> --wad <DOOM1.WAD>          # copies DOOM.BIN and the WAD next to the firmware
+```
+
+The applet uses the first of `DOOM1.WAD`, `DOOM.WAD`, `DOOMU.WAD`, `DOOM2.WAD`, `PLUTONIA.WAD`, `TNT.WAD`, `FREEDOOM1.WAD`, `FREEDOOM2.WAD` in the card root. WADs up to 6 MB are preloaded into SDRAM; larger ones are read from the card through a 16 KB cache.
+
+| Control | `DOOM.BIN` | Built-in ROM engine |
+| --- | --- | --- |
+| Up / Down | move forward / back | move forward / back |
+| Left / Right | turn | turn |
+| Command dial | turn in a level, move the cursor in menus | turn |
+| Shutter (half or full), OK | fire in a level, confirm in menus | fire |
+| AEL | use | use |
+| MENU | DOOM menu | exit to live view |
+| DISP | automap | automap |
+| MODE | cycle HUD: telemetry dashboard, 640×480 full screen, hardware explorer | next weapon |
+| QS + Left / Right | strafe | strafe |
+| QS + Up / Down | run forward / back (hardware explorer: previous / next memory region) | |
+| QS + dial | previous / next weapon | previous / next weapon |
+| QS + AEL | toggle accelerometer tilt-strafe | |
+| QS | | restart after the level is won |
+| PLAY | exit to live view | exit to live view |
+
+Buttons already held when DOOM opens are ignored until they are all released. The shutter does not take pictures while DOOM is open, and auto power off is suspended until exit.
+
 ## Commands
 
 Run as `cargo run --release -- <command>`. Without `--config`, the builder uses `dp2m.fnl`, then `dp2m.example.fnl`, from the repository root.
@@ -125,7 +156,7 @@ Run as `cargo run --release -- <command>`. Without `--config`, the builder uses 
 | `sim [--from dir] [--wad DOOM1.WAD] [--port p]` | serve the dual-CPU browser simulator on `127.0.0.1:p` (default `8080`, supports drag-and-drop `.WAD`/`DOOM.BIN`) |
 | `sim-trace [pkg.bin] [--sd NAME=PATH] [--keys k1,k2,...] [--ppm f.ppm] [--watch-text]` | run headless dual-CPU key/tick/capture steps, mount virtual SD files, and export PPM frames |
 
-- `cargo test --release --workspace` runs all unit and integration tests (config, catalog, 36-film + 11-grid + DOOM link, FR80/ARM9 ISA, `.cube` PCG compiler, dual-CPU `dp2m-emu::sim` flow, built-in and standalone `DOOM.BIN` + `DOOM1.WAD` flows, Film menu OSD hash check, and the 607-check native M6M verifier across `m6m`, `custom`, `labels`). `dp2m`'s integration tests build firmware in a private temporary directory using `dp2m.example.fnl` and need no prior `out/` (requiring `clang` and `ld.lld` on `PATH`). `cargo test --release -p dp2m-emu` tests only the pure-Rust emulation/RE/X3F core.
+- `cargo test --release --workspace` runs all unit and integration tests (config, catalog, 36-film + 11-grid + DOOM link, FR80/ARM9 ISA, `.cube` PCG compiler, dual-CPU `dp2m-emu::sim` flow, built-in and standalone `DOOM.BIN` + `DOOM1.WAD` flows, Film menu OSD hash check, and the 607-check native M6M verifier across `m6m`, `custom`, `labels`). `dp2m`'s integration tests build firmware in a private temporary directory using `dp2m.example.fnl` and need no prior `out/` (requiring `clang` and `ld.lld` on `PATH`). The standalone `DOOM.BIN` flow is skipped unless doomgeneric (`DOOMGENERIC_DIR` or `vendor/doomgeneric`) and a WAD (`DP2M_WAD` or `out/DOOM1.WAD`) are present. `cargo test --release -p dp2m-emu` tests only the pure-Rust emulation/RE/X3F core.
 - `cargo test --release -p dp2m ycc_bench -- --ignored --nocapture` prints emulated M5 engine costs per stage.
 - `cargo test --release -p dp2m m6m_bench -- --ignored --nocapture` prints emulated M6M live-view overlay, label, and screen costs.
 

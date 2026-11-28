@@ -1,5 +1,7 @@
 mod common;
 
+use std::process::Command;
+
 use dp2m_emu::verify::{Build, run_suites_with_artifacts};
 
 fn check_labels_png(png: &[u8]) {
@@ -60,5 +62,38 @@ fn native_m6m_verify_all_suites() {
             assert!(s.passed >= min_pass, "{name}: expected at least {min_pass} checks, got {}", s.passed);
         }
         check_labels_png(&std::fs::read(artifacts.join("labels.png")).expect("read label contact sheet"));
+
+        // A default CLI verification must not exit successfully when a suite could not run.
+        let syms_path = out.join("m6m/m6m.syms");
+        let syms = std::fs::read_to_string(&syms_path).expect("read symbols");
+        let mut removed = false;
+        let mut incomplete_syms = syms
+            .lines()
+            .filter(|line| {
+                let remove = line.split_whitespace().nth(2) == Some("label_icon");
+                removed |= remove;
+                !remove
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        incomplete_syms.push('\n');
+        assert!(removed, "test setup must remove label_icon");
+        std::fs::write(&syms_path, incomplete_syms).expect("write incomplete symbols");
+
+        let output = Command::new(env!("CARGO_BIN_EXE_dp2m"))
+            .current_dir(root)
+            .arg("verify")
+            .arg(out)
+            .arg("--quiet")
+            .output()
+            .expect("run CLI verifier with incomplete symbols");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "SKIP must fail the CLI:\n{stdout}\n{stderr}");
+        assert!(stdout.contains("labels") && stdout.contains("SKIP"), "missing SKIP summary:\n{stdout}");
+        assert!(
+            stderr.contains("verification incomplete: skipped suites: labels"),
+            "missing skipped-suite error:\n{stderr}"
+        );
     });
 }

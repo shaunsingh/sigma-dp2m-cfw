@@ -381,8 +381,8 @@ static void draw_dashboard_bars(uint16_t *fb) {
     uint32_t pc_here = (uint32_t)(uintptr_t)&draw_dashboard_bars;
     uint32_t sp_now  = rd_sp();
     uint32_t cpsr    = rd_cpsr();
-    uint32_t clk10c  = rd_reg32(0x9000010Cu);
-    uint32_t clk110  = rd_reg32(0x90000110u);
+    uint32_t tick_hi = rd_reg32(0xA07F3788u);
+    uint32_t tick_lo = rd_reg32(0xA07F378Cu);
 
     /* Top 40px bar (y = 0..39) */
     fb_fill_rect(fb, 0, 0, LCD_W, 39, COL_BG_BAR);
@@ -397,9 +397,9 @@ static void draw_dashboard_bars(uint16_t *fb) {
              (unsigned)g_doom_tel.fps, (unsigned)g_doom_tel.frame_ms, (unsigned)gametic);
     fb_draw_str(fb, 492, 4, line, COL_GREEN);
 
-    snprintf(line, sizeof(line), "PC:%08X SP:%08X CPSR:%08X  PLL:%08X/%08X  PSAVE:%08X",
+    snprintf(line, sizeof(line), "PC:%08X SP:%08X CPSR:%08X  TICK:%08X/%08X  PSAVE:%08X",
              (unsigned)pc_here, (unsigned)sp_now, (unsigned)cpsr,
-             (unsigned)clk10c, (unsigned)clk110, (unsigned)rd_reg32(0xA07DD73Cu));
+             (unsigned)tick_hi, (unsigned)tick_lo, (unsigned)rd_reg32(0xA07DD73Cu));
     fb_draw_str(fb, 6, 16, line, COL_LIGHT);
 
     snprintf(line, sizeof(line), "WAD:%-12s %4uK [%s] RD:%4u (%5uK)  ZONE:%4uK HEAP:%4uK (#%2u)",

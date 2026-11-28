@@ -22,6 +22,14 @@ extern uint8_t __image_end[];
 extern uint8_t __bss_end[];
 extern void D_DoomMain(void);
 
+#define DP2M_APP_STACK_SIZE 8192u
+#define DP2M_STACK_GUARD_MAGIC 0x44325347u /* "D2SG" */
+
+/* DOOM must not depend on the undocumented free space in the stock UI task stack. */
+static volatile uint32_t g_app_stack[DP2M_APP_STACK_SIZE / 4u]
+    __attribute__((aligned(8), used));
+static int32_t dp2m_doom_entry_body(const struct dp2m_app_api *api, uint32_t cmd, uint32_t arg)
+    __attribute__((noinline, used));
 int32_t dp2m_doom_entry(const struct dp2m_app_api *api, uint32_t cmd, uint32_t arg);
 
 /* 32-byte D2AP v1 header at 0xA1CC0000 */
@@ -36,6 +44,29 @@ const struct dp2m_app_hdr g_dp2m_hdr = {
     0u,
     0u,
 };
+
+/* Enter on a private 8-byte-aligned stack. The saved stock SP lives below the
+ * private top for the whole call, including setjmp/longjmp error unwinds. */
+__attribute__((naked))
+int32_t dp2m_doom_entry(const struct dp2m_app_api *api, uint32_t cmd, uint32_t arg) {
+    __asm__ volatile(
+        "push  {r4-r11, lr}\n\t"
+        "mov   r12, sp\n\t"
+        "ldr   r3, =g_app_stack + 8192\n\t"
+        "mov   sp, r3\n\t"
+        "sub   sp, sp, #8\n\t"
+        "str   r12, [sp]\n\t"
+        "bl    dp2m_doom_entry_body\n\t"
+        "ldr   r3, =g_app_stack\n\t"
+        "ldr   r3, [r3]\n\t"
+        "ldr   r2, =0x44325347\n\t"
+        "cmp   r3, r2\n\t"
+        "movne r0, #-1\n\t"
+        "ldr   r12, [sp]\n\t"
+        "mov   sp, r12\n\t"
+        "pop   {r4-r11, pc}\n\t"
+    );
+}
 
 const struct dp2m_app_api *g_dp2m_api = NULL;
 struct dp2m_doom_telemetry g_doom_tel;
@@ -88,6 +119,8 @@ static const uint8_t g_vk_doom[VK_COUNT] = {
 
 static uint32_t g_prev_vk_mask = 0u;
 static uint32_t g_prev_hw_mask = 0xFFFFFFFFu;
+static uint32_t g_boot_held = 0u;
+static uint8_t  g_boot_primed = 0u;
 static uint32_t g_sim_ms_clock = 100u;
 static int      g_last_itic    = 0;
 static uint32_t g_last_frame_ms = 0u;
@@ -166,6 +199,14 @@ static int poll_and_translate_controls(uint32_t sim_arg) {
     g_doom_tel.inp = inp;
 
     uint32_t m = inp.held_mask;
+    if (!g_boot_primed) {
+        g_boot_held = m;
+        g_boot_primed = 1u;
+    } else if ((m & g_boot_held) == 0u) {
+        g_boot_held = 0u;
+    }
+    /* Buttons used to open DOOM do nothing until every inherited hold is released. */
+    m &= ~g_boot_held;
     uint32_t pressed = m & ~g_prev_hw_mask;
     g_prev_hw_mask = m;
 
@@ -397,7 +438,9 @@ static void dp2m_cleanup_all(void) {
     dp2m_free_all();
 }
 
-int32_t dp2m_doom_entry(const struct dp2m_app_api *api, uint32_t cmd, uint32_t arg) {
+static int32_t dp2m_doom_entry_body(const struct dp2m_app_api *api, uint32_t cmd, uint32_t arg) {
+    if (cmd == DP2M_APP_INIT)
+        g_app_stack[0] = DP2M_STACK_GUARD_MAGIC;
     if (!api || api->abi_ver != DP2M_APP_ABI_VER)
         return -1;
     g_dp2m_api = api;
@@ -409,6 +452,8 @@ int32_t dp2m_doom_entry(const struct dp2m_app_api *api, uint32_t cmd, uint32_t a
         g_keyq_rd = g_keyq_wr = 0u;
         g_prev_vk_mask = 0u;
         g_prev_hw_mask = 0xFFFFFFFFu;
+        g_boot_held = 0u;
+        g_boot_primed = 0u;
         g_sim_ms_clock = 100u;
         g_cur_wpn_slot = 2;
 

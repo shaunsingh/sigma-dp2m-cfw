@@ -6,6 +6,7 @@
 
 #include "config.h"
 #include "doomtype.h"
+#include "i_system.h"
 #include "w_file.h"
 #include "z_zone.h"
 #include "dp2m_doom.h"
@@ -23,6 +24,58 @@ typedef struct {
 } dp2m_wad_file_t;
 
 extern wad_file_class_t stdc_wad_file;
+
+static uint32_t wad_le32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static int wad_read_exact(int32_t fd, uint32_t offset, void *buffer, uint32_t len) {
+    uint32_t pos = 0u;
+    if (g_dp2m_api->mdf_lseek(fd, (int32_t)offset, 0u, &pos) != 0 || pos != offset)
+        return 0;
+    uint8_t *dst = (uint8_t *)buffer;
+    uint32_t total = 0u;
+    while (total < len) {
+        uint32_t got = 0u;
+        uint32_t chunk = len - total;
+        if (chunk > 65536u) chunk = 65536u;
+        if (g_dp2m_api->mdf_read(fd, dst + total, chunk, &got) != 0 ||
+            got == 0u || got > chunk)
+            return 0;
+        total += got;
+    }
+    return 1;
+}
+
+/* Reject malformed directories before upstream code allocates or caches lumps. */
+static int wad_directory_valid(int32_t fd, uint32_t len) {
+    uint8_t hdr[12];
+    if (!wad_read_exact(fd, 0u, hdr, sizeof(hdr)))
+        return 0;
+    if (memcmp(hdr, "IWAD", 4u) != 0 && memcmp(hdr, "PWAD", 4u) != 0)
+        return 0;
+    uint32_t numlumps = wad_le32(hdr + 4);
+    uint32_t dir_ofs = wad_le32(hdr + 8);
+    if (numlumps == 0u || dir_ofs < 12u || dir_ofs > len ||
+        numlumps > (len - dir_ofs) / 16u)
+        return 0;
+
+    uint32_t dir_len = numlumps * 16u;
+    uint8_t *dir = (uint8_t *)malloc(dir_len);
+    if (!dir)
+        return 0;
+    int valid = wad_read_exact(fd, dir_ofs, dir, dir_len);
+    for (uint32_t i = 0; valid && i < numlumps; i++) {
+        const uint8_t *ent = dir + i * 16u;
+        uint32_t pos = wad_le32(ent);
+        uint32_t size = wad_le32(ent + 4);
+        if (pos > len || size > len - pos)
+            valid = 0;
+    }
+    free(dir);
+    return valid;
+}
 
 static uint32_t probe_wad_len(int32_t fd) {
     /* Stock mdf_fstat (0xA0111563) writes up to +0x224; allocate 0x240 bytes */
@@ -48,6 +101,10 @@ static wad_file_t *W_DP2M_OpenFile(char *path) {
     if (len < 12u) {
         dp2m_sd_close(fd);
         return NULL;
+    }
+    if (!wad_directory_valid(fd, len)) {
+        dp2m_sd_close(fd);
+        I_Error("Invalid or unreadable WAD directory");
     }
 
     dp2m_wad_file_t *dw = (dp2m_wad_file_t *)Z_Malloc(sizeof(*dw), PU_STATIC, 0);
@@ -132,9 +189,9 @@ static void W_DP2M_CloseFile(wad_file_t *wad) {
 static size_t W_DP2M_Read(wad_file_t *wad, unsigned int offset,
                           void *buffer, size_t buffer_len) {
     dp2m_wad_file_t *dw = (dp2m_wad_file_t *)wad;
-    if (!dw || offset >= dw->wad.length || buffer_len == 0) return 0;
-    if (offset + buffer_len > dw->wad.length)
-        buffer_len = dw->wad.length - offset;
+    if (!dw || buffer_len == 0) return 0;
+    if (offset >= dw->wad.length || buffer_len > dw->wad.length - offset)
+        I_Error("WAD read outside file at 0x%X (%u bytes)", offset, (unsigned)buffer_len);
 
     g_doom_tel.wad_read_calls++;
     g_doom_tel.wad_read_bytes += (uint32_t)buffer_len;
@@ -145,7 +202,8 @@ static size_t W_DP2M_Read(wad_file_t *wad, unsigned int offset,
         return buffer_len;
     }
 
-    if (dw->fd < 0) return 0;
+    if (dw->fd < 0)
+        I_Error("WAD read with no backing file at 0x%X", offset);
 
     /* Serve small lump/directory reads out of 16 KB read-ahead cache */
     if (dw->cache_buf && buffer_len <= (WAD_CACHE_SIZE >> 1)) {
@@ -168,8 +226,8 @@ static size_t W_DP2M_Read(wad_file_t *wad, unsigned int offset,
     }
 
     uint32_t pos = 0u;
-    if (g_dp2m_api->mdf_lseek(dw->fd, (int32_t)offset, 0u, &pos) != 0)
-        return 0;
+    if (g_dp2m_api->mdf_lseek(dw->fd, (int32_t)offset, 0u, &pos) != 0 || pos != offset)
+        I_Error("WAD seek failed at 0x%X", offset);
 
     uint8_t *dst = (uint8_t *)buffer;
     size_t total = 0;
@@ -180,6 +238,9 @@ static size_t W_DP2M_Read(wad_file_t *wad, unsigned int offset,
             break;
         total += got;
     }
+    if (total != buffer_len)
+        I_Error("Short WAD read at 0x%X (%u of %u)", offset,
+                (unsigned)total, (unsigned)buffer_len);
     return total;
 }
 

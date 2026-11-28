@@ -39,6 +39,55 @@ const K0_QS: u32 = key0_bit(8);
 const K0_MODE: u32 = key0_bit(9);
 const K0_PLAY: u32 = key0_bit(11);
 
+/// Simulator call stack: every `UI_DISPATCH` call starts at `CALL_SP` and grows down into
+/// SDRAM that neither stock firmware, the payload `.bss`, nor the `D2AP` arena references.
+const SIM_CALL_SP_OFF: usize = 0x0200_1000;
+const STACK_PROBE_LEN: usize = 0x0010_0000;
+const STACK_PROBE_FILL: u8 = 0xC5;
+
+fn stack_probe_arm(cam: &mut Camera) {
+    cam.cpu_mut().sdram_mut()[SIM_CALL_SP_OFF - STACK_PROBE_LEN..SIM_CALL_SP_OFF].fill(STACK_PROBE_FILL);
+}
+
+/// Deepest stack use in bytes below the screen dispatcher's entry SP since `stack_probe_arm`.
+fn stack_probe_high_water(cam: &mut Camera) -> usize {
+    let probe = &cam.cpu_mut().sdram_mut()[SIM_CALL_SP_OFF - STACK_PROBE_LEN..SIM_CALL_SP_OFF];
+    let untouched = probe.iter().take_while(|&&b| b == STACK_PROBE_FILL).count();
+    STACK_PROBE_LEN - untouched
+}
+
+const APP_STACK_LEN: usize = 8192;
+const APP_STACK_GUARD: u32 = 0x4432_5347;
+const TELEMETRY_ENTRY_SP_OFF: u32 = 76;
+
+fn linked_map_symbol(map: &str, name: &str) -> u32 {
+    for line in map.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(addr) = fields.next() else { continue };
+        if fields.any(|field| field == name) {
+            return u32::from_str_radix(addr, 16)
+                .unwrap_or_else(|_| panic!("invalid address for {name}: {addr}"));
+        }
+    }
+    panic!("linked map is missing {name}");
+}
+
+/// Arm the real applet stack between event-driven calls, when no applet frame is active.
+fn app_stack_probe_arm(cam: &mut Camera, stack_va: u32) {
+    let off = (stack_va - 0xA000_0000) as usize;
+    let stack = &mut cam.cpu_mut().sdram_mut()[off..off + APP_STACK_LEN];
+    stack.fill(STACK_PROBE_FILL);
+    stack[..4].copy_from_slice(&APP_STACK_GUARD.to_be_bytes());
+}
+
+fn app_stack_probe_high_water(cam: &mut Camera, stack_va: u32) -> usize {
+    let off = (stack_va - 0xA000_0000) as usize;
+    // Skip the permanently non-fill guard word at the bottom of the stack.
+    let probe = &cam.cpu_mut().sdram_mut()[off + 4..off + APP_STACK_LEN];
+    let untouched = probe.iter().take_while(|&&b| b == STACK_PROBE_FILL).count();
+    probe.len() - untouched
+}
+
 /// Assemble a self-contained big-endian ARM `D2AP` v1 applet that:
 /// - verifies `.bss` (`0xA1CC0080..0xA1CC0100`) was zeroed by `doom_try_load_app`,
 /// - allocates a 256-byte heap block on `INIT` (`cmd == 0`) and stores the pointer in `.bss`,
@@ -274,21 +323,19 @@ fn standalone_doom_bin_and_shareware_wad_full_demo_flow() {
     if let Ok(p) = std::env::var("DP2M_WAD") {
         wad_cands.push(PathBuf::from(p));
     }
-    wad_cands.push(PathBuf::from("/tmp/dp2m-audit/DOOM1.WAD"));
     wad_cands.push(root.join("out/DOOM1.WAD"));
 
     let mut dg_cands = Vec::new();
-    if let Ok(p) = std::env::var("DP2M_DOOMGENERIC") {
+    if let Ok(p) = std::env::var("DOOMGENERIC_DIR") {
         dg_cands.push(PathBuf::from(p));
     }
-    dg_cands.push(PathBuf::from("/tmp/dp2m-audit/doomgeneric/doomgeneric"));
     dg_cands.push(root.join("vendor/doomgeneric/doomgeneric"));
     let Some(wad_path) = wad_cands.iter().find(|p| p.is_file()) else {
-        eprintln!("skipping standalone DOOM1.WAD test (no DOOM1.WAD present)");
+        eprintln!("skipping standalone DOOM1.WAD test (set DP2M_WAD or place out/DOOM1.WAD)");
         return;
     };
     let Some(dg_dir) = dg_cands.iter().find(|p| p.join("d_main.c").is_file()) else {
-        eprintln!("skipping standalone DOOM.BIN build test (no doomgeneric checkout present)");
+        eprintln!("skipping standalone DOOM.BIN build test (set DOOMGENERIC_DIR or clone into vendor/doomgeneric)");
         return;
     };
 
@@ -320,6 +367,13 @@ fn standalone_doom_bin_and_shareware_wad_full_demo_flow() {
 
     let doom_warp = std::fs::read(warp_dir.join("DOOM.BIN")).expect("read warp DOOM.BIN");
     let doom_std = std::fs::read(std_dir.join("DOOM.BIN")).expect("read std DOOM.BIN");
+    let warp_map = std::fs::read_to_string(warp_dir.join("doom/doom.map")).expect("read warp map");
+    let std_map = std::fs::read_to_string(std_dir.join("doom/doom.map")).expect("read std map");
+    let warp_stack = linked_map_symbol(&warp_map, "g_app_stack");
+    let warp_telemetry = linked_map_symbol(&warp_map, "g_doom_tel");
+    let std_stack = linked_map_symbol(&std_map, "g_app_stack");
+    let std_telemetry = linked_map_symbol(&std_map, "g_doom_tel");
+    let std_menuactive = linked_map_symbol(&std_map, "menuactive");
     let wad_bytes = std::fs::read(wad_path).expect("read DOOM1.WAD");
     let _ = std::fs::remove_dir_all(&tmp_out);
 
@@ -355,6 +409,7 @@ fn standalone_doom_bin_and_shareware_wad_full_demo_flow() {
     cam.mount_sd_file("DOOM1.WAD", wad_bytes.clone());
 
     // Re-open DOOM (SCREEN_MENU remembers Setup Page 4 from step A)
+    stack_probe_arm(&mut cam);
     cam.press(Key::Menu);
     let mut boot_insns = cam.press(Key::Ok);
     if cam.screen_id() != SCREEN_DOOM {
@@ -368,6 +423,12 @@ fn standalone_doom_bin_and_shareware_wad_full_demo_flow() {
         cam.live_heap_allocations() > heap_base + 5,
         "DOOM.BIN + preloaded DOOM1.WAD must allocate zone + SDRAM WAD on stock heap"
     );
+    let app_entry_sp = cam.cpu().r32_be(warp_telemetry + TELEMETRY_ENTRY_SP_OFF);
+    assert!(
+        (warp_stack..warp_stack + APP_STACK_LEN as u32).contains(&app_entry_sp),
+        "applet entry SP {app_entry_sp:#010x} must be inside private stack {warp_stack:#010x}"
+    );
+    app_stack_probe_arm(&mut cam, warp_stack);
 
     // Advance past screen wipe into live E1M1 Hangar
     for _ in 0..38 {
@@ -410,45 +471,61 @@ fn standalone_doom_bin_and_shareware_wad_full_demo_flow() {
         heap_base,
         "Play exit from DOOM.BIN must free 100% of heap allocations"
     );
+    let stack_evt = stack_probe_high_water(&mut cam);
+    let app_stack_evt = app_stack_probe_high_water(&mut cam, warp_stack);
+    assert!(app_stack_evt > 0, "private-stack probe must observe real engine frames");
+    assert_eq!(cam.cpu().r32_be(warp_stack), APP_STACK_GUARD, "private stack guard overwritten");
 
     // C) Autonomous hardware UI-task flow (`tid = 7`) with standard Title-Screen DOOM.BIN + DOOM1.WAD
     //    plus re-entry check: exercises Menu -> New Game, Command Dial turning, QS+AEL Tilt-Strafe,
     //    Explorer region stepping (`QS+Down`), MBX drain, PSAVE bit release, and zero heap leak!
-    cam.mount_sd_file("DOOM.BIN", doom_std);
+    cam.mount_sd_file("DOOM.BIN", doom_std.clone());
     cam.set_tilt(28, 64);
     cam.enqueue_mbx_packet(0xA080_3000);
     cam.cpu_mut().w8(0xA07A_F38C, 1);
+    stack_probe_arm(&mut cam);
 
     let auto_insns = cam
         .run_autonomous_open(SCREEN_DOOM, 7, 450_000_000, move |cpu, step| {
             match step {
-                0 => cpu.w32(0xA07F_AA1C, 0),
-                1 => cpu.w32(0xA07F_AA28, 0x8400_0000),        // Shutter opens menu on Title Screen
-                2 => {
-                    cpu.w32(0xA07F_AA28, 0);
-                    cpu.w32(0xA07F_AA1C, K0_OK);               // New Game
+                0 => cpu.w32(0xA07F_AA1C, K0_OK),              // Inherited OK hold must be ignored
+                1 => {
+                    assert_eq!(cpu.r32_be(std_menuactive), 0, "inherited OK opened the DOOM menu");
+                    let sp = cpu.r32_be(std_telemetry + TELEMETRY_ENTRY_SP_OFF);
+                    assert!((std_stack..std_stack + APP_STACK_LEN as u32).contains(&sp));
+                    cpu.w32(0xA07F_AA1C, 0);                   // Release inherited hold
                 }
-                3 => cpu.w32(0xA07F_AA1C, 0),
-                4 => cpu.w32(0xA07F_AA1C, K0_OK),               // Knee-Deep in the Dead
+                2 => cpu.w32(0xA07F_AA1C, K0_OK),              // Open menu on Title Screen
+                3 => {
+                    assert_ne!(cpu.r32_be(std_menuactive), 0, "fresh OK did not open the DOOM menu");
+                    cpu.w32(0xA07F_AA1C, 0);
+                }
+                4 => cpu.w32(0xA07F_AA1C, K0_OK),              // New Game
                 5 => cpu.w32(0xA07F_AA1C, 0),
-                6 => cpu.w32(0xA07F_AA1C, K0_OK),               // Hurt Me Plenty -> 33-tic melt -> E1M1
-                7..=44 => {
+                6 => cpu.w32(0xA07F_AA1C, K0_OK),              // Knee-Deep in the Dead
+                7 => cpu.w32(0xA07F_AA1C, 0),
+                8 => cpu.w32(0xA07F_AA1C, K0_OK),              // Hurt Me Plenty -> 33-tic melt -> E1M1
+                9..=46 => {
                     cpu.w32(0xA07F_AA1C, K0_UP);               // Advance through melt into live E1M1
                     cpu.w8(0xA07A_F38C, ((step % 3) + 1) as u8); // Proportional Command Dial turn
                 }
-                45 => cpu.w32(0xA07F_AA1C, K0_QS | K0_AEL),    // Toggle accelerometer Tilt-Strafe ON
-                46 => cpu.w32(0xA07F_AA1C, K0_MODE),           // Mode 1
-                47 => cpu.w32(0xA07F_AA1C, 0),
-                48 => cpu.w32(0xA07F_AA1C, K0_MODE),           // Mode 2 (Live HW Explorer)
-                49 => cpu.w32(0xA07F_AA1C, K0_QS | K0_DOWN),   // Step Explorer hex peek region
-                50 => cpu.w32(0xA07F_AA1C, 0),
+                47 => cpu.w32(0xA07F_AA1C, K0_QS | K0_AEL),    // Toggle accelerometer Tilt-Strafe ON
+                48 => cpu.w32(0xA07F_AA1C, K0_MODE),           // Mode 1
+                49 => cpu.w32(0xA07F_AA1C, 0),
+                50 => cpu.w32(0xA07F_AA1C, K0_MODE),           // Mode 2 (Live HW Explorer)
+                51 => cpu.w32(0xA07F_AA1C, K0_QS | K0_DOWN),   // Step Explorer hex peek region
+                52 => cpu.w32(0xA07F_AA1C, 0),
                 _ => cpu.w32(0xA07F_AA1C, K0_PLAY),            // Clean exit to Live View
             }
         })
         .expect("autonomous DOOM.BIN + DOOM1.WAD run");
 
+    let stack_auto = stack_probe_high_water(&mut cam);
+    assert_eq!(cam.cpu().r32_be(std_stack), APP_STACK_GUARD, "autonomous stack guard overwritten");
     println!(
-        "DOOM.BIN verified: boot_insns={boot_insns}, e1m1_step_insns={step_insns}, auto_insns={auto_insns}"
+        "DOOM.BIN verified: boot_insns={boot_insns}, e1m1_step_insns={step_insns}, auto_insns={auto_insns}, \
+         stock_stack_high_water: event={stack_evt} B, autonomous={stack_auto} B; \
+         app_stack_high_water: event={app_stack_evt} B"
     );
     assert!(cam.cpu().watch_hits.is_empty(), ".text write watch hits: {:?}", cam.cpu().watch_hits);
     assert!(cam.cpu().last_error.is_none(), "CPU error: {:?}", cam.cpu().last_error);
@@ -465,9 +542,9 @@ fn standalone_doom_bin_and_shareware_wad_full_demo_flow() {
     // D) Streaming >6 MB WAD (> WAD_PRELOAD_MAX) exercises 16 KB MDF sector cache and raw fd tracking
     cam.cpu_mut().w32(0xA07F_AA1C, 0);
     cam.cpu_mut().w32(0xA07F_AA28, 0);
-    let mut big_wad = wad_bytes;
+    let mut big_wad = wad_bytes.clone();
     big_wad.resize(6 * 1024 * 1024 + 4096, 0);
-    cam.mount_sd_file("DOOM.BIN", doom_warp);
+    cam.mount_sd_file("DOOM.BIN", doom_warp.clone());
     cam.mount_sd_file("DOOM1.WAD", big_wad);
     cam.press(Key::Menu);
     cam.press(Key::Ok);
@@ -496,4 +573,30 @@ fn standalone_doom_bin_and_shareware_wad_full_demo_flow() {
         heap_base,
         "streaming WAD exit must free 100% of heap allocations"
     );
+
+    // E) A directory entry beyond EOF must fail INIT instead of parsing recycled memory.
+    let mut bad_wad = wad_bytes;
+    let dir_ofs = u32::from_le_bytes(bad_wad[8..12].try_into().unwrap()) as usize;
+    let bad_pos = bad_wad.len() as u32 - 4;
+    bad_wad[dir_ofs..dir_ofs + 4].copy_from_slice(&bad_pos.to_le_bytes());
+    bad_wad[dir_ofs + 4..dir_ofs + 8].copy_from_slice(&0x100u32.to_le_bytes());
+    cam.mount_sd_file("DOOM.BIN", doom_warp);
+    cam.mount_sd_file("DOOM1.WAD", bad_wad);
+    cam.press(Key::Menu);
+    cam.press(Key::Ok);
+    if cam.screen_id() != SCREEN_DOOM {
+        for _ in 0..4 {
+            cam.press(Key::Down);
+        }
+        cam.press(Key::Ok);
+    }
+    assert_eq!(cam.screen_id(), SCREEN_DOOM, "bad WAD must fall back to built-in DOOM");
+    assert_eq!(cam.open_sd_fds(), 0, "bad WAD must close all SD descriptors");
+    assert_eq!(
+        cam.live_heap_allocations(),
+        heap_base,
+        "bad WAD INIT failure must free all applet heap allocations"
+    );
+    cam.press(Key::Play);
+    assert_eq!(cam.screen_id(), SCREEN_LV);
 }

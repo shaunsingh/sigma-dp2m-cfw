@@ -138,9 +138,15 @@ void *realloc(void *ptr, size_t size) {
 }
 
 void dp2m_free_all(void) {
-    while (g_alloc_head) {
-        void *payload = (void *)(g_alloc_head + 1);
-        free(payload);
+    /* A damaged header must not trap the UI task in free()'s early return. */
+    uint32_t guard = 0u;
+    while (g_alloc_head && ++guard < 65536u) {
+        struct alloc_hdr *h = g_alloc_head;
+        g_alloc_head = h->next;
+        if (g_alloc_head) g_alloc_head->prev = NULL;
+        h->magic = 0u;
+        if (g_dp2m_api && g_dp2m_api->free_fn)
+            g_dp2m_api->free_fn(h);
     }
     g_doom_tel.heap_bytes = 0u;
     g_doom_tel.heap_blocks = 0u;
@@ -362,7 +368,10 @@ void exit(int status) {
     if (g_doom_jmp_armed) {
         dp2m_longjmp(g_doom_exit_jmp, status == 0 ? 1 : -1);
     }
-    for (;;) {}
+    for (;;) {
+        if (g_dp2m_api && g_dp2m_api->sleep_ms)
+            g_dp2m_api->sleep_ms(1000u);
+    }
 }
 
 void abort(void) { exit(-1); }

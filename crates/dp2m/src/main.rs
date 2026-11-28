@@ -473,6 +473,10 @@ fn verify_cmd(root: &Path, args: &[String]) -> Result<(), String> {
     if results.iter().any(|s| s.failed > 0) {
         return Err("verification failed".into());
     }
+    let skipped: Vec<_> = results.iter().filter(|s| s.skipped).map(|s| s.name).collect();
+    if !skipped.is_empty() {
+        return Err(format!("verification incomplete: skipped suites: {}", skipped.join(", ")));
+    }
     Ok(())
 }
 

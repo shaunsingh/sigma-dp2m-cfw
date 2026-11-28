@@ -10,6 +10,7 @@ use std::thread;
 use crate::elf::{self, Elf};
 
 pub const APP_MAGIC: u32 = 0x4432_4150; // "D2AP"
+pub const APP_ABI_VER: u32 = 1;
 pub const APP_LOAD_VA: u32 = 0xA1CC_0000;
 pub const APP_LIMIT_VA: u32 = 0xA1E0_0000;
 
@@ -68,7 +69,6 @@ pub fn resolve_doomgeneric_dir(root: &Path, explicit: Option<&Path>) -> Result<P
     }
     cands.push(root.join("vendor/doomgeneric/doomgeneric"));
     cands.push(root.join("vendor/doomgeneric"));
-    cands.push(PathBuf::from("/tmp/dp2m-audit/doomgeneric/doomgeneric"));
 
     for c in cands {
         if c.join("d_main.c").is_file() {
@@ -140,6 +140,7 @@ pub fn build_doom(root: &Path, dg_dir: &Path, out_dir: &Path, warp_e1m1: bool) -
                     "--target=armeb-none-eabi",
                     "-mcpu=arm926ej-s",
                     "-mfloat-abi=soft",
+                    "-mno-unaligned-access",
                     "-std=gnu99",
                     "-fsigned-char",
                     "-ffreestanding",
@@ -216,6 +217,9 @@ pub fn build_doom(root: &Path, dg_dir: &Path, out_dir: &Path, warp_e1m1: bool) -
     }
 
     let img_len = (image_end - APP_LOAD_VA) as usize;
+    if img_len < 32 {
+        return Err(format!("DOOM.BIN image too small for D2AP header: {img_len} B"));
+    }
     let mut bin = vec![0u8; img_len];
     for sec in elf.sections.iter().filter(|s| s.flags & elf::SHF_ALLOC != 0 && s.kind != elf::SHT_NOBITS && s.size > 0) {
         if sec.addr < APP_LOAD_VA || sec.addr.saturating_add(sec.size) > image_end {
@@ -230,10 +234,29 @@ pub fn build_doom(root: &Path, dg_dir: &Path, out_dir: &Path, warp_e1m1: bool) -
         bin[24..28].copy_from_slice(&(old_flags | 1).to_be_bytes());
     }
 
-    let magic = u32::from_be_bytes(bin[0..4].try_into().unwrap());
-    let entry_va = u32::from_be_bytes(bin[12..16].try_into().unwrap());
+    let field = |off: usize| u32::from_be_bytes(bin[off..off + 4].try_into().unwrap());
+    let magic = field(0);
+    let abi_ver = field(4);
+    let load_va = field(8);
+    let entry_va = field(12);
+    let header_image_size = field(16);
+    let header_bss_end = field(20);
     if magic != APP_MAGIC {
         return Err(format!("DOOM.BIN header magic mismatch: {magic:#010x}"));
+    }
+    if abi_ver != APP_ABI_VER || load_va != APP_LOAD_VA {
+        return Err(format!(
+            "DOOM.BIN ABI/load mismatch: abi={abi_ver}, load={load_va:#010x}"
+        ));
+    }
+    if header_image_size != img_len as u32 || header_bss_end != bss_end {
+        return Err(format!(
+            "DOOM.BIN layout header mismatch: image={header_image_size:#x}/{img_len:#x}, bss={header_bss_end:#010x}/{bss_end:#010x}"
+        ));
+    }
+    let entry_base = entry_va & !1;
+    if !(APP_LOAD_VA..image_end).contains(&entry_base) {
+        return Err(format!("DOOM.BIN entry outside image: {entry_va:#010x}"));
     }
 
     fs::create_dir_all(out_dir).map_err(|e| format!("mkdir {}: {e}", out_dir.display()))?;

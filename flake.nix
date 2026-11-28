@@ -13,6 +13,7 @@
         # the unwrapped clang cross-compiles the M6M payload without host flags
         default = pkgs.mkShell {
           packages = with pkgs; [
+            git
             rustc
             cargo
             clippy

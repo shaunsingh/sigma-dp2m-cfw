@@ -1,217 +1,152 @@
 # dp2m-fw
 
-Custom firmware, toolchain and reverse-engineering notes for the Sigma DP2 Merrill.
+Custom firmware for the Sigma DP2 Merrill, built from Sigma's stock 1.05 update.
 
-The camera has two processors, both updated from one package:
-
-- **M6M** (`C78FRM.bin`): ARM946E-S, big endian. UI, settings, live view, capture control.
-- **M5Slave** (`Firm.bin`): Fujitsu FR80 ("TRUE II"), big endian. Capture ISP and the JPEG / X3F pipeline.
-
-dp2m starts from the stock 1.05 package (`DP2MV105.bin`). It assembles FR80 code into free M5 flash, compiles a C/asm payload and links it into unused parts of the M6M image, and writes a new package for the stock updater.
-
-> **Status**: Build `a441ed3` was installed on a DP2 Merrill and used by hand (film captures with the expected MakerNote tags, menus, live-view looks, DOOM). Probe V2 (`42cf7ec`) and V3 (`dd67465`) later made synthetic CPU, memory, input, framebuffer, and display measurements on camera. The current standalone `DOOM.BIN` platform and later capture-processing changes remain emulator-verified only; end-to-end application frame rates and the current package still need on-camera validation.
+The camera has two processors: an ARM946E-S running the UI and capture controls, and a Fujitsu FR80 handling image processing. The builder patches both and writes one package for Sigma's firmware updater.
 
 ## Features
 
-- **Film** menu page: color mode, print paper, 3D spectral engine, grain, halation, X3 fill.
-- Custom QS can assign print paper, engine, grain, halation and X3 fill to any Quick Set slot.
-- 36 color modes after the 8 stock ones: Quattro looks, optical-filter mono, reversal, negative and B&W films, and an SD-card LUT mode. Negative films take one of 8 print papers, B&W films one of 8 darkroom papers, the SD LUT mode one of `LUT1.BIN`..`LUT8.BIN`.
-- 3D spectral engine, grain and halation are independent toggles.
-- Live view uses each film's color matrix and tone curve, and follows mode and paper changes immediately.
-- Custom exposure modes C1..C3, F1, F2.
-- ISO 50, Auto-ISO lower limit down to ISO 50, 5-shot bracketing, minimum shutter speed for ISO auto.
-- 11 live-view overlays as extra grid modes (7..17): electronic level (7), aspect masks with level (21:9 XPan, 16:9 Cinema, 1:1 Square, 7:6, 4:3), focus peaking and peaking + level (runtime Medium / High / Low / Auto MF sensitivity + Red / Yellow / White / Black color), zebras (runtime 95% / 90% Safe / 100% Clip / Dual Hi+Lo), RGB histogram + level, and False Color (IRE heatmap + legend).
-- Bare-metal ARM946E-S **DOOM** platform (`SCREEN_DOOM`, Setup page 4):
-  - **SD-loaded full id DOOM engine** (`DOOM.BIN` + `DOOM1.WAD` via `dp2m build-doom`, `D2AP` v1 applet ABI at `0xA1CC0000..0xA1E00000` outside `C78FRM.bin`): targets a 35 Hz loop for genuine shareware/commercial `.WAD` files (`get_tim`/`dly_tsk` tic-boundary pacing, 2×2 Bayer RGBA4444 dithering, `<= 6 MB` SDRAM WAD preload on the 17 MiB stock C heap with a 16 KB MDF sector cache fallback) with a 3-mode DP2M Tech Demo HUD (Mode 0 Camera Telemetry Dashboard + 60-frame frametime sparkline, Mode 1 640×480 4:3 CRT, Mode 2 Live Hardware & Memory Explorer), Shutter fire, Command Dial proportional turning, `QS` button chording, and optional MXC6226XC accelerometer Tilt-Strafe.
-  - **Built-in ROM fallback**: when `DOOM.BIN` or a `.WAD` is absent from the SD card, `SCREEN_DOOM` falls back automatically to the self-contained 2.5D sector/portal E1M1 engine in ROM with the same autonomous 35 Hz loop and hardware controls.
+- Film simulations, Quattro color modes, monochrome filters, print papers, and custom SD-card 3D LUTs.
+- Optional 3D spectral processing, grain, halation, and exposure fill.
+- Live-view film previews and extra grids: level, aspect masks, focus peaking, zebras, histogram, and false color.
+- Custom exposure modes, ISO 50, five-shot bracketing, and a minimum shutter speed for Auto ISO.
+- Standalone DOOM, loaded from the SD card.
+
+See `dp2m.example.fnl` for every configuration option and [docs/hardware.md](docs/hardware.md) for the technical reference.
 
 ## Requirements
 
-- Rust 1.85 or newer (edition 2024) with `cargo` (and `wasm32-unknown-unknown` target for `dp2m sim`).
-- LLVM `clang` and `ld.lld` on `PATH`. The M6M build calls them directly with `--target=armeb-none-eabi`.
-- A host C compiler and `make`: `mlua` builds its vendored LuaJIT from source.
-- Optional: Nix. `nix develop` opens a shell with all of the above (see `flake.nix`).
+- Rust 1.85 or newer (edition 2024), with the `wasm32-unknown-unknown` target for the simulator.
+- LLVM `clang` and `ld.lld` on `PATH`.
+- A host C compiler and `make` for the vendored LuaJIT build.
+- `data/DP2MV105.bin`, the stock 1.05 package.
 
-The build reads the stock package from `data/DP2MV105.bin`.
+With Nix, `nix develop` provides the complete toolchain, including Git.
 
-## Quick start
+## Build
 
 ```sh
-cp dp2m.example.fnl dp2m.fnl   # optional: dp2m.example.fnl is used when dp2m.fnl is missing
+cp dp2m.example.fnl dp2m.fnl   # optional
 cargo run --release -- build
 ```
 
-## Configuration
+Without `dp2m.fnl`, the builder uses `dp2m.example.fnl`.
 
-`dp2m.fnl` is a [Fennel](https://fennel-lang.org) program. The builder compiles and runs it with an embedded LuaJIT (`mlua`, with the bundled `crates/dp2m/lua/fennel.lua`) and reads the table it returns. A global `dp2m` exposes the catalog, so a config can compute its settings:
+Outputs go to `out/`:
 
-| Global | Content |
+| File | Purpose |
 | --- | --- |
-| `dp2m.films` | `[{:slug :label :kind}]`, kinds `quattro mono reversal negative bw sd-lut` |
-| `dp2m.papers` | `{:negative [...] :bw [...] :sd-lut [...]}`, each `[{:slug :label}]` |
-| `dp2m.grids` | `[{:slug :label}]` |
+| `DP2MV200.bin` | Complete package for Sigma's firmware updater |
+| `Firm.bin` | M5 image for a debug update |
+| `C78FRM.bin` | M6M image for a debug update |
+| `DOOM.BIN` | Standalone DOOM applet, after `build-doom` |
+| `m6m/` | M6M ELF, linker map, symbols, and generated tables |
 
-Example: show only negative and B&W films, use Kodak 2383 as the "Auto" paper for every negative, and hide the zebra overlay.
+The package name follows `:version` in the configuration. Set `SOURCE_DATE_EPOCH` for a reproducible package date.
+
+## Configure
+
+`dp2m.fnl` is a Fennel program. It can enable films, choose default papers, adjust processing, and hide overlays. Unknown keys and names are rejected.
 
 ```fennel
-(local keep {:negative true :bw true})
-
 {:firmware "data/DP2MV105.bin"
  :version  "2.00"
- :films (collect [_ f (ipairs dp2m.films)]
-          (values f.slug {:enabled (or (. keep f.kind) false)
-                          :paper (if (= f.kind :negative) :kodak-2383)}))
- :m6m {:grids {:zebras false}}}
+ :m5 {:grain-scale 0.5}
+ :m6m {:iso50 true
+       :bkt5 true
+       :grids {:zebras false}}}
 ```
 
-| Key | Default | Meaning |
-| --- | --- | --- |
-| `:firmware` | | stock `DP2MV105.bin`, relative to the repository root |
-| `:out-dir` | `out` | output directory |
-| `:pack` | `data/film_pack.bin` | film calibration pack |
-| `:verify` | `true` | run the FR80 emulation check on `Firm.bin` |
-| `:version` | `"2.00"` | package version `major.minor`, at least `1.05` |
-| `:films` | all shown | per film slug: `true` / `false`, or `{:enabled bool :paper slug}`; `:paper` is the paper used for "Auto" |
-| `:m5` | | `:grain-scale` and `:halo-scale` (0..4); `:sd-lut-defaults {:grain :grain-profile :halo :halo-tint}` for the SD LUT mode |
-| `:m6m` | | `:iso50`, `:bkt5`, `:doom`, `:peaking-threshold`, `:zebra-threshold`, `:min-shutter-q16` (7 APEX Tv values in Q16), `:grids` (per grid slug) |
-| `:sd` | | `:mount`, and the files `stage` copies: `:package` (default `true`), `:firm`, `:c78` |
+`dp2m.example.fnl` documents film selection, paper defaults, SD LUTs, output paths, staging, and all other settings.
 
-Unknown keys and unknown film, paper or grid slugs are errors. `dp2m.example.fnl` lists every key.
+## Install
 
-## Build outputs
+1. Copy `out/DP2MV200.bin` to the SD card root.
+2. On the camera, open **Setup > Firmware Update**.
+3. Confirm the update. Do not remove power until both processors have flashed and the camera has restarted.
 
-| File | Use |
-| --- | --- |
-| `out/DP2MV200.bin` | package for the stock updater; the name follows `:version` |
-| `out/Firm.bin` | M5Slave image, for debug updates |
-| `out/C78FRM.bin` | M6M image, for debug updates |
-| `out/DOOM.BIN` | optional standalone `D2AP` v1 DOOM applet built by `dp2m build-doom` (copied to SD root alongside `DOOM1.WAD`) |
-| `out/m6m/m6m.elf`, `m6m.map` | linked M6M payload and linker map |
-| `out/m6m/m6m.syms` | payload symbols (`address size name`) |
-| `out/m6m/catalog.h`, `catalog.c` | generated strings, menus, film table and live-view looks |
+The updater accepts package versions from 1.05 onward.
 
-Set `SOURCE_DATE_EPOCH` to fix the date written into the package header.
+For a single-processor debug update, copy `Firm.bin` or `C78FRM.bin` to the card root and use the same menu. Debug images skip the package version check. If an M5 update fails with error `0002`, remove the battery; the camera will boot its previous image.
 
-## Installing
-
-1. Copy `DP2MV200.bin` to the root of the SD card.
-2. On the camera, run Setup > Firmware Update. The screen shows the current version and 2.00.
-3. The camera flashes a bridge image, restarts, then flashes the M5 and the M6M. Do not remove power during the update.
-
-The updater accepts any package version from 1.05 up.
-
-### Debug images
-
-`Firm.bin` and `C78FRM.bin` in the card root each flash one chip through the same menu, without a version check. The screen shows a banner and the file date instead of versions (`M6M Only Debug Write.` on stock firmware, `dp2m-fw (M6M)` once dp2m is installed). If `Firm.bin` fails with error 0002, remove the battery; the camera boots its previous image.
-
-`cargo run --release -- stage --to <card>` copies the files enabled under `:sd` and reads them back.
-
-### DOOM
-
-Setup page 4 > DOOM opens `SCREEN_DOOM`. With no extra files on the card it runs the built-in ROM engine. The full engine is a separate applet built from [doomgeneric](https://github.com/ozkl/doomgeneric), whose GPL-2.0 sources stay outside this repository:
+To copy firmware and optional DOOM files to a mounted card and verify the copies:
 
 ```sh
-git clone https://github.com/ozkl/doomgeneric vendor/doomgeneric   # or pass --doomgeneric <dir> / set DOOMGENERIC_DIR
-cargo run --release -- build-doom                                   # writes out/DOOM.BIN
-cargo run --release -- stage --to <card> --wad <DOOM1.WAD>          # copies DOOM.BIN and the WAD next to the firmware
+cargo run --release -- stage --to /path/to/card --wad /path/to/DOOM1.WAD
 ```
 
-The applet uses the first of `DOOM1.WAD`, `DOOM.WAD`, `DOOMU.WAD`, `DOOM2.WAD`, `PLUTONIA.WAD`, `TNT.WAD`, `FREEDOOM1.WAD`, `FREEDOOM2.WAD` in the card root. WADs up to 6 MB are preloaded into SDRAM; larger ones are read from the card through a 16 KB cache.
+The `:sd` configuration controls which firmware files `stage` copies.
 
-| Control | `DOOM.BIN` | Built-in ROM engine |
-| --- | --- | --- |
-| Up / Down | move forward / back | move forward / back |
-| Left / Right | turn | turn |
-| Command dial | turn in a level, move the cursor in menus | turn |
-| Shutter (half or full), OK | fire in a level, confirm in menus | fire |
-| AEL | use | use |
-| MENU | DOOM menu | exit to live view |
-| DISP | automap | automap |
-| MODE | cycle HUD: telemetry dashboard, 640×480 full screen, hardware explorer | next weapon |
-| QS + Left / Right | strafe | strafe |
-| QS + Up / Down | run forward / back (hardware explorer: previous / next memory region) | |
-| QS + dial | previous / next weapon | previous / next weapon |
-| QS + AEL | toggle accelerometer tilt-strafe | |
-| QS | | restart after the level is won |
-| PLAY | exit to live view | exit to live view |
+## DOOM
 
-A button already held when DOOM opens is ignored until it is released. The shutter does not take pictures while DOOM is open, and auto power off is suspended until exit.
+DOOM uses [doomgeneric](https://github.com/ozkl/doomgeneric) and a WAD you supply. The GPL-licensed doomgeneric sources stay outside this repository.
 
-## Commands
+```sh
+git clone https://github.com/ozkl/doomgeneric vendor/doomgeneric
+cargo run --release -- build-doom
+cargo run --release -- stage --to /path/to/card --wad /path/to/DOOM1.WAD
+```
 
-Run as `cargo run --release -- <command>`. Without `--config`, the builder uses `dp2m.fnl`, then `dp2m.example.fnl`, from the repository root.
+You can also pass `--doomgeneric <dir>` or set `DOOMGENERIC_DIR`. Open **Setup page 4 > DOOM**. If `DOOM.BIN` or the WAD is missing or invalid, the camera shows a short notice and returns to Live View; press PLAY to leave immediately.
 
-| Command | Action |
+The applet looks for `DOOM1.WAD`, `DOOM.WAD`, `DOOMU.WAD`, `DOOM2.WAD`, `PLUTONIA.WAD`, `TNT.WAD`, `FREEDOOM1.WAD`, and `FREEDOOM2.WAD` in that order. WADs up to 6 MB are preloaded; larger WADs stream through a 16 KB cache.
+
+| Control | Action |
 | --- | --- |
-| `build [DP2MV105.bin] [--config f] [--out dir] [--pack f] [--skip-verify]` | build all images; `--skip-verify` skips the FR80 check |
-| `build-doom [--doomgeneric dir] [--config f] [--out dir] [--warp]` | cross-compile standalone `out/DOOM.BIN` (`D2AP` v1 applet at `0xA1CC0000`); `--warp` starts directly in E1M1 |
-| `verify [out_dir] [--fw f] [--suite m6m\|custom\|labels] [--artifacts dir] [--quiet]` | native Rust M6M verifier (607 checks across `m6m`, `custom`, `labels` in ~0.6 s; `--artifacts` writes `labels.png`) |
-| `re [--fw f] [--image f] [--syms f] <cmd>` | native M6M RE toolkit: `package`, `dis`, `xrefs`, `callers`, `sid`, `strings`, `menus`, `screens`, `icons`, `nvram`, `liveness`, `text` |
-| `x3f <file.X3F> [--dump out.camf] [--all]` | decode Merrill X3F Type-4 Huffman CAMF sections and dump `CMbM`/`CMbP`/`CMbT` entries |
-| `lut <in.cube> <LUTn.BIN> [--grain N] [--grain-profile 0\|1\|2] [--halo N] [--halo-tint 0\|1\|2] [--tag S]` | compile an Adobe/Resolve `.cube` 3D LUT (`DOMAIN_MIN`/`DOMAIN_MAX`, 17³ + gray anchors) into a 4,160 B D2ML SD-card binary; `lut inspect <LUTn.BIN>` inspects an existing binary |
-| `stage [--config f] [--from dir] [--to card] [--wad DOOM1.WAD]` | copy firmware images (plus `DOOM.BIN` and `.WAD` when present) to the SD card and verify read-back |
-| `verify-m5 <Firm.bin\|out_dir>` | checksums, protected constants and emulated capture jobs |
-| `disasm-fr80 <Firm.bin> <va_start> <va_end>` | disassemble an FR80 address range (hex) |
-| `inspect <file>` | identify a package, `Firm.bin`, `C78FRM.bin`, or `D2AP` applet; print version or checksum |
-| `sim [--from dir] [--wad DOOM1.WAD] [--port p]` | serve the dual-CPU browser simulator on `127.0.0.1:p` (default `8080`, supports drag-and-drop `.WAD`/`DOOM.BIN`) |
-| `sim-trace [pkg.bin] [--sd NAME=PATH] [--keys k1,k2,...] [--ppm f.ppm] [--watch-text]` | run headless dual-CPU key/tick/capture steps, mount virtual SD files, and export PPM frames |
+| Up / Down | Move |
+| Left / Right | Turn |
+| Command dial | Turn; move the cursor in menus |
+| Half/full shutter or OK | Fire; confirm in menus |
+| AEL | Use |
+| MENU | DOOM menu |
+| DISP | Automap |
+| MODE | Cycle telemetry, fullscreen, and hardware explorer views |
+| QS + Left / Right | Strafe |
+| QS + Up / Down | Run; change explorer region |
+| QS + dial | Change weapon |
+| QS + AEL | Toggle tilt-strafe |
+| PLAY | Exit to Live View |
 
-- `cargo test --release --workspace` runs all unit and integration tests (config, catalog, 36-film + 11-grid + DOOM link, FR80/ARM9 ISA, `.cube` PCG compiler, dual-CPU `dp2m-emu::sim` flow, built-in and standalone `DOOM.BIN` + `DOOM1.WAD` flows, Film menu OSD hash check, and the 607-check native M6M verifier across `m6m`, `custom`, `labels`). `dp2m`'s integration tests build firmware in a private temporary directory using `dp2m.example.fnl` and need no prior `out/` (requiring `clang` and `ld.lld` on `PATH`). The standalone `DOOM.BIN` flow is skipped unless doomgeneric (`DOOMGENERIC_DIR` or `vendor/doomgeneric`) and a WAD (`DP2M_WAD` or `out/DOOM1.WAD`) are present. `cargo test --release -p dp2m-emu` tests only the pure-Rust emulation/RE/X3F core.
-- `cargo test --release -p dp2m ycc_bench -- --ignored --nocapture` prints emulated M5 engine costs per stage.
-- `cargo test --release -p dp2m m6m_bench -- --ignored --nocapture` prints emulated M6M live-view overlay, label, and screen costs.
+Buttons held while DOOM opens are ignored until released. Auto power-off is suspended while DOOM runs.
+
+## Development
+
+Run commands as `cargo run --release -- <command>`. Run without a command to print the full usage.
+
+| Command | Purpose |
+| --- | --- |
+| `build` | Build both firmware images and the update package |
+| `build-doom [--warp]` | Build `DOOM.BIN`; `--warp` starts in E1M1 |
+| `verify [out]` | Run M6M firmware checks |
+| `verify-m5 <Firm.bin\|out>` | Check and emulate the M5 image |
+| `stage --to <card>` | Copy selected outputs and verify read-back |
+| `sim` | Run the browser simulator |
+| `sim-trace` | Run scripted camera steps without a browser |
+| `inspect <file>` | Identify a firmware package, image, or applet |
+| `lut <in.cube> <LUTn.BIN>` | Compile a `.cube` LUT for the camera |
+
+```sh
+cargo clippy --release --workspace --all-targets -- -D warnings
+cargo test --release --workspace
+cargo run --release -- verify out
+cargo run --release -- verify-m5 out/Firm.bin
+```
+
+Integration tests build into temporary directories. Standalone DOOM tests run when doomgeneric and a WAD are available through `DOOMGENERIC_DIR` and `DP2M_WAD`, or in their default local paths.
 
 ## Repository layout
 
 ```text
-Cargo.toml               workspace
-dp2m.example.fnl         config template
-flake.nix                Nix dev shell
 crates/
-  dp2m-emu/              unified zero-dep emulation, simulation, RE & verification core
-    src/arm9.rs          ARM946E-S big-endian ARM/Thumb interpreter + write-range logger
-    src/fr80/            FR80 assembler, disassembler, emulator
-    src/sim/             dual-CPU M6M + M5Slave hardware simulator (`hooks`, `m5`, `isp`)
-    src/verify/          native 607-check verifier (`m6m`, `custom`, `labels`)
-    src/re/              native M6M disassembler, xref indexer, recursive-descent liveness & NVRAM scanner
-    src/x3f.rs           X3F Type-4 Huffman CAMF decompressor & CMbM/CMbP/CMbT parser
-    src/{image,stock,machine}.rs  package/S3 loader, stock symbol map, ARM9 test harness
-  dp2m-web/              wasm32 bindings for the browser simulator
-  dp2m/                  CLI & firmware builder
-    lua/fennel.lua       Fennel compiler (embedded)
-    src/main.rs          CLI (`build`, `build-doom`, `verify`, `re`, `x3f`, `lut`, `stage`, `sim`, `sim-trace`, `verify-m5`, `disasm-fr80`, `inspect`)
-    src/doom.rs          standalone `DOOM.BIN` (`D2AP` v1) cross-compiler & linker
-    src/lut.rs           zero-dep `.cube` -> D2ML sparse PCG compiler
-    src/config.rs        Fennel config loader
-    src/catalog.rs       films, papers, grids, packed mode ids
-    src/pack.rs          film_pack.bin reader
-    src/m5.rs            M5 patcher and FR80 verifier
-    src/m6m/mod.rs       M6M compile, link, hooks, invariant checks
-    src/m6m/codegen.rs   generated C tables
-    src/package.rs       DP2MVxxx.bin writer
-    src/elf.rs           ELF reader
-web/                     canvas frontend for `dp2m sim` (drag-and-drop `.WAD`/`DOOM.BIN`)
-src/
-  asm/m5/                FR80 assembly: hooks, YCC engine, spatial driver
-  m6m/                   M6M payload: C, assembly, linker script, `D2AP` applet loader
-  doom/                  standalone `DOOM.BIN` HAL, hybrid WAD loader, 3-mode DP2M HUD/Explorer
-data/
-  DP2MV105.bin           stock firmware 1.05
-  film_pack.bin          calibration tables (D2MP v1)
-  npl_sigma_merrill.json Foveon X3 F20 spectral sensitivity
-  ref/                   other Sigma firmware, for comparison (gitignored, not needed to build)
-docs/                    reference and research notes
+  dp2m/                  CLI and firmware builder
+  dp2m-emu/              ARM9 and FR80 emulation, simulation, and verification
+  dp2m-web/              Browser simulator bindings
+firmware/
+  m5/                    FR80 capture-pipeline assembly
+  m6m/                   ARM9 UI, live-view, and applet-loader payload
+  doom/                  Standalone DOOM hardware layer
+include/dp2m_app.h       Shared DOOM applet ABI
+web/                     Simulator frontend
+data/                    Stock package and calibration data
+dp2m.example.fnl         Configuration reference
 ```
-
-## Documentation
-
-- [docs/hardware.md](docs/hardware.md): consolidated reference (package, memory maps, protected regions, payload and hooks, NVRAM, IPC, M5 pipeline).
-- [docs/research/updater.md](docs/research/updater.md): package format and update flow.
-- [docs/research/m6m-ui.md](docs/research/m6m-ui.md): screens, menus, strings, Quick Set, icons, fonts.
-- [docs/research/m6m-memory.md](docs/research/m6m-memory.md): SDRAM map, NVRAM block, NOR settings record.
-- [docs/research/m6m-rom.md](docs/research/m6m-rom.md): dead-code analysis and payload regions; [candidate list](docs/research/m6m-rom-candidates.tsv).
-- [docs/research/custom-modes.md](docs/research/custom-modes.md): exposure modes and custom slots.
-- [docs/research/live-view.md](docs/research/live-view.md): refresh path, B2Y gamma and matrix, overlays.
-- [docs/research/simulator-and-pb.md](docs/research/simulator-and-pb.md): dual-CPU simulator, native AE solver, µITRON syscalls, Milbeaut IIP/DMA, `SCREEN_PB` (`0x19`), DCF and `exif_main`.
-- [docs/research/hardware-probe.md](docs/research/hardware-probe.md): on-camera hardware probe measurements, MPU/cache findings, and `D2AP` standalone applet architecture.
-- [docs/research/hillclimb.md](docs/research/hillclimb.md): current build metrics, region usage, and emulator benchmarks.
-- [docs/research/reference-firmware.md](docs/research/reference-firmware.md): other Sigma firmware (local, gitignored `data/ref/`).

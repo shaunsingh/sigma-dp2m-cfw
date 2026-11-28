@@ -40,7 +40,7 @@ fn parse_hex(s: &str) -> Result<u32, String> {
 
 fn repo_root() -> PathBuf {
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    if cwd.join("src/m6m").is_dir() {
+    if cwd.join("firmware/m6m").is_dir() {
         return cwd;
     }
     Path::new(env!("CARGO_MANIFEST_DIR")).ancestors().nth(2).map_or(cwd, Path::to_path_buf)
@@ -125,11 +125,11 @@ fn build(root: &Path, args: &[String]) -> Result<(), String> {
 
     let fw = read(&raw)?;
     let pack = FilmPack::load(&pack_path)?;
-    let firm = m5::build_m5(&fw, &pack, &root.join("src/asm/m5"), &cfg)?;
+    let firm = m5::build_m5(&fw, &pack, &root.join("firmware/m5"), &cfg)?;
     if cfg.verify && !a.has("--skip-verify") {
         m5::verify_m5(&firm)?;
     }
-    let c78 = m6m::build_m6m(&fw, &pack, &root.join("src/m6m"), &out.join("m6m"), &cfg)?;
+    let c78 = m6m::build_m6m(&fw, &pack, &root.join("firmware/m6m"), &out.join("m6m"), &cfg)?;
     let pkg = package::build(&fw, &firm, &c78, &cfg)?;
 
     let pkg_name = package::file_name(&cfg)?;

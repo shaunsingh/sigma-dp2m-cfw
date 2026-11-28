@@ -1,6 +1,6 @@
 # Sigma DP2 Merrill (C78) hardware and firmware reference
 
-Static analysis of stock `DP2MV105.bin` (1.05, May 2013), emulator verification, and the [on-camera probe](research/hardware-probe.md). Build `a441ed3` was installed on a DP2 Merrill and used by hand (film captures with the expected MakerNote tags, menus, live-view looks, DOOM). Probes V2 (`42cf7ec`) and V3 (`dd67465`) added synthetic hardware and direct display-operation measurements; later capture-processing changes still await camera-validation feedback. Detailed evidence and addresses are in [research/](research/).
+Technical reference for the firmware builder and payloads. See [README.md](../README.md) for installation and configuration.
 
 | Chip | Image | CPU | Role |
 | --- | --- | --- | --- |
@@ -23,8 +23,6 @@ Static analysis of stock `DP2MV105.bin` (1.05, May 2013), emulator verification,
 - dp2m writes `DP2MV<major><minor>.bin` (default `DP2MV200.bin`) and patches the "Current version" immediates and the debug banners (`0xA005FC3C`, `0xA005FC5C`, `0xA005FC7C`) in its own M6M.
 - `Firm.bin`, `C78FRM.bin` (and the stock name `C78_M6M5.bin`) in the card root are debug updates: no version check, the screen shows a banner and the file timestamp.
 - Error **`0002`**: `Firm.bin` has non-stock bytes at `VA >= 0x00800000` (outside the 8 MB NOR) or the checksum at `Firm.bin[0x4C..0x50]` does not equal `sum(Firm.bin[0x80..0x800080])`. If the screen locks, remove the battery; the camera boots its previous image.
-
-See [research/updater.md](research/updater.md).
 
 ---
 
@@ -49,13 +47,13 @@ See [research/updater.md](research/updater.md).
 - Verified zero-filled free flash banks in stock `DP2MV105.bin`:
   - **Bank A**: `0x005D0000..0x00800000` (`2,293,760` B) — hooks, YCC engine, spatial driver, ROM LUTs, CMCM, MCAS (sRGB + AdobeRGB), 1D LUTs (sRGB + AdobeRGB), 40 B&W toners, 132 sRGB 3D LUTs (`ends 0x007FF4A0`).
   - **Bank B**: `0x00380000..0x00410000` (`589,824` B) — 132 AdobeRGB 3D LUTs (`ends 0x004054A0`).
-- Bank A layout (`crates/dp2m/src/m5.rs`):
+- Bank A layout (`crates/dp2m/src/m5/mod.rs`):
 
 | VA | Content |
 | --- | --- |
 | `0x005D0000..0x005D03C0` | hook stubs (table in 2.4) |
-| `0x005D03C0` | YCC engine (`src/asm/m5/ycc_engine.fr80`, `3,966` B) |
-| `0x005D1600` | spatial driver (`src/asm/m5/spatial_driver.fr80`, `2,502` B) |
+| `0x005D03C0` | YCC engine (`firmware/m5/ycc_engine.fr80`, `3,966` B) |
+| `0x005D1600` | spatial driver (`firmware/m5/spatial_driver.fr80`, `2,502` B) |
 | `0x005D2000` / `0x005D2100` | halation LUT / grain envelopes |
 | `0x005D2400` / `0x005D2800` / `0x005D2900` | per-mode meta / mono table / MCAS identity |
 | `0x005D2B00` / `0x005D2C00` | SD LUT path template / clamp LUT |
@@ -86,15 +84,15 @@ Concurrency & buffer constraints (from stock `Firm.bin` static analysis):
 
 | Stock VA | Original / Role | Hook VA | Source |
 | --- | --- | --- | --- |
-| `0x004D3782` | `0x0053BEF0` (CCMatrix) | `0x005D0000` | `src/asm/m5/hook_matrix.fr80` |
-| `0x004E6414` | `0x004950E0` (4096B LUT sel) | `0x005D0180` | `src/asm/m5/hook_lutsel.fr80` |
-| `0x004E6424` | `0x004B3546` (12-sector MCAS) | `0x005D0200` | `src/asm/m5/hook_mcas.fr80` |
-| `0x004DC8F6` | `0x00497674` (set CS) | `0x005D0300` | `src/asm/m5/hook_ipc_exif.fr80` |
-| `0x004D76E2` | `0x004D4FF4` (EXIF CS) | `0x005D0320` | `src/asm/m5/hook_ipc_exif.fr80` |
-| `0x004E2862` | `0x004DCC48` (IPC cmd 0x20) | `0x005D0340` | `src/asm/m5/hook_ipc_exif.fr80` |
-| `0x005147C4` | `0x00512E30` (JPEG EXIF CS) | `0x005D0380` | `src/asm/m5/hook_ipc_exif.fr80` |
-| `0x00514680` | inline 22 B (X3F EXIF CS) | inline | `crates/dp2m/src/m5.rs` |
-| `0x004D738E` | `0x004D3E82` (HW JPEG enc) | `0x005D1600` | `src/asm/m5/spatial_driver.fr80` |
+| `0x004D3782` | `0x0053BEF0` (CCMatrix) | `0x005D0000` | `firmware/m5/hook_matrix.fr80` |
+| `0x004E6414` | `0x004950E0` (4096B LUT sel) | `0x005D0180` | `firmware/m5/hook_lutsel.fr80` |
+| `0x004E6424` | `0x004B3546` (12-sector MCAS) | `0x005D0200` | `firmware/m5/hook_mcas.fr80` |
+| `0x004DC8F6` | `0x00497674` (set CS) | `0x005D0300` | `firmware/m5/hook_ipc_exif.fr80` |
+| `0x004D76E2` | `0x004D4FF4` (EXIF CS) | `0x005D0320` | `firmware/m5/hook_ipc_exif.fr80` |
+| `0x004E2862` | `0x004DCC48` (IPC cmd 0x20) | `0x005D0340` | `firmware/m5/hook_ipc_exif.fr80` |
+| `0x005147C4` | `0x00512E30` (JPEG EXIF CS) | `0x005D0380` | `firmware/m5/hook_ipc_exif.fr80` |
+| `0x00514680` | inline 22 B (X3F EXIF CS) | inline | `crates/dp2m/src/m5/mod.rs` |
+| `0x004D738E` | `0x004D3E82` (HW JPEG enc) | `0x005D1600` | `firmware/m5/spatial_driver.fr80` |
 
 The two EXIF CS hooks at `0x005147C4` / `0x00514680` sit in SD15-era maker note writers (`0x513530..0x5145FA`, `0x514AD8`) with no static references; the M6M writes the file metadata (3.5).
 
@@ -153,12 +151,10 @@ S3 runs from SDRAM at `0xA0000000` (256 MB SDRAM), so code and tables in the ima
 
 **CP15 MPU & 2D DMA cache coherence** (`0xA01720F0..0xA01721EC`):
 - **Region 1 (`0x00000000`, `4 KB` ITCM)**: copied at boot from `0xA07FBC1C` (`0x338 B`, scatter table `0xA07AD3CC`); holds ARM exception vectors and the `SWI` dispatcher (`0x00000170`).
-- **Region 2 (`0xA0000000..0xAFFFFFFF`, `256 MB`)**: stock sets `I-cache = 0` (`c2_i = 0x8`) and instruction AP = 0 (`c5_i` R2 = 0). `src/m6m/hooks.S` patches `0xA0172170` (`E3A00008 -> E3A0000C`) and `0xA0172190` (`E3800000 -> E3800C06`) at boot so Region 2 enables I-cache (`c2_i = 0xC`) and Priv/User read-execute (`c5_i` R2 = `6`), allowing SD-loaded `D2AP` applets (`DOOM.BIN`) to execute cached code from `0xA1CC0000..0xA1E00000` after `SWI 10` (`hw_dcache_sync`) + `SWI 15` (`hw_icache_inv_all`, ITCM `0x0000030C`). `D-cache = 1` (`c2_d = 0xC`) and `Write-Buffer = 1` (`c3 = 0xC`) remain stock.
+- **Region 2 (`0xA0000000..0xAFFFFFFF`, `256 MB`)**: stock sets `I-cache = 0` (`c2_i = 0x8`) and instruction AP = 0 (`c5_i` R2 = 0). `firmware/m6m/hooks.S` patches `0xA0172170` (`E3A00008 -> E3A0000C`) and `0xA0172190` (`E3800000 -> E3800C06`) at boot so Region 2 enables I-cache (`c2_i = 0xC`) and Priv/User read-execute (`c5_i` R2 = `6`), allowing SD-loaded `D2AP` applets (`DOOM.BIN`) to execute cached code from `0xA1CC0000..0xA1E00000` after `SWI 10` (`hw_dcache_sync`) + `SWI 15` (`hw_icache_inv_all`, ITCM `0x0000030C`). `D-cache = 1` (`c2_d = 0xC`) and `Write-Buffer = 1` (`c3 = 0xC`) remain stock.
 - **Region 3 (`0xA0000000..0xA07FFFFF`, `8 MB`)**: `I-cache = 1`, `D-cache = 1`, `Write-Buffer = 1`. Shadows Region 2 for S3 firmware and payload text.
-- **`SWI 10` (`hw_dcache_sync`, ITCM `0x00000248` / S3 `0xA07FBE64`)**: dispatcher (`0x00000170`, S3 `0xA07FBD8C`) saves `{r0, r1}`, reads the SWI number from `[lr, #-2]` when `SPSR.T` is set (Thumb `svc #10`, used by 11 stock call sites e.g. `0xA0117504`), and jumps to `0x00000248`. That handler saves `r2`, cleans all `4 ways × 128 sets × 32 B = 16 KB` of L1 D-cache by index (`mcr p15, 0, r2, c7, c10, 2`), restores `r2`, drains the write buffer (`mcr p15, 0, r1, c7, c10, 4`), invalidates the whole D-cache (`mcr p15, 0, r0, c7, c6, 0`), restores `{r0, r1}`, and returns (`movs pc, lr`); the I-cache is untouched and caller registers are preserved (`hw_dcache_sync()` in `src/m6m/dp2m.h` declares `lr`/`memory` clobbers). Call `hw_dcache_sync()` before and after full-frame CPU writes that hand off to Milbeaut 2D DMA (`stock_fill_rect`, `stock_blit_bp4`, `stock_argb_commit`).
+- **`SWI 10` (`hw_dcache_sync`, ITCM `0x00000248` / S3 `0xA07FBE64`)**: dispatcher (`0x00000170`, S3 `0xA07FBD8C`) saves `{r0, r1}`, reads the SWI number from `[lr, #-2]` when `SPSR.T` is set (Thumb `svc #10`, used by 11 stock call sites e.g. `0xA0117504`), and jumps to `0x00000248`. That handler saves `r2`, cleans all `4 ways × 128 sets × 32 B = 16 KB` of L1 D-cache by index (`mcr p15, 0, r2, c7, c10, 2`), restores `r2`, drains the write buffer (`mcr p15, 0, r1, c7, c10, 4`), invalidates the whole D-cache (`mcr p15, 0, r0, c7, c6, 0`), restores `{r0, r1}`, and returns (`movs pc, lr`); the I-cache is untouched and caller registers are preserved (`hw_dcache_sync()` in `firmware/m6m/dp2m.h` declares `lr`/`memory` clobbers). Call `hw_dcache_sync()` before and after full-frame CPU writes that hand off to Milbeaut 2D DMA (`stock_fill_rect`, `stock_blit_bp4`, `stock_argb_commit`).
 - **`SWI 12` (`hw_dcache_clean_range`, ITCM `0x000002B0` / S3 `0xA07FBECC`)**: cleans 32-byte D-cache lines by modified virtual address (`mcr p15, 0, r0, c7, c10, 1`), drains the write buffer, restores `{r0, r1}`, and leaves unrelated lines and cache validity untouched. The stock loop applies `ceil(r1 / 32)` operations while CP15 ignores `r0[4:0]`; the wrapper therefore aligns the start down and adds the original offset to the byte count. Its body-before-test loop would not terminate for a zero length, so the wrapper guards `n = 0`. `labels.c` uses this after rendering a tile and before the stock blitter reads it, avoiding SWI 10's 512-line clean and whole-cache invalidate. It is not a substitute for invalidating a range before DMA overwrites it.
-
-See [research/m6m-memory.md](research/m6m-memory.md).
 
 ### 3.2 Protected regions
 
@@ -177,7 +173,7 @@ Never write NVRAM `0xA0939774..0xA0939783`: language is at `0xA0939776` and LCD 
 
 ### 3.3 Payload and hooks
 
-The M6M payload is C and assembly in `src/m6m/`, compiled with `clang --target=armeb-none-eabi -mcpu=arm926ej-s -mthumb` (`-O2` on `rt.c`, `hud.c`, `lv.c`; `-Os` elsewhere, with ARM interworking for word-wide loops) and linked with `ld.lld --gc-sections` into dead regions of the stock image ([research/m6m-rom.md](research/m6m-rom.md)). The compiler setting selects compatible ARMv5TE code generation; the physical core is ARM946E-S, as distinguished from the MMU-based ARM926EJ-S by the CP15 MPU, ITCM, and cache operations documented above:
+The M6M payload is C and assembly in `firmware/m6m/`, compiled with `clang --target=armeb-none-eabi -mcpu=arm926ej-s -mthumb` (`-O2` on `rt.c`, `hud.c`, `lv.c`; `-Os` elsewhere, with ARM interworking for word-wide loops) and linked with `ld.lld --gc-sections` into dead regions of the stock image. The compiler setting selects compatible ARMv5TE code generation; the physical core is ARM946E-S, as distinguished from the MMU-based ARM926EJ-S by the CP15 MPU, ITCM, and cache operations documented above:
 
 | Region | Range | Size | Sections | Origin |
 | --- | --- | --- | --- | --- |
@@ -185,19 +181,16 @@ The M6M payload is C and assembly in `src/m6m/`, compiled with `clang --target=a
 | `DATA` | `0xA0265670..0xA0268870` | 12,800 B | `.rodata`, `.data` | f64 table used only by orphaned code |
 | `LOOKS` | `0xA0094658..0xA009688C` | 8,756 B | `.lv` (data only) | orphaned Im_TFR driver |
 | `MENU` | `0xA07EC9CC..0xA07EDC0C` | 4,672 B | `.menu` | factory service menus 0x18..0x22 |
-| `DOOM_A` | `0xA010AF44..0xA010C250` | 4,876 B | `.doom_render` | zero-xref orphaned S3 code |
-| `DOOM_B` | `0xA0107BD8..0xA0108E14` | 4,668 B | `.doom_text` | zero-xref orphaned S3 code |
-| `DOOM_C` | `0xA01360FC..0xA0136AB8` | 2,492 B | `.doom_data` | zero-xref orphaned S3 code |
-| `DOOM_D` | `0xA0140CB0..0xA01415B0` | 2,304 B | `.doom_hud`, `.lv_text` | zero-xref orphaned S3 code |
-| `DOOM_E` | `0xA002A834..0xA002B5E0` | 3,500 B | `.doom_init` | zero-xref orphaned S3 code |
+| `APPLET` | `0xA002A834..0xA002B5E0` | 3,500 B | `.applet` | zero-xref orphaned S3 code |
+| `LVCODE` | `0xA0140CB0..0xA01415B0` | 2,304 B | `.lv_text` | zero-xref orphaned S3 code |
 | `RAM` | `0xA1C00000..0xA1E00000` | 2 MB | `.bss`, not cleared at boot | unreferenced SDRAM |
 
-- `REGIONS` in `crates/dp2m/src/m6m/mod.rs` generates the linker `MEMORY` block (`out/m6m/regions.ld`); `src/m6m/m6m.ld` maps sections to regions. The builder rejects sections outside them and rejects executable (`SHF_EXECINSTR`) sections inside `0xA0070000..0xA00B8000` (`LOOKS` overlaps `Camera`'s HLE driver stub range).
+- `REGIONS` in `crates/dp2m/src/m6m/mod.rs` generates the linker `MEMORY` block (`out/m6m/regions.ld`); `firmware/m6m/m6m.ld` maps sections to regions. The builder rejects sections outside them and rejects executable (`SHF_EXECINSTR`) sections inside `0xA0070000..0xA00B8000` (`LOOKS` overlaps `Camera`'s HLE driver stub range).
 - Screen vtable slot 33 (`0xA07DEBAC`) hosts `SCREEN_DOOM` (`doom_screen`) when `:doom` is enabled; slots 34..49 (`0xA07DEBB0..0xA07DEBEF`) are set to `dp2m_ret0`, after checking that each still points into `CODE`.
-- Stock functions are absolute symbols in `src/m6m/stock.S` with bit 0 set for Thumb, so lld picks BL or BLX.
+- Stock functions are absolute symbols in `firmware/m6m/stock.S` with bit 0 set for Thumb, so lld picks BL or BLX.
 - `crates/dp2m/src/m6m/codegen.rs` generates `catalog.c` / `catalog.h`: strings, menu tables, the film table and the live-view looks.
 
-Every patch to stock code is a 16-byte record `{kind, site, target, expect}` (BE) in the non-allocated section `.dp2m.hooks`, written with the `HOOK_*` macros (`src/m6m/dp2m.h`) or the `hook` assembler macro (`src/m6m/hooks.S`). The builder checks `expect` against the stock bytes, fails on a mismatch, then applies:
+Every patch to stock code is a 16-byte record `{kind, site, target, expect}` (BE) in the non-allocated section `.dp2m.hooks`, written with the `HOOK_*` macros (`firmware/m6m/dp2m.h`) or the `hook` assembler macro (`firmware/m6m/hooks.S`). The builder checks `expect` against the stock bytes, fails on a mismatch, then applies:
 
 | Kind | Effect | `expect` |
 | --- | --- | --- |
@@ -206,13 +199,13 @@ Every patch to stock code is a 16-byte record `{kind, site, target, expect}` (BE
 | `HOOK_WORD` (3) | write a 32-bit value | stock word |
 | `HOOK_HALF` (4) | write a 16-bit value | stock halfword |
 
-Thumb BL reaches ±4 MB. Sources: `ui.c` (settings, menus, strings, IPC packing, Film page), `custom.c` (F1/F2), `lv.c` (live-view color), `hud.c` (overlays), `labels.c` (runtime label icons), `doom.c` / `doom_render.c` / `dp2m_app.h` (`D2AP` v1 SD applet loader at `0xA1CC0000..0xA1E00000` + autonomous 35 Hz 2.5D sector/portal fallback + shutter guard at `0xA01690B6`), `hooks.S` (register-exact trampolines + Region 2 MPU patches), `rt.c` (`memcpy`, `memset`). Standalone `DOOM.BIN` sources live in `src/doom/` (`doom.ld`, `dp2m_doom.h`, `dp2m_doom_main.c`, `i_video_dp2m.c`, `w_file_dp2m.c`, `libc_dp2m.c`, `m_fixed_dp2m.c`, `rt_dp2m.c`) and link outside `C78FRM.bin` via `dp2m build-doom`.
+Thumb BL reaches ±4 MB. Sources: `ui.c` (settings, menus, strings, IPC packing, Film page), `custom.c` (F1/F2), `lv.c` (live-view color), `hud.c` (overlays), `labels.c` (runtime label icons), `applet.c` and `include/dp2m_app.h` (D2AP v1 SD applet loader at `0xA1CC0000..0xA1E00000`), `hooks.S` (register-exact trampolines + Region 2 MPU patches), and `rt.c` (`memcpy`, `memset`). Standalone `DOOM.BIN` sources live in `firmware/doom/` and link outside `C78FRM.bin` via `dp2m build-doom`.
 
 ### 3.4 NVRAM
 
 Block `0xA0939684`: `0x44C` B in RAM, initialised from ROM defaults `0xA07F9E68`. The first `0x3C4` B persist to NOR bank 0 at offset `0x20` (flush `0xA004017A`, copy `0xA01674FA`, write `0xA00206FA`). Only `+0x04..+0x13` (`0xA0939688..0xA0939697`) is reserved (zero defaults, no stock accessor); `+0x14..+0x16` are stock display levels.
 
-| Address | Offset | Setting | Values (`src/m6m/hud.c`, `ui.c`) |
+| Address | Offset | Setting | Values (`firmware/m6m/hud.c`, `ui.c`) |
 | --- | --- | --- | --- |
 | `0xA0939688` | `+0x04` | color print paper | 0 = film's Auto paper, 1..8 |
 | `0xA0939689` | `+0x05` | 3D spectral engine | 0 HW Fast, 1 3D Spectral (fx bit 0) |
@@ -230,20 +223,18 @@ Block `0xA0939684`: `0x44C` B in RAM, initialised from ROM defaults `0xA07F9E68`
 
 Stock fields used: exposure mode `0xA09396AC` (`+0x28`; 0..3 M/S/A/P, 4 Movie, 5..7 C1..C3, 8 playback, 9/10 F1/F2), shooting settings `0xA09396C0` (`+0x3C`, `0x8C` B), color mode `0xA09396C3`, C1..C3 slots `0xA0939818`, backup `0xA09399BC`.
 
-The 2 KB NOR record uses `0x00..0x3E3`; `0x3E4..0x7FF` has no accessor. F1/F2 live in payload `.bss` and persist at `0x400..0x51B` (magic `"C4C5"` + 2 × `0x8C`) through an extended flush write and boot load. See [research/m6m-memory.md](research/m6m-memory.md) and [research/custom-modes.md](research/custom-modes.md).
+The 2 KB NOR record uses `0x00..0x3E3`; `0x3E4..0x7FF` has no accessor. F1/F2 live in payload `.bss` and persist at `0x400..0x51B` (magic `"C4C5"` + 2 × `0x8C`) through an extended flush write and boot load.
 
 ### 3.5 UI
 
 - `Get_Menu_Table` `0xA004CD08(id)`. Rows are 32 B: w0 row id (submenu id on page rows), w1 `0x01000000 | 110x70 QS icon`, w2 `(76x26 OSD icon << 16) | 54x42 strip icon`, w3 `sid << 16`, w4 value, w5 getter `| 1`, w6 setter `| 1`, w7 extra handler. Pages clip beyond 6 rows.
 - Strings: `0xA0044AAC(sid, lang)` = `*(0xA07DF144 + sid * 0x44 + lang * 4)`, 672 stock sids. dp2m serves sids from 672 (English).
-- Screens: handler `*(0xA07DEB28 + 4 * id)`, opened with `0xA0042AEC(1, id)`. LV 21 (`0x15`), MODE 23 (`0x17`), PB 25 (`0x19`), QS 26 (`0x1A`), MENU 27 (`0x1B`), Custom Mode Setting 31 (`0x1F`), DOOM 33 (`0x21`). Native AE, µITRON, Milbeaut IIP/DMA and `SCREEN_PB` details are in [research/simulator-and-pb.md](research/simulator-and-pb.md).
+- Screens: handler `*(0xA07DEB28 + 4 * id)`, opened with `0xA0042AEC(1, id)`. LV 21 (`0x15`), MODE 23 (`0x17`), PB 25 (`0x19`), QS 26 (`0x1A`), MENU 27 (`0x1B`), Custom Mode Setting 31 (`0x1F`), DOOM 33 (`0x21`).
 - QS commits the setter on every step and draws only icons (w1 low for the value, w2 low in the strip). The main menu commits on OK or right and shows the w2-low icon, or the sid text when it is 0.
 - Icons: `0xA0042AAC(id)` for ids 1..0x1A1 (table `0xA07DD784`); 8 bpp indices 0..16 (0 transparent, 1 white fill, 16 black outline), blitted by `0xA0040DD8` into the index plane `0xA2130000` (CLUT `0xA07DEC54`).
 - Text: `0xA0042684`, engine 0 ("BP4" outline fonts) only, line buffer `0xA093A514`; `labels.c` cold renders take `0.27M..3.11M` emulated instructions (`41` cached).
 - Film page: inserted as menu page 2 in the page template and live list (menu state `0xA07F22D2 + 0x14` / `+ 0x3C`; menu entry copies the template, now 11 pages); page-to-tab-group `0xA0058994` is hooked; tab geometry `0xA04F3100` (stock 56 px per tab, 52 px with 11 pages).
 - File color mode: the M6M writes the Sigma maker note for JPG and X3F (`0xA0148442`). Its color mode switch (`0xA0148CF8`, cm at ctx `+0x8E`) writes tag 0x3D (11 B, `0xA07F7D78`) and tag 0x59 (15 B, `0xA07F8320`) and defaults to `"Standard"`. Playback parses tag 0x3D by prefix (`strncmp`) into info `+0x157` (JPG `0xA0147938`, X3F `0xA0132E9A`; unknown → 0). dp2m writes `"Film NN"` (NN = cm - 9) and the film name for films and maps `"Film NN"` back in both parsers; stock modes are unchanged.
-
-See [research/m6m-ui.md](research/m6m-ui.md).
 
 ### 3.6 Live view
 
@@ -251,8 +242,6 @@ See [research/m6m-ui.md](research/m6m-ui.md).
 - **Gamma** `0xA009D940` (`Im_B2Y_Set_Gamma_Table`): call with `ch = 0` and keep `ctrl_ptr[1] = 0` (`MMIO[0x60020700] = 0x0800`). `0x0801` (GMACTL bit 0) causes highlight speckling and blotchy banding.
 - **Color matrix** `0xA009C334` (`Im_B2Y_Set_Color_Matrix`): set BT.601 Y weights `{0x004D, 0x0096, 0x001D}` at `m[9..11]` and `m[12] = 2 << 8`. Normalize film CMCM rows to unit mean gain (1024) to keep the 10-bit B2Y SNR, and evaluate the 18-knot tone curve at `x_lin * gain`.
 - **Overlays**: 11 HUD modes as grid ids `7..17` (stock grids `0..6`): `7` Electronic Level, `8` 21:9 XPan + Level, `9` 16:9 Cinema + Level, `10` 1:1 Square + Level, `11` Focus Peaking, `12` Peaking + Level, `13` Zebras, `14` RGB Hist + Level, `15` 7:6 + Level, `16` 4:3 + Level, `17` False Color (IRE).
-
-See [research/live-view.md](research/live-view.md).
 
 ### 3.7 Backports and peripherals
 
@@ -265,7 +254,7 @@ See [research/live-view.md](research/live-view.md).
 
 ### 3.8 Capture IPC (`cmd 0x20`)
 
-Stock `0xA0035FCE` remaps `meta[+0x1E]` into the low nibble of `cmd[8]` (table `0xA0035FFA`: 3→0, 4→1, 5→2, 6→3, 7→4, 2→5, 1→6, 8→7, else 0), clamps `meta[+0x1D]` to `0..1` and zeroes `cmd[5]` / `cmd[6]`. The hook at `0xA00360A2` (`ipc_hook` in `src/m6m/hooks.S`, `ipc_pack` in `src/m6m/ui.c`) keeps the live `r1` (`1.0f`) and packs:
+Stock `0xA0035FCE` remaps `meta[+0x1E]` into the low nibble of `cmd[8]` (table `0xA0035FFA`: 3→0, 4→1, 5→2, 6→3, 7→4, 2→5, 1→6, 8→7, else 0), clamps `meta[+0x1D]` to `0..1` and zeroes `cmd[5]` / `cmd[6]`. The hook at `0xA00360A2` (`ipc_hook` in `firmware/m6m/hooks.S`, `ipc_pack` in `firmware/m6m/ui.c`) keeps the live `r1` (`1.0f`) and packs:
 - `cmd[5]`: full 8-bit `packed_cm` (`1..198`):
   - `1..8`: stock modes
   - `9..13`: Quattro modes (FOV Classic Yellow, Cinema, Sunset Red, Forest Green, Teal & Orange)
@@ -280,17 +269,16 @@ Stock `0xA0035FCE` remaps `meta[+0x1E]` into the low nibble of `cmd[8]` (table `
   - bit 2: halation (needs the mode's `halo_gain > 0`)
   - Grain and halation also run on the HW color path (bit 0 clear). B&W toners (`151..190`) and X3 Fill always apply. SD-LUT modes load `D:\LUTn.BIN` whenever any `fx` bit is set (its header supplies grain/halation params). With no stage active, the hook falls through to the stock HW JPEG path untouched.
 
-The packed mode follows `packed_mode` in `crates/dp2m/src/catalog.rs` (film order defines the on-camera mode ids `9 + index`) and `packed_cm` in `src/m6m/ui.c`.
+The packed mode follows `packed_mode` in `crates/dp2m/src/catalog.rs` (film order defines the on-camera mode ids `9 + index`) and `packed_cm` in `firmware/m6m/ui.c`.
 
 ---
 
-## 4. Verification & hardware status
+## 4. Verification
 
-Verified in emulation (`dp2m build`, `dp2m verify out`, `dp2m verify-m5 out/Firm.bin`, `dp2m-emu::sim` integration tests). Build `a441ed3` installed from 1.05 and ran on a camera (see the top of this file); still to check there:
+```sh
+cargo test --release --workspace
+cargo run --release -- verify out
+cargo run --release -- verify-m5 out/Firm.bin
+```
 
-- Reinstall of stock 1.05.
-- Film names in playback info / Sigma Photo Pro for `"Film NN"` JPG and X3F files.
-- Custom QS film items, F1/F2 NOR persistence across power cycles, and payload `.bss` window `0xA1C00000..0xA1E00000` under LV, capture, playback, movie, and USB.
-- Actual on-camera M5 write times per `fx` combination and end-to-end M6M overlay / DOOM frame rates. [Probes V2/V3](research/hardware-probe.md) measured synthetic CPU, memory, display, framebuffer, and direct portal-upscale operations, not full application frame rates.
-
-See [research/hillclimb.md](research/hillclimb.md) for current build sizes and emulated instruction counts.
+The builder also checks protected stock regions, hook sites, payload bounds, and the M5 checksum on every build.

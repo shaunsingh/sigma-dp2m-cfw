@@ -96,8 +96,8 @@ fn run_cmd(cmd: &mut Command, what: &str) -> Result<(), String> {
 }
 
 pub fn build_doom(root: &Path, dg_dir: &Path, out_dir: &Path, warp_e1m1: bool) -> Result<PathBuf, String> {
-    let doom_src = root.join("src/doom");
-    let m6m_src = root.join("src/m6m");
+    let doom_src = root.join("firmware/doom");
+    let shared_include = root.join("include");
     let work = out_dir.join("doom");
     fs::create_dir_all(&work).map_err(|e| format!("mkdir {}: {e}", work.display()))?;
 
@@ -169,7 +169,7 @@ pub fn build_doom(root: &Path, dg_dir: &Path, out_dir: &Path, warp_e1m1: bool) -
                     .arg("-I")
                     .arg(&doom_src)
                     .arg("-I")
-                    .arg(&m6m_src)
+                    .arg(&shared_include)
                     .arg("-I")
                     .arg(dg_dir)
                     .arg("-c")

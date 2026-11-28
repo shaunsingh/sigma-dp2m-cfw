@@ -602,7 +602,7 @@ mod tests {
         let gen_all = generate(s3, &pack, &cfg_all).expect("codegen all 36 films");
         assert!(gen_all.stats.contains("films=36/36 grids=11/11"), "stats={}", gen_all.stats);
         let work = std::env::temp_dir().join(format!("dp2m-m6m36-{}", std::process::id()));
-        let c78 = super::super::build_m6m(&fw, &pack, &root.join("src/m6m"), &work, &cfg_all)
+        let c78 = super::super::build_m6m(&fw, &pack, &root.join("firmware/m6m"), &work, &cfg_all)
             .expect("link all 36 films + 11 grids within M6M payload regions");
         assert_eq!(c78.len(), super::super::C78_LEN);
         let _ = std::fs::remove_dir_all(&work);

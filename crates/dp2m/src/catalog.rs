@@ -166,7 +166,7 @@ pub fn paper_index(papers: &[Paper], slug: &str) -> Option<u8> {
     papers.iter().position(|p| p.slug == slug).map(|i| i as u8)
 }
 
-/// IPC/M5 packed mode for (film index, 0-based paper); mirrors `packed_cm` in src/m6m.
+/// IPC/M5 packed mode for (film index, 0-based paper); mirrors `packed_cm` in firmware/m6m.
 pub fn packed_mode(film_idx: usize, paper: u8) -> u8 {
     let f = &FILMS[film_idx];
     let k = films_of(f.kind).position(|(i, _)| i == film_idx).unwrap() as u8;

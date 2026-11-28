@@ -31,7 +31,7 @@ const REGIONS: &[(&str, u32, u32)] = &[
     // factory service menus 0x18..0x22 + their submenus; menu 0xA3 at 0xA07EDC0C stays
     ("MENU", 0xA07E_C9CC, 0xA07E_DC0C),
     // verified zero-xref stock-orphan code runs outside 0xA0070000..0xA00B8000:
-    // the D2AP applet loader (doom.c) and the overlay code that does not fit in CODE
+    // the D2AP applet loader (applet.c) and the overlay code that does not fit in CODE
     ("APPLET", 0xA002_A834, 0xA002_B5E0),
     ("LVCODE", 0xA014_0CB0, 0xA014_15B0),
 ];
@@ -125,6 +125,8 @@ impl Toolchain<'_> {
                 .args(["-ffunction-sections", "-fdata-sections", "-Wall", "-Wextra", "-Werror"])
                 .arg("-I")
                 .arg(self.src)
+                .arg("-I")
+                .arg(self.src.join("../../include"))
                 .arg("-I")
                 .arg(self.work)
                 .arg("-c")

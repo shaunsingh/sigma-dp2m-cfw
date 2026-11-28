@@ -57,7 +57,7 @@ fn stack_probe_high_water(cam: &mut Camera) -> usize {
 
 const APP_STACK_LEN: usize = 8192;
 const APP_STACK_GUARD: u32 = 0x4432_5347;
-// Offsets into `struct dp2m_doom_telemetry` (`src/doom/dp2m_doom.h`); `inp` starts at 248.
+// Offsets into `struct dp2m_doom_telemetry` (`firmware/doom/dp2m_doom.h`); `inp` starts at 248.
 const TELEMETRY_HUD_MODE_OFF: u32 = 52;
 const TELEMETRY_TILT_STRAFE_OFF: u32 = 56;
 const TELEMETRY_PEEK_IDX_OFF: u32 = 60;

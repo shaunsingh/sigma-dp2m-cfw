@@ -6,8 +6,8 @@ ENTRY(dp2m_ret0)
 
 SECTIONS {
   .applet : {
-    */doom.o(.text .text.*)
-    */doom.o(.rodata .rodata.* .data .data.*)
+    */applet.o(.text .text.*)
+    */applet.o(.rodata .rodata.* .data .data.*)
   } > APPLET
 
   .lv_text : {

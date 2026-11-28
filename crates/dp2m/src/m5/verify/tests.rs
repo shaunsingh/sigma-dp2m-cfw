@@ -4,14 +4,14 @@ fn firm() -> Vec<u8> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let fw = std::fs::read(root.join("data/DP2MV105.bin")).expect("data/DP2MV105.bin");
     let pack = FilmPack::load(&root.join("data/film_pack.bin")).unwrap();
-    build_m5(&fw, &pack, &root.join("src/asm/m5"), &Config::default()).unwrap()
+    build_m5(&fw, &pack, &root.join("firmware/m5"), &Config::default()).unwrap()
 }
 
 #[test]
 fn pack_swar_signed_deltas() {
     let s2 = firm();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let (_, labels) = fr80::assemble_file_labels(&root.join("src/asm/m5/ycc_engine.fr80"), VA_YCC_SUB, &HashMap::new()).unwrap();
+    let (_, labels) = fr80::assemble_file_labels(&root.join("firmware/m5/ycc_engine.fr80"), VA_YCC_SUB, &HashMap::new()).unwrap();
     let entry = labels.iter().find(|(_, name)| name == "pack_swar").unwrap().0;
     for delta in -127i32..=127 {
         let mut e = Emulator::new(&s2, DELTA);
@@ -144,7 +144,7 @@ fn ycc_engine_zero_or_subtile_dims_do_not_write_outside_buffer() {
 }
 
 /// ycc engine insns & SDRAM / ROM data accesses per pixel pair for every fx x fill combo; `s/L` = engine
-/// seconds for a 4704x3136 capture at ~70M insns/s. `DP2M_REF_ASM=<dir>` (e.g. `git archive <rev> src/asm/m5`)
+/// seconds for a 4704x3136 capture at ~70M insns/s. `DP2M_REF_ASM=<dir>` (e.g. `git archive <rev> firmware/m5`)
 /// also runs that engine & driver on the same ctx / input and diffs them; `DP2M_PROF=1` prints insns/pair per
 /// engine block. `cargo test --release --offline ycc_bench -- --ignored --nocapture`
 /// `DP2M_BENCH_STRESS=1` adds constant boundary frames and full-range noise;
@@ -164,7 +164,7 @@ fn ycc_bench() {
     let prof = std::env::var_os("DP2M_PROF").is_some();
     let exact = std::env::var_os("DP2M_REF_EXACT").is_some();
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let mut labels = fr80::assemble_file_labels(&root.join("src/asm/m5/ycc_engine.fr80"), VA_YCC_SUB, &HashMap::new()).unwrap().1;
+    let mut labels = fr80::assemble_file_labels(&root.join("firmware/m5/ycc_engine.fr80"), VA_YCC_SUB, &HashMap::new()).unwrap().1;
     labels.insert(0, (VA_YCC_SUB, "<entry>".into()));
     let groups = [("color", COLOR_TEST_MODE, 0), ("color fill=1", COLOR_TEST_MODE, 1), ("color fill=2", COLOR_TEST_MODE, 2), ("color fill=3", COLOR_TEST_MODE, 3), ("B&W toner", BW_TEST_MODE, 0), ("B&W fill=2", BW_TEST_MODE, 2)];
     let mut sizes = vec![("mixed".to_string(), Ycc::synth(256, 128), Ycc::synth(256, 128)), ("strip".to_string(), Ycc::synth(FULL_W, 8), Ycc::synth(FULL_W, FULL_H))];

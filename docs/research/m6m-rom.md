@@ -34,7 +34,7 @@ Defined in `REGIONS` in `crates/dp2m/src/m6m/mod.rs` and emitted as the linker `
 | `DOOM_C` | `0xA01360FC..0xA0136AB8` | 2,492 B | zero-xref stock-orphan code |
 | `DOOM_D` | `0xA0140CB0..0xA01415B0` | 2,304 B | zero-xref stock-orphan code |
 | `DOOM_E` | `0xA002A834..0xA002B5E0` | 3,500 B | zero-xref stock-orphan code |
-| `RAM` | `0xA1C00000..0xA1E00000` | 2 MB | unreferenced SDRAM (see [m6m-memory.md](m6m-memory.md)), `.bss` only |
+| `RAM` | `0xA1C00000..0xA1E00000` | 2 MB | unreferenced SDRAM (see [m6m-memory.md](m6m-memory.md)): payload `.bss` (`0xA1C00000..0xA1CB7E58`) + `D2AP` applet arena (`0xA1CC0000..0xA1E00000`) |
 
 The `CODE` region is contiguous: `0xA0059D50..0xA005A400` (screen 33), `0xA005A400..0xA005BE38` (screens 34..43), `0xA005BE38..0xA005CDF4` (screens 44..47) and `0xA005CDF4..0xA005D924` (screens 48, 49). The builder refuses to retire a vtable slot that does not point into `CODE`.
 

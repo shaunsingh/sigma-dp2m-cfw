@@ -17,7 +17,7 @@ SDRAM is 256 MB (`0xA0000000..0xB0000000`; hard-coded references reach `0xAF7EB1
 | `0xA07FBC1C..0xA0A1F398` | 2.2 MB | zero-init RAM: statics, µITRON pools, task control blocks, text line buffer `0xA093A514` (160 KB), NVRAM block | scatter table `0xA07AD3CC` |
 | `0xA0A1F398..0xA1B1F398` | 17 MB | C heap | `0xA01657E4` returns base / limit |
 | `0xA1B1F3A0..0xA1B5717C` | 224 KB | µITRON task stacks | 46 config records `0xA0561EE4..0xA05623E8` |
-| `0xA1B57180..0xA2130000` | 5.9 MB | no references found | payload `.bss` at `0xA1C00000..0xA1E00000` |
+| `0xA1B57180..0xA2130000` | 5.9 MB | no references found | payload `.bss` at `0xA1C00000..0xA1CB7E58`, `D2AP` standalone applet arena at `0xA1CC0000..0xA1E00000` |
 | `0xA2130000..` | | OSD planes (8 bpp index plane `0xA2130000`, RGBA4444 overlay `0xA21D8C00`), glyph raster `0xA2304C00`, LV and capture buffers | literals in `0xA0165938`, `0xA00419B0`, `0xA0041FAC` |
 
 Scatter table at `0xA07AD3CC` (16 B entries `{load, exec, size, fn}`):

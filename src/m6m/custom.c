@@ -19,7 +19,7 @@
 
 // RAM image of the NOR record
 static struct {
-    uint32_t magic;
+    volatile uint32_t magic;
     uint8_t slot[2][SLOT_SZ];
 } cs;
 

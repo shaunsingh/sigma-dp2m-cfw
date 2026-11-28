@@ -1243,6 +1243,10 @@ static void probe_clear_planes(void) {
     stock_osd_commit();
 }
 
+void doom_boot_reset(void) {
+    pst.inited = 0u;
+}
+
 static void probe_ensure_init(void) {
     if (pst.inited == PROBE_INIT_MAGIC) return;
     memset(&pst, 0, sizeof(pst));

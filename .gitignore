@@ -13,10 +13,13 @@ dp2m.fnl
 /vendor/
 /.cargo/
 
-# Proprietary Sigma firmware binaries
+# Proprietary Sigma firmware binaries & SD-card WAD/applet payloads
 # *.bin
 # *.BIN
 # !data/film_pack.bin
+DOOM.BIN
+*.wad
+*.WAD
 *.X3F
 *.x3f
 *.zip

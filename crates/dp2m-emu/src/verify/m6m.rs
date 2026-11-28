@@ -123,6 +123,16 @@ fn check_invariants(b: &Build, r: &mut Report) {
         b.img.rd(0xA005_D924, 0xA005_F1A0 - 0xA005_D924) == b.stock.rd(0xA005_D924, 0xA005_F1A0 - 0xA005_D924),
         "live screens 50..55 intact",
     );
+    let bss_end = b.sym("__bss_end");
+    r.check(
+        (0xA1C0_0000..=0xA1CC_0000).contains(&bss_end),
+        format!("payload __bss_end ({bss_end:#x}) stays below D2AP applet arena 0xA1CC0000"),
+    );
+    r.eq(
+        (b.img.u32(0xA017_2170), b.img.u32(0xA017_2190)),
+        (0xE3A0_000C, 0xE380_0C06),
+        "boot MPU Region 2 enables I-cache (c2=0xC) and Priv/User execute AP (c5.i R2=6)",
+    );
 }
 
 fn check_hooks(b: &Build, r: &mut Report) -> Result<(), String> {
@@ -173,6 +183,20 @@ fn check_hooks(b: &Build, r: &mut Report) -> Result<(), String> {
     );
     let mut m = Machine::new(&b.img, 0);
     r.eq(m.call(b.sym("dp2m_ret0"), &[])?, 0, "dp2m_ret0 returns 0");
+
+    // Verify shutter_guard_hook @ 0xA01690B6 blocks S1/S2 on SCREEN_DOOM (0x21) and delegates on LV (0x15)
+    let sg = b.sym("shutter_guard_hook");
+    r.eq(b.img.bl_target(0xA016_90B6), Some(sg), "BL @ 0xA01690B6 -> shutter_guard_hook");
+    let cur_scr = Rc::new(std::cell::Cell::new(0x21u32));
+    {
+        let cs = cur_scr.clone();
+        m.stub_on(b.sym("stock_ui_screen_id"), move |_| Some(cs.get()));
+    }
+    m.stub_on(b.sym("stock_busy_check"), |_| Some(0));
+    let sg_doom = m.call(sg, &[])?;
+    cur_scr.set(0x15);
+    let sg_lv = m.call(sg, &[])?;
+    r.eq((sg_doom, sg_lv), (1, 0), "shutter_guard_hook returns busy (1) on SCREEN_DOOM and delegates (0) on SCREEN_LV");
     Ok(())
 }
 
@@ -924,6 +948,31 @@ fn check_lv(b: &Build, r: &mut Report) -> Result<(), String> {
     let gbuf = b.sym("gamma_buf");
     let kf = b.catalog.films.iter().find(|f| look(f).flags & LV_KNOTS != 0).unwrap();
     let curve = expand_knots(&look(kf).knots);
+
+    // Dirty-.bss boot regression: before lv_gamma_hook runs, nonzero garbage in payload .bss
+    // (including lut = 0xDEADBEEF) must NOT fool lv_mono_hook into dereferencing gamma.lut,
+    // and labels_boot must clear stale GAMMA_MAGIC retained across warm power cycles.
+    {
+        let gamma_sym = b.sym_info("gamma");
+        m.wr(gamma_sym.va(), &vec![0xFFu8; gamma_sym.size as usize]);
+        m.w32(gamma_sym.va() + 4, 0xDEAD_BEEF);
+        m.w8(stock::NV_CM, 0);
+        r.eq(
+            call_lv(&mut m, "lv_mono_hook", &[1, 0])?,
+            vec![LvCall::Mono(1, 0)],
+            "dirty .bss (0xFF) before lv_gamma_hook: lv_mono_hook compares full 32-bit magic and skips garbage lut",
+        );
+        m.w32(gamma_sym.va(), 0x474D_4131);
+        m.w32(gamma_sym.va() + 4, lut);
+        m.w32(gamma_sym.va() + 8, 0x400);
+        m.stub_on(b.sym("stock_disp_init"), |_| None);
+        m.call(b.sym("labels_boot"), &[])?;
+        r.eq(
+            m.u32(gamma_sym.va()),
+            0,
+            "labels_boot resets gamma.magic across warm reboots",
+        );
+    }
 
     m.w8(stock::NV_CM, 0);
     r.eq(call_lv(&mut m, "lv_gamma_hook", &[0, lut, 0x400])?, vec![LvCall::Gamma(lut, stock_lut.clone())], "gamma hook, stock color mode: stock LUT");

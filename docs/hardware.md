@@ -148,13 +148,13 @@ S3 runs from SDRAM at `0xA0000000` (256 MB SDRAM), so code and tables in the ima
 | `0xA0939684..0xA0939ACF` | NVRAM settings block (3.4) |
 | `0xA0A1F398..0xA1B1F398` | heap |
 | `0xA1B1F3A0..0xA1B5717C` | µITRON task stacks |
-| `0xA1B57180..0xA2130000` | no references; payload `.bss` at `0xA1C00000..0xA1E00000` |
+| `0xA1B57180..0xA2130000` | no references; payload `.bss` at `0xA1C00000..0xA1CB7E58`, `D2AP` standalone applet arena at `0xA1CC0000..0xA1E00000` (1.25 MB) |
 | `0xA2130000..` | OSD: 8 bpp index plane `0xA2130000` (icons, text), RGBA4444 overlay `0xA21D8C00` (`R:12..15, G:8..11, B:4..7, A:0..3`, 640×480); LV and capture buffers |
 
 **CP15 MPU & 2D DMA cache coherence** (`0xA01720F0..0xA01721EC`):
 - **Region 1 (`0x00000000`, `4 KB` ITCM)**: copied at boot from `0xA07FBC1C` (`0x338 B`, scatter table `0xA07AD3CC`); holds ARM exception vectors and the `SWI` dispatcher (`0x00000170`).
-- **Region 2 (`0xA0000000..0xAFFFFFFF`, `256 MB`)**: `I-cache = 0`, instruction AP = 0 (no instruction fetch in any mode), `D-cache = 1` (`c2 = 0xC`), `Write-Buffer = 1` (`c3 = 0xC`). Covers `OSD` (`0xA2130000`), `ARGB_FB` (`0xA21D8C00`), `lv_planes`, and payload `.bss` `RAM` (`0xA1C00000..0xA1E00000`).
-- **Region 3 (`0xA0000000..0xA07FFFFF`, `8 MB`)**: `I-cache = 1` (`c2_i = 0x8`), `D-cache = 1`, `Write-Buffer = 1`. This higher-priority region shadows Region 2 for S3 firmware and payload text. Payload `.bss` is outside it and belongs to Region 2.
+- **Region 2 (`0xA0000000..0xAFFFFFFF`, `256 MB`)**: stock sets `I-cache = 0` (`c2_i = 0x8`) and instruction AP = 0 (`c5_i` R2 = 0). `src/m6m/hooks.S` patches `0xA0172170` (`E3A00008 -> E3A0000C`) and `0xA0172190` (`E3800000 -> E3800C06`) at boot so Region 2 enables I-cache (`c2_i = 0xC`) and Priv/User read-execute (`c5_i` R2 = `6`), allowing SD-loaded `D2AP` applets (`DOOM.BIN`) to execute cached code from `0xA1CC0000..0xA1E00000` after `SWI 10` (`hw_dcache_sync`) + `SWI 15` (`hw_icache_inv_all`, ITCM `0x0000030C`). `D-cache = 1` (`c2_d = 0xC`) and `Write-Buffer = 1` (`c3 = 0xC`) remain stock.
+- **Region 3 (`0xA0000000..0xA07FFFFF`, `8 MB`)**: `I-cache = 1`, `D-cache = 1`, `Write-Buffer = 1`. Shadows Region 2 for S3 firmware and payload text.
 - **`SWI 10` (`hw_dcache_sync`, ITCM `0x00000248` / S3 `0xA07FBE64`)**: dispatcher (`0x00000170`, S3 `0xA07FBD8C`) saves `{r0, r1}`, reads the SWI number from `[lr, #-2]` when `SPSR.T` is set (Thumb `svc #10`, used by 11 stock call sites e.g. `0xA0117504`), and jumps to `0x00000248`. That handler saves `r2`, cleans all `4 ways × 128 sets × 32 B = 16 KB` of L1 D-cache by index (`mcr p15, 0, r2, c7, c10, 2`), restores `r2`, drains the write buffer (`mcr p15, 0, r1, c7, c10, 4`), invalidates the whole D-cache (`mcr p15, 0, r0, c7, c6, 0`), restores `{r0, r1}`, and returns (`movs pc, lr`); the I-cache is untouched and caller registers are preserved (`hw_dcache_sync()` in `src/m6m/dp2m.h` declares `lr`/`memory` clobbers). Call `hw_dcache_sync()` before and after full-frame CPU writes that hand off to Milbeaut 2D DMA (`stock_fill_rect`, `stock_blit_bp4`, `stock_argb_commit`).
 - **`SWI 12` (`hw_dcache_clean_range`, ITCM `0x000002B0` / S3 `0xA07FBECC`)**: cleans 32-byte D-cache lines by modified virtual address (`mcr p15, 0, r0, c7, c10, 1`), drains the write buffer, restores `{r0, r1}`, and leaves unrelated lines and cache validity untouched. The stock loop applies `ceil(r1 / 32)` operations while CP15 ignores `r0[4:0]`; the wrapper therefore aligns the start down and adds the original offset to the byte count. Its body-before-test loop would not terminate for a zero length, so the wrapper guards `n = 0`. `labels.c` uses this after rendering a tile and before the stock blitter reads it, avoiding SWI 10's 512-line clean and whole-cache invalidate. It is not a substitute for invalidating a range before DMA overwrites it.
 
@@ -206,7 +206,7 @@ Every patch to stock code is a 16-byte record `{kind, site, target, expect}` (BE
 | `HOOK_WORD` (3) | write a 32-bit value | stock word |
 | `HOOK_HALF` (4) | write a 16-bit value | stock halfword |
 
-Thumb BL reaches ±4 MB. Sources: `ui.c` (settings, menus, strings, IPC packing, Film page), `custom.c` (F1/F2), `lv.c` (live-view color), `hud.c` (overlays), `labels.c` (runtime label icons), `doom.c` / `doom_render.c` (custom 2.5D sector/portal applet), `hooks.S` (register-exact trampolines), `rt.c` (`memcpy`, `memset`).
+Thumb BL reaches ±4 MB. Sources: `ui.c` (settings, menus, strings, IPC packing, Film page), `custom.c` (F1/F2), `lv.c` (live-view color), `hud.c` (overlays), `labels.c` (runtime label icons), `doom.c` / `doom_render.c` / `dp2m_app.h` (`D2AP` v1 SD applet loader at `0xA1CC0000..0xA1E00000` + autonomous 35 Hz 2.5D sector/portal fallback + shutter guard at `0xA01690B6`), `hooks.S` (register-exact trampolines + Region 2 MPU patches), `rt.c` (`memcpy`, `memset`). Standalone `DOOM.BIN` sources live in `src/doom/` (`doom.ld`, `dp2m_doom.h`, `dp2m_doom_main.c`, `i_video_dp2m.c`, `w_file_dp2m.c`, `libc_dp2m.c`, `m_fixed_dp2m.c`, `rt_dp2m.c`) and link outside `C78FRM.bin` via `dp2m build-doom`.
 
 ### 3.4 NVRAM
 

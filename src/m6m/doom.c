@@ -1,5 +1,8 @@
-/* Bare-metal ARM926EJ-S Big-Endian DOOM (E1M1 Hangar) for Sigma DP2 Merrill */
+/* Bare-metal ARM946E-S Big-Endian DOOM + SD Applet Loader for Sigma DP2 Merrill */
 #include "doom.h"
+#include "dp2m_app.h"
+
+extern uint8_t __bss_end[];
 
 #define DOOM_MAGIC 0x444F4F4Du /* "DOOM" */
 
@@ -826,6 +829,23 @@ static void draw_automap(void) {
     draw_micro_str(8, 8, "E HANGAR", 128u);
 }
 
+#define PSAVE_DOOM_MASK 0x40000000u /* Exclusive power-save inhibit bit */
+#define DOOM_MBX_UI     0x11
+#define DOOM_MPF_UI     0x10
+#define APP_ACTIVE_TAG  0x44324131u /* "D2A1" */
+
+static struct {
+    volatile uint32_t active_magic;
+    dp2m_app_entry_fn entry;
+    uint8_t dial_prev;
+} app_rt;
+
+static void app_present_argb(void) {
+    hw_dcache_sync();
+    stock_flush_rect(0, 0, 640, 480);
+    stock_argb_commit();
+}
+
 static void doom_present(void) {
     if (doom_st.automap) {
         draw_automap();
@@ -839,12 +859,160 @@ static void doom_present(void) {
                         : doom_st.bonus_tics ? doom_pal32[2]
                         : doom_pal32[0];
     doom_upscale_2x2(doom_fb, ARGB_FB, pal);
-    hw_dcache_sync();
-    stock_flush_rect(0, 0, 640, 480);
-    stock_argb_commit();
+    app_present_argb();
 }
 
-/* ---------- M6M Screen Vtable Handler (Screen 33 = 0x21) & Menu Launcher ---------- */
+__attribute__((noinline, section(".doom.hud")))
+static uint32_t app_get_ms(void) {
+    uint64_t t __attribute__((aligned(8))) = 0u;
+    stock_get_tim(&t);
+    if (t == 0u) {
+        uint32_t h1 = REG32(0xA07F3788u);
+        uint32_t lo = REG32(0xA07F378Cu);
+        uint32_t h2 = REG32(0xA07F3788u);
+        if (h1 != h2) lo = REG32(0xA07F378Cu);
+        t = ((uint64_t)h2 << 32) | lo;
+    }
+    return (uint32_t)t;
+}
+
+__attribute__((noinline, section(".doom.hud")))
+static void app_sleep_ms(uint32_t ms) {
+    if (ms) stock_dly_tsk(ms);
+}
+
+__attribute__((noinline, section(".doom.hud")))
+static int32_t app_mdf_read(int32_t fd, void *buf, uint32_t len, uint32_t *got) {
+    hw_dcache_sync();
+    int32_t rc = stock_mdf_read(fd, buf, len, got);
+    hw_dcache_sync();
+    return rc;
+}
+
+__attribute__((noinline, section(".doom.hud")))
+static void app_poll_input(struct dp2m_input_snapshot *out) {
+    /* Verified stock polarity (0xA016D88C..0xA016DB64, 0xA016E47A):
+     * - 0xA07FAA1C (KEY0): 0x00000000 when idle; 2-bit slot (k0 >> (30 - 2*k)) & 3
+     *   is 1 on press and 3 on auto-repeat for k = 0..11 (OK,UP,DN,LF,RT,MENU,DISP,AEL,QS,MODE,DEL,PLAY).
+     * - 0xA07FAA28 (SW28): active-high bits 31 (S1 half-press), 30 (S2 full-press), 26 (switch 3). */
+    uint32_t k0 = REG32(0xA07FAA1Cu);
+    uint32_t sw = REG32(0xA07FAA28u);
+    uint32_t dial = REG8(0xA07AF38Cu);
+    uint32_t mask = 0u;
+    for (uint32_t k = 0u; k < 12u; k++) {
+        if (((k0 >> (30u - 2u * k)) & 3u) != 0u)
+            mask |= (1u << k);
+    }
+    if ((sw & 0xC4000000u) != 0u)
+        mask |= DP2M_BTN_SHUTTER;
+
+    int32_t d_delta = 0;
+    if (dial >= 1u && dial <= 3u) {
+        uint32_t prev = app_rt.dial_prev;
+        if (prev >= 1u && prev <= 3u && dial != prev) {
+            uint32_t cw = (prev == 3u) ? 1u : (prev + 1u);
+            d_delta = (dial == cw) ? 1 : -1;
+        }
+        app_rt.dial_prev = (uint8_t)dial;
+    }
+
+    out->held_mask = mask;
+    out->dial_delta = d_delta;
+    out->accel_x = (int8_t)stock_accel_x();
+    out->accel_y = (int8_t)stock_accel_y();
+    out->raw_key0 = k0;
+    out->raw_sw28 = sw;
+    out->raw_dial = dial;
+}
+
+static struct dp2m_app_api app_api_tbl;
+
+void doom_boot_reset(void) {
+    doom_st.magic = 0u;
+    memset(&app_rt, 0, sizeof(app_rt));
+}
+
+__attribute__((noinline, section(".doom.init")))
+static const struct dp2m_app_api *app_build_api(uint32_t autonomous) {
+    app_api_tbl.abi_ver = DP2M_APP_ABI_VER;
+    app_api_tbl.is_autonomous = autonomous;
+    app_api_tbl.argb_fb = ARGB_FB;
+    app_api_tbl.present_argb = app_present_argb;
+    app_api_tbl.upscale_2x2 = doom_upscale_2x2;
+    app_api_tbl.get_ms = app_get_ms;
+    app_api_tbl.sleep_ms = app_sleep_ms;
+    app_api_tbl.poll_input = app_poll_input;
+    app_api_tbl.malloc_fn = stock_malloc;
+    app_api_tbl.calloc_fn = stock_calloc;
+    app_api_tbl.realloc_fn = stock_realloc;
+    app_api_tbl.free_fn = stock_free;
+    app_api_tbl.mdf_open = stock_mdf_open;
+    app_api_tbl.mdf_read = app_mdf_read;
+    app_api_tbl.mdf_lseek = stock_mdf_lseek;
+    app_api_tbl.mdf_fstat = stock_mdf_fstat;
+    app_api_tbl.mdf_close = stock_mdf_close;
+    return &app_api_tbl;
+}
+
+__attribute__((noinline, section(".doom.init")))
+static int32_t doom_try_load_app(uint32_t autonomous) {
+    if ((uintptr_t)__bss_end > DP2M_APP_LOAD_VA)
+        return -1;
+    int32_t fd = stock_mdf_open("I:\\DOOM.BIN", 0u, 0u);
+    if (fd < 0)
+        fd = stock_mdf_open("D:\\DOOM.BIN", 0u, 0u);
+    if (fd < 0)
+        return -1;
+
+    struct dp2m_app_hdr hdr;
+    uint32_t got = 0u;
+    if (app_mdf_read(fd, &hdr, sizeof(hdr), &got) != 0 || got != sizeof(hdr) ||
+        hdr.magic != DP2M_APP_MAGIC || hdr.abi_ver != DP2M_APP_ABI_VER ||
+        hdr.load_va != DP2M_APP_LOAD_VA || hdr.image_size < sizeof(hdr) ||
+        hdr.image_size > (DP2M_APP_LIMIT_VA - DP2M_APP_LOAD_VA) ||
+        hdr.bss_end < hdr.load_va + hdr.image_size || hdr.bss_end > DP2M_APP_LIMIT_VA ||
+        (hdr.entry_va & ~1u) < hdr.load_va || (hdr.entry_va & ~1u) >= hdr.load_va + hdr.image_size) {
+        stock_mdf_close(fd);
+        return -1;
+    }
+
+    uint32_t pos = 0u;
+    if (stock_mdf_lseek(fd, 0, 0u, &pos) != 0) {
+        stock_mdf_close(fd);
+        return -1;
+    }
+
+    uint8_t *dst = (uint8_t *)(uintptr_t)hdr.load_va;
+    uint32_t rem = hdr.image_size;
+    while (rem > 0u) {
+        uint32_t chunk = rem > 65536u ? 65536u : rem;
+        got = 0u;
+        if (app_mdf_read(fd, dst, chunk, &got) != 0 || got == 0u || got > chunk) {
+            stock_mdf_close(fd);
+            return -1;
+        }
+        dst += got;
+        rem -= got;
+    }
+    stock_mdf_close(fd);
+
+    uint32_t bss_len = hdr.bss_end - (hdr.load_va + hdr.image_size);
+    if (bss_len)
+        memset((void *)(uintptr_t)(hdr.load_va + hdr.image_size), 0, bss_len);
+
+    hw_dcache_sync();
+    hw_icache_inv_all();
+
+    app_rt.dial_prev = REG8(0xA07AF38Cu);
+    dp2m_app_entry_fn entry = (dp2m_app_entry_fn)(uintptr_t)hdr.entry_va;
+    const struct dp2m_app_api *api = app_build_api(autonomous);
+    if (entry(api, DP2M_APP_INIT, 0u) != 0) {
+        return -1;
+    }
+    app_rt.entry = entry;
+    app_rt.active_magic = APP_ACTIVE_TAG;
+    return 0;
+}
 
 static void doom_clear_planes(void) {
     stock_argb_clear();
@@ -853,27 +1021,180 @@ static void doom_clear_planes(void) {
     stock_osd_commit();
 }
 
+__attribute__((noinline, section(".doom.hud")))
+static void doom_shutdown_app_if_active(void) {
+    if (app_rt.active_magic == APP_ACTIVE_TAG && app_rt.entry) {
+        app_rt.entry(&app_api_tbl, DP2M_APP_SHUTDOWN, 0u);
+    }
+    app_rt.active_magic = 0u;
+    app_rt.entry = 0;
+}
+
+/* Poll MBX 0x11 each autonomous frame so MPF 0x10 never starves and system power-off
+ * packets (type == 6, 0xA004330C) break out immediately without being discarded. */
+__attribute__((noinline, section(".doom.hud")))
+static int doom_poll_ui_mbx(void **sys_msg, int app_active) {
+    int should_exit = 0;
+    void *msg = 0;
+    while (stock_prcv_mbx(DOOM_MBX_UI, &msg) == 0 && msg) {
+        int8_t mtype = *(const int8_t *)((const uint8_t *)msg + 8);
+        uint32_t marg = *(const uint32_t *)((const uint8_t *)msg + 12);
+        if (mtype == 6) {
+            if (*sys_msg == 0)
+                *sys_msg = msg;
+            else
+                stock_rel_mpf(DOOM_MPF_UI, msg);
+            should_exit = 1;
+        } else {
+            stock_rel_mpf(DOOM_MPF_UI, msg);
+            if (mtype == 5 && (marg == 0x0Cu || (!app_active && marg == 0x06u)))
+                should_exit = 1;
+        }
+        msg = 0;
+    }
+    return should_exit;
+}
+
+__attribute__((noinline, section(".doom.hud")))
+static void doom_hw_exit_to_lv(void *sys_msg) {
+    stock_psave_release(PSAVE_DOOM_MASK);
+    /* Sync shutter & key edge snapshots so held buttons on exit never fire spurious LV edges */
+    REG32(0xA07FAB20u) = REG32(0xA07FAA28u);
+    REG32(0xA07FAB24u) = REG32(0xA07FAA1Cu);
+    /* Drain any final queued UI messages accumulated in MBX 0x11 back to MPF 0x10 */
+    void *msg = 0;
+    while (stock_prcv_mbx(DOOM_MBX_UI, &msg) == 0 && msg) {
+        int8_t mtype = *(const int8_t *)((const uint8_t *)msg + 8);
+        if (mtype == 6 && !sys_msg)
+            sys_msg = msg;
+        else
+            stock_rel_mpf(DOOM_MPF_UI, msg);
+        msg = 0;
+    }
+    doom_clear_planes();
+    if (sys_msg) {
+        /* Re-queue system power-off packet (type 6) to MBX 0x11 so 0xA004330C shuts down cleanly */
+        stock_snd_mbx(DOOM_MBX_UI, sys_msg);
+    } else {
+        stock_screen_goto(SCREEN_LV);
+    }
+}
+
+/* Autonomous 35 Hz loop for the built-in E1M1 engine when SD DOOM.BIN/WAD is absent */
+__attribute__((noinline, section(".doom.hud")))
+static void doom_run_builtin_autonomous(void **sys_msg) {
+    doom_ensure_init();
+    app_rt.dial_prev = REG8(0xA07AF38Cu);
+    uint32_t prev_held = 0xFFFFFFFFu;
+    for (;;) {
+        uint32_t t0 = app_get_ms();
+        if (doom_poll_ui_mbx(sys_msg, 0))
+            break;
+        struct dp2m_input_snapshot inp;
+        app_poll_input(&inp);
+        uint32_t m = inp.held_mask;
+        uint32_t pressed = m & ~prev_held;
+        prev_held = m;
+
+        if (pressed & (DP2M_BTN_PLAY | DP2M_BTN_MENU))
+            break;
+
+        int32_t ca = d_cos(doom_st.angle), sa = d_sin(doom_st.angle);
+        if (m & DP2M_BTN_UP) {
+            move_player(ca << 5, sa << 5);
+            doom_st.pvx = ca << 4; doom_st.pvy = sa << 4;
+        }
+        if (m & DP2M_BTN_DOWN) {
+            move_player(-(ca << 5), -(sa << 5));
+            doom_st.pvx = -(ca << 4); doom_st.pvy = -(sa << 4);
+        }
+        if (m & DP2M_BTN_QS) {
+            /* QS chord: Left/Right strafe, Dial cycles weapon */
+            if (m & DP2M_BTN_LEFT)  move_player(-(sa << 5), ca << 5);
+            if (m & DP2M_BTN_RIGHT) move_player(sa << 5, -(ca << 5));
+            if (inp.dial_delta > 0) doom_st.weapon = (uint8_t)(doom_st.weapon >= 2u ? 0u : doom_st.weapon + 1u);
+            if (inp.dial_delta < 0) doom_st.weapon = (uint8_t)(doom_st.weapon ? doom_st.weapon - 1u : 2u);
+        } else {
+            if (m & DP2M_BTN_LEFT)  doom_st.angle = (doom_st.angle + 16u) & ANG_MASK;
+            if (m & DP2M_BTN_RIGHT) doom_st.angle = (doom_st.angle - 16u) & ANG_MASK;
+            if (inp.dial_delta != 0)
+                doom_st.angle = (doom_st.angle - (uint32_t)(inp.dial_delta * 28)) & ANG_MASK;
+        }
+        if ((m & (DP2M_BTN_SHUTTER | DP2M_BTN_OK)) && doom_st.recoil == 0u)
+            doom_fire();
+        if (pressed & DP2M_BTN_AEL)  doom_use();
+        if (pressed & DP2M_BTN_DISP) doom_st.automap ^= 1u;
+        if (pressed & DP2M_BTN_MODE) doom_st.weapon = (uint8_t)(doom_st.weapon >= 2u ? 0u : doom_st.weapon + 1u);
+        if ((pressed & DP2M_BTN_QS) && doom_st.won) doom_reset_level();
+
+        doom_step_sim();
+        doom_present();
+
+        uint32_t dt = app_get_ms() - t0;
+        app_sleep_ms(dt < 28u ? (28u - dt) : 1u);
+    }
+}
+
+/* ---------- M6M Screen Vtable Handler (Screen 33 = 0x21) & Menu Launcher ---------- */
+
 uint32_t doom_screen(uint32_t msg, uint32_t arg) {
+    uint16_t tid = 0u;
+    stock_get_tid(&tid);
+    uint32_t autonomous = (tid != 0u) ? 1u : 0u;
+
     if (msg == 4u) {
         if (arg == 0u || arg == 1u) {
-            doom_ensure_init();
             stock_osd_clear();
             stock_osd_commit();
-            doom_present();
+            if (autonomous) {
+                void *sys_msg = 0;
+                stock_psave_inhibit(PSAVE_DOOM_MASK);
+                if (doom_try_load_app(1u) == 0) {
+                    while (!doom_poll_ui_mbx(&sys_msg, 1) &&
+                           app_rt.entry(&app_api_tbl, DP2M_APP_STEP, 0u) == 0) {}
+                    doom_shutdown_app_if_active();
+                } else {
+                    doom_run_builtin_autonomous(&sys_msg);
+                }
+                doom_hw_exit_to_lv(sys_msg);
+                return 0u;
+            }
+            if (doom_try_load_app(0u) != 0) {
+                doom_ensure_init();
+                doom_present();
+            }
         } else if (arg == 3u) {
-            doom_ensure_init();
-            doom_step_sim();
-            doom_present();
+            if (app_rt.active_magic == APP_ACTIVE_TAG && app_rt.entry) {
+                if (app_rt.entry(&app_api_tbl, DP2M_APP_STEP, 0u) != 0) {
+                    doom_shutdown_app_if_active();
+                    doom_clear_planes();
+                    stock_screen_goto(SCREEN_LV);
+                }
+            } else {
+                doom_ensure_init();
+                doom_step_sim();
+                doom_present();
+            }
         }
         return 0u;
     }
 
     if (msg == 3u) {
+        doom_shutdown_app_if_active();
         doom_clear_planes();
         return 0u;
     }
 
     if (msg == 5u) {
+        if (app_rt.active_magic == APP_ACTIVE_TAG && app_rt.entry) {
+            if (app_rt.entry(&app_api_tbl, DP2M_APP_STEP, arg) != 0) {
+                doom_shutdown_app_if_active();
+                doom_clear_planes();
+                stock_screen_goto(SCREEN_LV);
+            }
+            return 0u;
+        }
+
         doom_ensure_init();
         if (arg == 0x06u || arg == 0x0Cu) {
             doom_clear_planes();

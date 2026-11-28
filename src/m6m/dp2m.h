@@ -50,11 +50,39 @@ void stock_osd_clear(void);
 void stock_osd_commit(void);
 void stock_argb_clear(void);
 void stock_argb_commit(void);
+uint32_t stock_busy_check(void);
+void *stock_calloc(size_t n, size_t sz);
+void stock_free(void *p);
+void *stock_malloc(size_t sz);
+void *stock_realloc(void *p, size_t sz);
+void stock_psave_inhibit(uint32_t mask);
+void stock_psave_release(uint32_t mask);
+int32_t stock_rel_mpf(int32_t mpfid, void *blf);                    /* ARM */
+int32_t stock_prcv_mbx(int32_t mbxid, void **ppk_msg);              /* ARM */
+int32_t stock_snd_mbx(int32_t mbxid, void *pk_msg);                 /* ARM */
+int32_t stock_get_tid(uint16_t *p_tskid);                           /* ARM */
+int32_t stock_dly_tsk(uint32_t ms);                                 /* ARM */
+int32_t stock_get_tim(uint64_t *p_systim);                          /* ARM; p_systim MUST be 8B-aligned */
+int32_t stock_mdf_open(const char *path, uint32_t flags, uint32_t mode);
+int32_t stock_mdf_close(int32_t fd);
+int32_t stock_mdf_read(int32_t fd, void *buf, uint32_t len, uint32_t *got);
+int32_t stock_mdf_fstat(int32_t fd, void *stat_buf);
+int32_t stock_mdf_lseek(int32_t fd, int32_t off, uint32_t whence, uint32_t *pos);
+
+/* ITCM SWI 9 (0x20C, image 0xA07FBE28): clean the 16 KB D-cache by index and drain the write buffer. */
+static inline void hw_dcache_clean(void) {
+    __asm__ volatile("svc #9" ::: "lr", "memory");
+}
 
 /* ITCM SWI 10 (0x248, image 0xA07FBE64): clean the 16 KB D-cache by index, drain the write buffer, invalidate the
  * D-cache; the I-cache is untouched. The handler restores r0-r2 and the flags; svc overwrites lr in SVC mode. */
 static inline void hw_dcache_sync(void) {
     __asm__ volatile("svc #10" ::: "lr", "memory");
+}
+
+/* ITCM SWI 15 (0x310, image 0xA07FBF2C): invalidate entire 16 KB I-cache (restores r0-r1 and flags). */
+static inline void hw_icache_inv_all(void) {
+    __asm__ volatile("svc #15" ::: "lr", "memory");
 }
 
 /* ITCM SWI 12 (0x2B0, image 0xA07FBECC): clean 32-byte D-cache lines over r0..r0+r1, drain the
@@ -166,5 +194,7 @@ static inline const struct film_info *film_of(uint32_t cm) {
 
 const struct icon *label_icon(uint32_t id);
 uint32_t osd_map(uint32_t cm);
+void lv_boot_reset(void);
+void doom_boot_reset(void);
 
 #endif

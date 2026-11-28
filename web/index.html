@@ -106,7 +106,7 @@
     <div class="row"><kbd>[ ]</kbd><span>Dial / Zoom</span></div>
     <div class="row"><kbd>, . /</kbd><span>Level Tilt</span></div>
     <div class="sep"></div>
-    <div class="note">Drop image, D2ML LUT, or .bin</div>
+    <div class="note">Drop image, LUT, DOOM.BIN, or .WAD</div>
   </div>
 </aside>
 <script>
@@ -254,6 +254,10 @@
       const slot = m ? Number(m[1]) : 1;
       withBuf(buf, (ptr, len) => ex.cam_set_sd_lut(slot, ptr, len));
       draw();
+    } else if (magic4 === 'D2AP') {
+      mountSdFile('DOOM.BIN', buf);
+    } else if (magic4 === 'IWAD' || magic4 === 'PWAD' || /\.wad$/i.test(file.name)) {
+      mountSdFile(file.name.toUpperCase(), buf);
     } else if (buf.length > 0x1800000 && magic4 === 'SIGM') {
       if (withBuf(buf, (ptr, len) => ex.cam_boot_pkg(ptr, len))) {
         ready = true;
@@ -261,6 +265,25 @@
       }
     }
   });
+
+  function mountSdFile(name, bytes) {
+    const nb = new TextEncoder().encode(name);
+    const np = ex.wasm_alloc(nb.length);
+    const dp = ex.wasm_alloc(bytes.length);
+    if (!np || !dp) {
+      if (np) ex.wasm_free(np, nb.length);
+      if (dp) ex.wasm_free(dp, bytes.length);
+      return 0;
+    }
+    try {
+      new Uint8Array(ex.memory.buffer, np, nb.length).set(nb);
+      new Uint8Array(ex.memory.buffer, dp, bytes.length).set(bytes);
+      return ex.cam_mount_sd_file(np, nb.length, dp, bytes.length);
+    } finally {
+      ex.wasm_free(np, nb.length);
+      ex.wasm_free(dp, bytes.length);
+    }
+  }
 
   function loop() {
     if (ready && ex.cam_tick()) draw();
@@ -283,6 +306,12 @@
       ready = ex.cam_boot_split(p1, c78.length, p2, firm.length) === 1;
       ex.wasm_free(p1, c78.length);
       ex.wasm_free(p2, firm.length);
+    }
+
+    if (ready) {
+      const [doomRes, wadRes] = await Promise.all([fetch('DOOM.BIN'), fetch('DOOM1.WAD')]);
+      if (doomRes.ok) mountSdFile('DOOM.BIN', new Uint8Array(await doomRes.arrayBuffer()));
+      if (wadRes.ok) mountSdFile('DOOM1.WAD', new Uint8Array(await wadRes.arrayBuffer()));
     }
 
     window.dp2m = {

@@ -19,10 +19,11 @@ Default config (`dp2m.example.fnl`: `24/36` films, `11/11` grids, DOOM enabled):
 - **`ycc_bench` (FR80 emulator)**: see [../hardware.md](../hardware.md#25-color-pipeline--d2ml-sd-card-3d-lut-format) for per-stage insns/pair (`B&W toner fx=0/1`: `23.0` insns/pair on `4704×8`; `fill=1 fx=0`: `29.7`; `fx=1`: `65.2`; `fx=7 fill=1`: `146.3`).
 
 ### M6M ARM946E-S BE (`C78FRM.bin`)
-- **Payload**: `127` hooks, `118` strings, `42` menus, `431` rows (`codegen_all_36_films_and_subset_grids` also verifies `36/36` films + `11/11` grids link within budget).
+- **Payload**: `130` hooks, `118` strings, `42` menus, `431` rows (`codegen_all_36_films_and_subset_grids` also verifies `36/36` films + `11/11` grids link within budget).
 - **Region usage**:
-  - `CODE`: `13,296 / 15,316 B` | `DATA`: `12,436 / 12,800 B` | `LOOKS`: `7,476 / 8,756 B` | `MENU`: `4,148 / 4,672 B`
-  - `DOOM_A`: `4,752 / 4,876 B` | `DOOM_B`: `4,092 / 4,668 B` | `DOOM_C`: `2,180 / 2,492 B` | `DOOM_D`: `1,104 / 2,304 B` | `DOOM_E`: `2,820 / 3,500 B`
+  - `CODE`: `13,324 / 15,316 B` | `DATA`: `12,436 / 12,800 B` | `LOOKS`: `7,476 / 8,756 B` | `MENU`: `4,148 / 4,672 B`
+  - `DOOM_A`: `4,752 / 4,876 B` | `DOOM_B`: `4,364 / 4,668 B` | `DOOM_C`: `2,204 / 2,492 B` | `DOOM_D`: `2,168 / 2,304 B` | `DOOM_E`: `3,348 / 3,500 B`
+  - `RAM` (`.bss`): `0xA1C00000..0xA1CB7E58` (`735.6 KB`), leaving `0xA1CC0000..0xA1E00000` (`1.25 MB`) for SD-loaded `D2AP` v1 applets (`DOOM.BIN`: `317,024 B` image `0xA1CC0000..0xA1D0D660` + `236.6 KB` `.bss` -> `0xA1D488C0`, `733.8 KB` headroom).
 - **Live-view overlays (`m6m_bench`, `draw only` emulated ARM9 insns; host DMA fills/flushes excluded)**:
 
 | Grid | Mode | `default` | `checker` | `white` | `black` | `fine-detail` |
@@ -67,13 +68,15 @@ Default config (`dp2m.example.fnl`: `24/36` films, `11/11` grids, DOOM enabled):
   The path removes `80 B` from `DOOM_D`. Sparse nonzero blocks write 64 B rather than only their nonzero words. The [V2/V3 write-pattern probes](hardware-probe.md#framebuffer-write-patterns) found no severe hardware penalty from this traffic; visual and end-to-end camera A/B remains pending, and emulated instruction counts are not frame times.
 
 - **Label renderer (`labels.c`, `m6m_bench`)**: `41` emulated insns cached (`O(1)` `(class, sid)` table), `271,272..3,108,375` cold across classes 1..6. Cold renders clean `22..242` tile cache lines instead of SWI 10's `512`, with no whole-cache invalidate. Cache CP15 cost is not modeled: the extra `9` cold emulated instructions are address setup, not a hardware timing measurement. On-camera visual and latency A/B remain pending.
-- **Custom DOOM applet (`SCREEN_DOOM`, `0x21`)**: custom 2.5D sector/portal renderer with a hand-built 13-sector map (not a port of id DOOM); `320×240` 8bpp → `640×480` `RGBA4444` 2×2 upscale. `camera_flow` enforces `< 2.5M` emulated ARM9 insns/tick and clean exit back to `SCREEN_LV` (`0x15`). [Probe V2](hardware-probe.md#input-and-frame-pacing) confirmed that hardware supplies no autonomous UI tick, so the portal currently advances on input rather than autonomously; real frame pacing remains to be implemented. [Probe V3](hardware-probe.md#v3-repeated-display-timing) measured the retained upscaler at 5.2 ms/frame and minimum-of-three present at 2.3 ms/frame, excluding scene rendering, game work, and pacing.
+- **DOOM platform (`SCREEN_DOOM`, `0x21`)**:
+  - **Standalone `DOOM.BIN` + `DOOM1.WAD` (`dp2m build-doom`)**: full id DOOM engine (`317,024 B` `D2AP` v1 applet at `0xA1CC0000`) with 2×2 Bayer RGBA4444 dithering (`2 KB` pair LUTs in L1 D$), `<= 6 MB` SDRAM WAD preload + `16 KB` MDF sector cache fallback, and 3-mode DP2M Tech Demo HUD/Live Hardware Explorer. `doom_app_flow` measures `63.0M` emulated ARM9 boot instructions and `1.85M` emulated ARM9 instructions/frame in E1M1, and verifies zero leaked heap blocks or open SD descriptors across missing-WAD fallback, event-driven, streaming `> 6 MB` WAD, power-off `MBX 0x11` (`type == 6`), and autonomous (`tid != 0`) `get_tim`/`dly_tsk` 35 Hz runs.
+  - **Built-in ROM fallback (`src/m6m/doom.c`, `doom_render.c`)**: self-contained 2.5D sector/portal renderer with a 13-sector map (`320×240` 8bpp → `640×480` `RGBA4444` 2×2 upscale), now sharing the same autonomous 35 Hz loop when `tid != 0`. [Probe V3](hardware-probe.md#v3-repeated-display-timing) measured the retained upscaler at 5.2 ms/frame and minimum-of-three present at 2.3 ms/frame on hardware; full end-to-end on-camera FPS awaits measurement.
 
 ## 3. Emulator & verification commands
 
 - `crates/dp2m-emu/src/arm9.rs` uses a direct-fetch SDRAM loop with a 2 MB hook bitmap (`~229 MIPS` overlay / `~481 MIPS` label host rate; `m6m_bench` ~1.0 s wall time). `crates/dp2m-emu/src/fr80/emu.rs` uses direct ROM fetch with a 64 KB SDRAM TLB (`1024` pages) and handler bloom filter.
-- `dp2m verify out`: **601 / 601** checks (`m6m: 308`, `custom: 133`, `labels: 160`) in ~0.60 s; `--artifacts <dir>` writes `labels.png`.
-- `camera_flow` verifies Film page OSD FNV-1a64 (`0x16a06c94433a64d3`), menus, AE, WB, native `SCREEN_PB`, dual-CPU capture, and DOOM gameplay.
+- `dp2m verify out`: **607 / 607** checks (`m6m: 314`, `custom: 133`, `labels: 160`) in ~0.60 s; `--artifacts <dir>` writes `labels.png`.
+- `camera_flow` and `doom_app_flow` verify Film page OSD FNV-1a64 (`0x16a06c94433a64d3`), menus, AE, WB, native `SCREEN_PB`, dual-CPU capture, built-in DOOM, and standalone `DOOM.BIN` + `DOOM1.WAD` flows.
 
 ```sh
 cargo run --release -- build

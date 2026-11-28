@@ -126,6 +126,32 @@ pub unsafe extern "C" fn cam_set_sd_lut(lut_slot: usize, ptr: *const u8, len: us
     })
 }
 
+/// # Safety
+/// `name_ptr..+name_len` and `data_ptr..+data_len` must be valid byte slices in linear memory.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cam_mount_sd_file(
+    name_ptr: *const u8,
+    name_len: usize,
+    data_ptr: *const u8,
+    data_len: usize,
+) -> u32 {
+    if name_ptr.is_null() || name_len == 0 || data_ptr.is_null() || data_len == 0 {
+        return 0;
+    }
+    let Ok(name) = core::str::from_utf8(unsafe { slice::from_raw_parts(name_ptr, name_len) }) else {
+        return 0;
+    };
+    let data = unsafe { slice::from_raw_parts(data_ptr, data_len) }.to_vec();
+    CAM.with(|slot| {
+        if let Some(c) = slot.borrow_mut().as_mut() {
+            c.mount_sd_file(name, data);
+            1
+        } else {
+            0
+        }
+    })
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn cam_set_cm(cm: u32) {
     CAM.with(|slot| {

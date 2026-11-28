@@ -7,12 +7,19 @@ volatile struct lv_planes lv_planes; /* written by lv_ycap_hook */
 #define GAMMA_MAGIC 0x474D4131u
 
 static struct {
-    uint32_t magic;
-    const void *lut;   /* stock gamma for the current LV mode */
+    volatile uint32_t magic; /* volatile defeats GlobalOpt 1-byte narrowing on dirty boot .bss */
+    const void *lut;         /* stock gamma for the current LV mode */
     uint32_t sz;
-    uint32_t applied;  /* packed mode the B2Y gamma currently holds */
+    uint32_t applied;        /* packed mode the B2Y gamma currently holds */
 } gamma;
 static uint8_t gamma_buf[1024] __attribute__((aligned(4)));
+
+void lv_boot_reset(void) {
+    gamma.magic = 0;
+    gamma.lut = 0;
+    gamma.sz = 0;
+    gamma.applied = 0;
+}
 
 static const struct lv_look *look_of(uint32_t packed) {
     return (packed - FILM_MODE0 <= PACKED_MAX - FILM_MODE0) ? &dp2m_lv_looks[packed - FILM_MODE0] : 0;

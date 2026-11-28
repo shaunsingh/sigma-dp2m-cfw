@@ -302,3 +302,22 @@ fn qs_sel_clamp
 1:  pop  {r1, r2, r3, r4, r5, pc}
     .ltorg
     hook HOOK_BL, 0xA0043D06, qs_sel_clamp, 0xF009FBF3
+
+// Boot MPU init (0xA0172170 / 0xA0172190):
+// - 0xA0172170: `mov r0, #0xC` enables CP15 c2 I-cache on Region 2 (SDRAM) + Region 3 (NOR)
+// - 0xA0172190: `orr r0, r0, #0x600` (ARM imm 0x06 ror 24 = 0xE3800C06) sets Region 2 I-AP = 0b0110 (Priv/User exec)
+    hook HOOK_WORD, 0xA0172170, 0xE3A0000C, 0xE3A00008
+    hook HOOK_WORD, 0xA0172190, 0xE3800C06, 0xE3800000
+
+// Shutter scan 0xA01690B6 (`bl 0xA00363AE`): report busy (1) while SCREEN_DOOM (0x21) is active
+// so half/full shutter acts as a pure game fire button without S1 LV unwind or S2 capture.
+fn shutter_guard_hook
+    push {r4, lr}
+    bl   stock_ui_screen_id
+    cmp  r0, #0x21
+    bne  1f
+    movs r0, #1
+    pop  {r4, pc}
+1:  bl   stock_busy_check
+    pop  {r4, pc}
+    hook HOOK_CALL, 0xA01690B6, shutter_guard_hook, 0xA00363AE

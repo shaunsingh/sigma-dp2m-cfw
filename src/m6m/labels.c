@@ -39,7 +39,8 @@ static const struct cls { uint8_t w, h, mx, my, hmax, ring, weight, flags; } cla
 
 /* payload .bss is not zeroed: labels_boot resets the cache, the magic covers lookups before it */
 static struct {
-    uint32_t magic, top;
+    volatile uint32_t magic;
+    uint32_t top;
     uint8_t *tile[N_CLASSES][DP2M_N_STRINGS];
 } cache;
 static uint8_t arena[ARENA] __attribute__((aligned(4)));
@@ -366,6 +367,8 @@ const struct icon *label_icon(uint32_t id) {
 // boot init 0xA01689BC: SDRAM may keep decayed .bss across a short power cycle
 void labels_boot(void) {
     reset();
+    lv_boot_reset();
+    doom_boot_reset();
     memset((void *)&lv_planes, 0, sizeof lv_planes);
     stock_disp_init();
 }

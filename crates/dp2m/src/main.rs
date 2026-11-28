@@ -2,6 +2,7 @@
 
 mod catalog;
 mod config;
+mod doom;
 mod elf;
 mod lut;
 mod m5;
@@ -19,14 +20,15 @@ use pack::FilmPack;
 
 const USAGE: &str = "usage:
   dp2m build [DP2MV105.bin] [--config dp2m.fnl] [--out <dir>] [--pack <film_pack.bin>] [--skip-verify]
+  dp2m build-doom [--doomgeneric <dir>] [--config dp2m.fnl] [--out <dir>] [--warp]
   dp2m verify [out_dir] [--fw <DP2MV105.bin>] [--suite m6m|custom|labels] [--artifacts <dir>] [--quiet]
   dp2m re [--fw <DP2MV105.bin>] [--image <C78FRM.bin>] [--syms <m6m.syms>] <package|dis|xrefs|callers|sid|strings|menus|screens|icons|nvram|liveness|text> ...
   dp2m x3f <file.X3F> [--dump <out.camf>] [--all]
   dp2m lut <input.cube> <LUTn.BIN> [--grain N] [--grain-profile 0|1|2] [--halo N] [--halo-tint 0|1|2] [--tag NAME]
   dp2m lut inspect <LUTn.BIN>
-  dp2m stage [--config dp2m.fnl] [--from <out_dir>] [--to <sd_mount>]
-  dp2m sim [--config dp2m.fnl] [--from <out_dir>] [--port <port>]
-  dp2m sim-trace [DP2MVxxx.bin] [--config dp2m.fnl] [--keys k1,k2,...] [--ppm <out.ppm>] [--watch-text]
+  dp2m stage [--config dp2m.fnl] [--from <out_dir>] [--to <sd_mount>] [--wad <DOOM1.WAD>]
+  dp2m sim [--config dp2m.fnl] [--from <out_dir>] [--wad <DOOM1.WAD>] [--port <port>]
+  dp2m sim-trace [DP2MVxxx.bin] [--config dp2m.fnl] [--sd NAME=PATH] [--keys k1,k2,...] [--ppm <out.ppm>] [--watch-text]
   dp2m verify-m5 <Firm.bin|out_dir>
   dp2m disasm-fr80 <Firm.bin> <va_start_hex> <va_end_hex>
   dp2m inspect <file.bin>";
@@ -141,8 +143,26 @@ fn build(root: &Path, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn build_doom_cmd(root: &Path, args: &[String]) -> Result<(), String> {
+    let a = Args::parse(args, &["--doomgeneric", "--config", "--out"], &["--warp"])?;
+    let cfg = load_config(a.path("--config").as_deref(), root)?;
+    let out = output_dir(root, a.path("--out"), &cfg);
+    let dg = doom::resolve_doomgeneric_dir(root, a.path("--doomgeneric").as_deref())?;
+    doom::build_doom(root, &dg, &out, a.has("--warp")).map(|_| ())
+}
+
+fn stage_checked(src: &Path, dst: &Path, label: &str) -> Result<(), String> {
+    let data = read(src)?;
+    write(dst, &data)?;
+    if read(dst)? != data {
+        return Err(format!("read-back mismatch on {}", dst.display()));
+    }
+    println!("Staged {label} -> {} ({} B, read-back OK)", dst.display(), data.len());
+    Ok(())
+}
+
 fn stage(root: &Path, args: &[String]) -> Result<(), String> {
-    let a = Args::parse(args, &["--config", "--from", "--to"], &[])?;
+    let a = Args::parse(args, &["--config", "--from", "--to", "--wad"], &[])?;
     let cfg = load_config(a.path("--config").as_deref(), root)?;
     let from = output_dir(root, a.path("--from"), &cfg);
     let mount = a.path("--to").or_else(|| cfg.sd.mount.clone()).ok_or("provide --to <sd_mount> or set :sd {:mount ...}")?;
@@ -152,13 +172,19 @@ fn stage(root: &Path, args: &[String]) -> Result<(), String> {
     let pkg = package::file_name(&cfg)?;
     let names = [(cfg.sd.package, pkg.as_str()), (cfg.sd.firm, "Firm.bin"), (cfg.sd.c78, "C78FRM.bin")];
     for (_, name) in names.iter().filter(|(on, _)| *on) {
-        let data = read(&from.join(name))?;
-        let dst = mount.join(name);
-        write(&dst, &data)?;
-        if read(&dst)? != data {
-            return Err(format!("read-back mismatch on {}", dst.display()));
-        }
-        println!("Staged {name} -> {} ({} B, read-back OK)", dst.display(), data.len());
+        stage_checked(&from.join(name), &mount.join(name), name)?;
+    }
+    let doom_bin = from.join("DOOM.BIN");
+    if cfg.m6m.doom && doom_bin.is_file() {
+        stage_checked(&doom_bin, &mount.join("DOOM.BIN"), "DOOM.BIN")?;
+    }
+    let wad_src = a.path("--wad").or_else(|| {
+        let p = from.join("DOOM1.WAD");
+        p.is_file().then_some(p)
+    });
+    if let Some(wad) = wad_src {
+        let fname = wad.file_name().and_then(|s| s.to_str()).unwrap_or("DOOM1.WAD").to_ascii_uppercase();
+        stage_checked(&wad, &mount.join(&fname), &fname)?;
     }
     Ok(())
 }
@@ -174,6 +200,12 @@ fn inspect(path: &str) -> Result<(), String> {
     } else if b.len() == m6m::C78_S3_OFF + m6m::C78_LEN && b.starts_with(b"SIGMA.CODP2M") {
         let field = |o: usize| String::from_utf8_lossy(&b[o..o + 16]).trim_end_matches('\0').to_owned();
         println!("Type : DP2M updater package\nVer  : {} ({})", field(0x10), field(0x50));
+    } else if b.len() >= 32 && b.starts_with(b"D2AP") {
+        let u32be = |o: usize| u32::from_be_bytes(b[o..o + 4].try_into().unwrap());
+        println!(
+            "Type : DP2M standalone applet (D2AP v{})\nLoad : {:#010x}..{:#010x} (entry {:#010x}, bss_end {:#010x}, flags {:#x})",
+            u32be(4), u32be(8), u32be(8).wrapping_add(u32be(16)), u32be(12), u32be(20), u32be(24)
+        );
     } else {
         println!("Type : unknown");
     }
@@ -184,7 +216,7 @@ fn sim(root: &Path, args: &[String]) -> Result<(), String> {
     use std::io::{Read, Write};
     use std::net::TcpListener;
 
-    let a = Args::parse(args, &["--config", "--from", "--port"], &[])?;
+    let a = Args::parse(args, &["--config", "--from", "--wad", "--port"], &[])?;
     let cfg = load_config(a.path("--config").as_deref(), root)?;
     let from = output_dir(root, a.path("--from"), &cfg);
     let port = a.get("--port", 8080u16)?;
@@ -202,6 +234,8 @@ fn sim(root: &Path, args: &[String]) -> Result<(), String> {
     let wasm_path = root.join("target/wasm32-unknown-unknown/release/dp2m_web.wasm");
     let c78_path = from.join("C78FRM.bin");
     let firm_path = from.join("Firm.bin");
+    let doom_path = from.join("DOOM.BIN");
+    let wad_path = a.path("--wad").unwrap_or_else(|| from.join("DOOM1.WAD"));
     if !c78_path.is_file() || !firm_path.is_file() {
         return Err(format!(
             "missing C78FRM.bin or Firm.bin in {} (run `dp2m build` first)",
@@ -220,6 +254,8 @@ fn sim(root: &Path, args: &[String]) -> Result<(), String> {
         let wasm_p = wasm_path.clone();
         let c78_p = c78_path.clone();
         let firm_p = firm_path.clone();
+        let doom_p = doom_path.clone();
+        let wad_p = wad_path.clone();
         std::thread::spawn(move || {
             let mut s = stream;
             let _ = s.set_read_timeout(Some(Duration::from_secs(2)));
@@ -244,6 +280,8 @@ fn sim(root: &Path, args: &[String]) -> Result<(), String> {
                 "/dp2m_web.wasm" => serve(&wasm_p, "application/wasm", b"missing wasm"),
                 "/C78FRM.bin" => serve(&c78_p, "application/octet-stream", b"missing C78FRM.bin"),
                 "/Firm.bin" => serve(&firm_p, "application/octet-stream", b"missing Firm.bin"),
+                "/DOOM.BIN" => serve(&doom_p, "application/octet-stream", b"missing DOOM.BIN"),
+                "/DOOM1.WAD" => serve(&wad_p, "application/octet-stream", b"missing DOOM1.WAD"),
                 "/favicon.ico" => ("204 No Content", "image/x-icon", Vec::new()),
                 _ => ("404 Not Found", "text/plain", b"not found".to_vec()),
             };
@@ -284,7 +322,7 @@ fn parse_sim_key(name: &str) -> Result<dp2m_emu::sim::Key, String> {
 fn sim_trace(root: &Path, args: &[String]) -> Result<(), String> {
     use dp2m_emu::sim::{Camera, LCD_H, LCD_W};
 
-    let a = Args::parse(args, &["--config", "--keys", "--ppm"], &["--watch-text"])?;
+    let a = Args::parse(args, &["--config", "--sd", "--keys", "--ppm"], &["--watch-text"])?;
     let cfg = load_config(a.path("--config").as_deref(), root)?;
     let pkg_path = match a.positional.first() {
         Some(p) => PathBuf::from(p),
@@ -293,6 +331,11 @@ fn sim_trace(root: &Path, args: &[String]) -> Result<(), String> {
 
     let pkg = read(&pkg_path)?;
     let mut cam = Camera::from_package(&pkg)?;
+    for spec in a.values("--sd") {
+        let (name, path_s) = spec.split_once('=').ok_or_else(|| format!("expected NAME=PATH for --sd '{spec}'"))?;
+        let data = read(Path::new(path_s))?;
+        cam.mount_sd_file(name, data);
+    }
     let watch_text = a.has("--watch-text");
     if watch_text {
         cam.cpu_mut().set_write_watch(Some((0xA000_0000, 0xA017_9000)));
@@ -352,15 +395,26 @@ fn sim_trace(root: &Path, args: &[String]) -> Result<(), String> {
                     Some((n_s, k_s)) => (n_s.parse::<usize>().map_err(|_| format!("invalid repeat '{n_s}'"))?, k_s),
                     None => (1, raw_tok),
                 };
-                let key = parse_sim_key(key_s)?;
-                let mut insns = 0u64;
-                for _ in 0..reps {
-                    insns += cam.press(key);
-                    if cam.cpu().last_error.is_some() || !cam.cpu().watch_hits.is_empty() {
-                        break;
+                if key_s.eq_ignore_ascii_case("tick") {
+                    let before = cam.cpu().total_steps;
+                    for _ in 0..reps {
+                        let _ = cam.tick();
+                        if cam.cpu().last_error.is_some() || !cam.cpu().watch_hits.is_empty() {
+                            break;
+                        }
                     }
+                    report(raw_tok, cam.cpu().total_steps - before, &mut cam);
+                } else {
+                    let key = parse_sim_key(key_s)?;
+                    let mut insns = 0u64;
+                    for _ in 0..reps {
+                        insns += cam.press(key);
+                        if cam.cpu().last_error.is_some() || !cam.cpu().watch_hits.is_empty() {
+                            break;
+                        }
+                    }
+                    report(raw_tok, insns, &mut cam);
                 }
-                report(raw_tok, insns, &mut cam);
             }
             if !cam.cpu().watch_hits.is_empty() {
                 for &(pc, lr, va) in &cam.cpu().watch_hits {
@@ -630,6 +684,7 @@ fn run() -> Result<(), String> {
     let root = repo_root();
     match args.first().map(String::as_str) {
         Some("build") => build(&root, &args[1..]),
+        Some("build-doom") => build_doom_cmd(&root, &args[1..]),
         Some("verify") => verify_cmd(&root, &args[1..]),
         Some("re") => re_cmd(&root, &args[1..]),
         Some("x3f") => x3f_cmd(&args[1..]),

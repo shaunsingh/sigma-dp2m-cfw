@@ -5,23 +5,24 @@ use crate::arm9::{Cpu, HookAction, SDRAM_BASE};
 
 use super::isp::{wb_q7_matrix, ycbcr_to_rgb};
 use super::{
-    CaptureFrame, HEAP_HI, HEAP_LO, HeapBlock, HwState, LCD_H, LCD_W, LV_H, PB_PLANE_C_LEN,
-    PB_PLANE_Y_LEN, SCRATCH_VA,
+    CaptureFrame, HEAP_HI, HEAP_LO, HeapBlock, HwState, LCD_H, LCD_W, LV_H, OpenSdFile,
+    PB_PLANE_C_LEN, PB_PLANE_Y_LEN, SCRATCH_VA, normalize_sd_name,
 };
 use crate::stock::{
     ACCEL_X, ACCEL_Y, AE_SENSOR_EV100, B2Y_SET_CHROMA, B2Y_SET_GAMMA, B2Y_SET_MAT, B2Y_SET_MONO,
     B2Y_SET_SHARP_LUT, CALLOC, DCF_COUNT_IMAGES, DCF_DIR_COUNTS, DCF_GET_CUR, DCF_GET_ENTRY,
     DCF_GET_FILE_INFO, DCF_GET_TOTAL, DCF_READ_JPEG_EXIF, DCF_READ_X3F_EXIF, DCF_SCAN_READY,
-    DCF_SET_CUR, DCF_STEP_NEXT, DCF_STEP_PREV, DCF_SYNC_CUR, DIAG_LOG_A, DIAG_LOG_B, DMA_2D_COPY,
-    DMA_2D_COPY_MODE, DMA_MEM_COPY, DMA_RECT_FILL, FREE, GET_LV_CC7, GET_LV_CCN, LIBC_AEABI_MEMCLR,
-    LIBC_AEABI_MEMCLR4, LIBC_AEABI_MEMMOVE, LIBC_AEABI_MEMSET, LIBC_MEMCPY, LIBC_MEMSET, LV_ACTIVE,
-    MALLOC, NOR_READ, NOR_WRITE, NV_BUSY, NV_SYNC, PB_DEC_INIT, PB_DECODE_RESAMPLE, PB_HW_JPEG_DEC,
-    PB_IIP_HIST, PB_OPEN_IMAGE_A, PB_OPEN_IMAGE_B, PB_OPEN_JPEG_A, PB_OPEN_JPEG_B, PB_SELECT_VBUF,
-    PB_STEP_OR_CUR, PB_VBUF_DEFAULT_VA, PB_VBUFS, PB_YCBCR_TO_RGB_PLANAR, REALLOC, REC_COUNTER_GET,
-    REC_COUNTER_SET, SCREEN_POST_MBOX, SCREEN_POST_RET, SD_FREE_SPACE, SD_MOUNT_STATUS, UITRON,
-    GET_MPF, GET_MPL, GET_PRI, GET_TID, PGET_MPF, PGET_MPL, POL_FLG, PRCV_MBX, RCV_MBX, REF_ALM, REF_CYC,
-    REF_FLG, REF_MBX, REF_MPF, REF_MPL, REF_SEM, REF_SYS, REF_TSK, REL_MPF, REL_MPL, STA_CYC,
-    STP_CYC, TGET_MPF, TRCV_MBX, WAI_FLG,
+    DCF_SET_CUR, DCF_STEP_NEXT, DCF_STEP_PREV, DCF_SYNC_CUR, DIAG_LOG_A, DIAG_LOG_B, DLY_TSK,
+    DMA_2D_COPY, DMA_2D_COPY_MODE, DMA_MEM_COPY, DMA_RECT_FILL, FREE, GET_LV_CC7, GET_LV_CCN,
+    GET_MPF, GET_MPL, GET_PRI, GET_TID, GET_TIM, LIBC_AEABI_MEMCLR, LIBC_AEABI_MEMCLR4,
+    LIBC_AEABI_MEMMOVE, LIBC_AEABI_MEMSET, LIBC_MEMCPY, LIBC_MEMSET, LV_ACTIVE, MALLOC, MDF_CLOSE,
+    MDF_FSTAT, MDF_LSEEK, MDF_OPEN, MDF_READ, NOR_READ, NOR_WRITE, NV_BUSY, NV_SYNC, PB_DEC_INIT,
+    PB_DECODE_RESAMPLE, PB_HW_JPEG_DEC, PB_IIP_HIST, PB_OPEN_IMAGE_A, PB_OPEN_IMAGE_B,
+    PB_OPEN_JPEG_A, PB_OPEN_JPEG_B, PB_SELECT_VBUF, PB_STEP_OR_CUR, PB_VBUF_DEFAULT_VA, PB_VBUFS,
+    PB_YCBCR_TO_RGB_PLANAR, PGET_MPF, PGET_MPL, POL_FLG, PRCV_MBX, RCV_MBX, REALLOC, REC_COUNTER_GET,
+    REC_COUNTER_SET, REF_ALM, REF_CYC, REF_FLG, REF_MBX, REF_MPF, REF_MPL, REF_SEM, REF_SYS,
+    REF_TSK, REL_MPF, REL_MPL, SCREEN_POST_MBOX, SCREEN_POST_RET, SD_FREE_SPACE, SD_MOUNT_STATUS,
+    SND_MBX, STA_CYC, STP_CYC, TGET_MPF, TRCV_MBX, UITRON, WAI_FLG,
 };
 
 pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
@@ -146,7 +147,7 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
             let Some(sz) = heap_size(c.r[0]) else {
                 return HookAction::Return(Some(0));
             };
-            HookAction::Return(Some(heap_alloc(&mut st.borrow_mut(), sz)))
+            HookAction::Return(Some(heap_alloc(&mut st.borrow_mut(), sz, true)))
         });
     }
     {
@@ -155,7 +156,7 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
             let Some(sz) = c.r[0].checked_mul(c.r[1]).and_then(heap_size) else {
                 return HookAction::Return(Some(0));
             };
-            let ptr = heap_alloc(&mut st.borrow_mut(), sz);
+            let ptr = heap_alloc(&mut st.borrow_mut(), sz, true);
             if ptr != 0 {
                 c.fill_bytes(ptr, 0, sz as usize);
             }
@@ -178,7 +179,7 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
                 let Some(sz) = heap_size(new_sz) else {
                     return HookAction::Return(Some(0));
                 };
-                return HookAction::Return(Some(heap_alloc(&mut st.borrow_mut(), sz)));
+                return HookAction::Return(Some(heap_alloc(&mut st.borrow_mut(), sz, true)));
             }
             if new_sz == 0 {
                 heap_free(&mut st.borrow_mut(), ptr);
@@ -188,12 +189,12 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
                 return HookAction::Return(Some(0));
             };
             let mut s = st.borrow_mut();
-            if let Some(pos) = s.alloc_caps.iter().position(|&(va, _)| va == ptr) {
+            if let Some(pos) = s.alloc_caps.iter().position(|&(va, _, _)| va == ptr) {
                 let old_cap = s.alloc_caps[pos].1;
                 if aligned <= old_cap {
                     return HookAction::Return(Some(ptr));
                 }
-                let new_ptr = heap_alloc(&mut s, aligned);
+                let new_ptr = heap_alloc(&mut s, aligned, true);
                 if new_ptr != 0 {
                     let src_off = (ptr - SDRAM_BASE) as usize;
                     let dst_off = (new_ptr - SDRAM_BASE) as usize;
@@ -202,7 +203,7 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
                 }
                 return HookAction::Return(Some(new_ptr));
             }
-            HookAction::Return(Some(heap_alloc(&mut s, aligned)))
+            HookAction::Return(Some(heap_alloc(&mut s, aligned, true)))
         });
     }
 
@@ -671,6 +672,141 @@ pub(crate) fn install_m6m_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
         }
         HookAction::Return(Some(0))
     });
+
+    install_mdf_hooks(cpu, hw);
+}
+
+fn read_cstr_sdram(c: &Cpu, va: u32, max_len: usize) -> Option<String> {
+    let off = va.checked_sub(SDRAM_BASE)? as usize;
+    let sdram = c.sdram();
+    if off >= sdram.len() {
+        return None;
+    }
+    let slice = &sdram[off..(off + max_len).min(sdram.len())];
+    let nul = slice.iter().position(|&b| b == 0)?;
+    std::str::from_utf8(&slice[..nul]).ok().map(str::to_owned)
+}
+
+fn install_mdf_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
+    {
+        let st = Rc::clone(hw);
+        cpu.add_hook(MDF_OPEN, move |c| {
+            let Some(raw_path) = read_cstr_sdram(c, c.r[0], 128) else {
+                return HookAction::Return(Some(-1i32 as u32));
+            };
+            let key = normalize_sd_name(&raw_path);
+            let mut s = st.borrow_mut();
+            let Some(data) = s.sd_files.iter().find(|(k, _)| k == &key).map(|(_, d)| Rc::clone(d)) else {
+                return HookAction::Return(Some(-1i32 as u32));
+            };
+            let Some(slot) = s.sd_fds.iter().position(Option::is_none) else {
+                return HookAction::Return(Some(-1i32 as u32));
+            };
+            s.sd_fds[slot] = Some(OpenSdFile { data, pos: 0 });
+            HookAction::Return(Some((slot as u32) + 3))
+        });
+    }
+    {
+        let st = Rc::clone(hw);
+        cpu.add_hook(MDF_CLOSE, move |c| {
+            let fd = c.r[0] as i32;
+            let mut s = st.borrow_mut();
+            let idx = (fd - 3) as usize;
+            if fd < 3 || idx >= s.sd_fds.len() || s.sd_fds[idx].is_none() {
+                return HookAction::Return(Some(-1i32 as u32));
+            }
+            s.sd_fds[idx] = None;
+            HookAction::Return(Some(0))
+        });
+    }
+    {
+        let st = Rc::clone(hw);
+        cpu.add_hook(MDF_READ, move |c| {
+            let fd = c.r[0] as i32;
+            let dst = c.r[1];
+            let req = c.r[2] as usize;
+            let got_va = c.r[3];
+            if !out_in_sdram(c, got_va, 4, 4) {
+                return HookAction::Return(Some(-22i32 as u32));
+            }
+            c.w32(got_va, 0);
+            if req > 0 && !out_in_sdram(c, dst, req, 1) {
+                return HookAction::Return(Some(-22i32 as u32));
+            }
+            let (data, start, n) = {
+                let mut s = st.borrow_mut();
+                let idx = (fd - 3) as usize;
+                let Some(f) = (if fd >= 3 { s.sd_fds.get_mut(idx).and_then(Option::as_mut) } else { None }) else {
+                    return HookAction::Return(Some(-9i32 as u32));
+                };
+                let avail = f.data.len().saturating_sub(f.pos);
+                let n = req.min(avail);
+                let start = f.pos;
+                f.pos += n;
+                (Rc::clone(&f.data), start, n)
+            };
+            if n > 0 {
+                c.write_bytes(dst, &data[start..start + n]);
+            }
+            c.w32(got_va, n as u32);
+            HookAction::Return(Some(0))
+        });
+    }
+    {
+        let st = Rc::clone(hw);
+        cpu.add_hook(MDF_FSTAT, move |c| {
+            let fd = c.r[0] as i32;
+            let stat_va = c.r[1];
+            // Stock mdf_fstat (0xA0111563) writes fields through +0x224 (0x228 B total).
+            if !out_in_sdram(c, stat_va, 0x228, 4) {
+                return HookAction::Return(Some(-22i32 as u32));
+            }
+            let size = {
+                let s = st.borrow();
+                let idx = (fd - 3) as usize;
+                let Some(f) = (if fd >= 3 { s.sd_fds.get(idx).and_then(Option::as_ref) } else { None }) else {
+                    return HookAction::Return(Some(-9i32 as u32));
+                };
+                f.data.len() as u64
+            };
+            c.w32(stat_va + 0x210, (size >> 32) as u32);
+            c.w32(stat_va + 0x214, size as u32);
+            c.w32(stat_va + 0x224, 0);
+            HookAction::Return(Some(0))
+        });
+    }
+    {
+        let st = Rc::clone(hw);
+        cpu.add_hook(MDF_LSEEK, move |c| {
+            let fd = c.r[0] as i32;
+            let off = c.r[1] as i32 as i64;
+            let whence = c.r[2];
+            let pos_va = c.r[3];
+            if !out_in_sdram(c, pos_va, 4, 4) {
+                return HookAction::Return(Some(-22i32 as u32));
+            }
+            let new_pos = {
+                let mut s = st.borrow_mut();
+                let idx = (fd - 3) as usize;
+                let Some(f) = (if fd >= 3 { s.sd_fds.get_mut(idx).and_then(Option::as_mut) } else { None }) else {
+                    return HookAction::Return(Some(-9i32 as u32));
+                };
+                let base: i64 = match whence {
+                    0 => 0,
+                    1 => f.pos as i64,
+                    2 => f.data.len() as i64,
+                    _ => return HookAction::Return(Some(-22i32 as u32)),
+                };
+                let Some(target) = base.checked_add(off).filter(|&p| p >= 0 && (p as usize) <= f.data.len()) else {
+                    return HookAction::Return(Some(-22i32 as u32));
+                };
+                f.pos = target as usize;
+                f.pos as u32
+            };
+            c.w32(pos_va, new_pos);
+            HookAction::Return(Some(0))
+        });
+    }
 }
 
 const E_PAR: u32 = -17i32 as u32;
@@ -696,7 +832,7 @@ fn install_kernel_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
             let Some(size) = (if fixed { Some(FIXED_BLOCK_SIZE) } else { heap_size(c.r[1]) }) else {
                 return HookAction::Return(Some(E_NOMEM));
             };
-            let ptr = heap_alloc(&mut st.borrow_mut(), size);
+            let ptr = heap_alloc(&mut st.borrow_mut(), size, false);
             if ptr == 0 {
                 return HookAction::Return(Some(E_NOMEM));
             }
@@ -746,13 +882,100 @@ fn install_kernel_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
             HookAction::Return(Some(0))
         });
     }
-    for va in [GET_TID, REF_SYS] {
-        cpu.add_hook(va, |c| {
+    {
+        let st = Rc::clone(hw);
+        cpu.add_hook(GET_TID, move |c| {
             let out = c.r[0];
             if !out_in_sdram(c, out, 2, 2) {
                 return HookAction::Return(Some(E_PAR));
             }
-            c.w16(out, 0);
+            c.w16(out, st.borrow().sim_tid);
+            HookAction::Return(Some(0))
+        });
+    }
+    cpu.add_hook(REF_SYS, |c| {
+        let out = c.r[0];
+        if !out_in_sdram(c, out, 2, 2) {
+            return HookAction::Return(Some(E_PAR));
+        }
+        c.w16(out, 0);
+        HookAction::Return(Some(0))
+    });
+    {
+        let st = Rc::clone(hw);
+        cpu.add_hook(GET_TIM, move |c| {
+            let out = c.r[0];
+            // Stock 0xA0074614 uses ARMv5TE `strd`, which faults if `out` is not 8B-aligned.
+            if !out_in_sdram(c, out, 8, 8) {
+                return HookAction::Return(Some(E_PAR));
+            }
+            let ms = {
+                let mut s = st.borrow_mut();
+                s.sim_ms = s.sim_ms.wrapping_add(1);
+                s.sim_ms
+            };
+            let hi = (ms >> 32) as u32;
+            let lo = ms as u32;
+            c.w32(out, hi);
+            c.w32(out + 4, lo);
+            HookAction::Return(Some(0))
+        });
+    }
+    {
+        let st = Rc::clone(hw);
+        cpu.add_hook(DLY_TSK, move |c| {
+            let dly = c.r[0] as u64;
+            let step;
+            let mut cb;
+            {
+                let mut s = st.borrow_mut();
+                s.sim_ms = s.sim_ms.wrapping_add(dly.max(1));
+                step = s.sleep_calls;
+                s.sleep_calls += 1;
+                cb = s.sleep_hook.take();
+            }
+            if let Some(ref mut f) = cb {
+                let mut s = st.borrow_mut();
+                f(c, &mut s, step);
+            }
+            if cb.is_some() {
+                let mut s = st.borrow_mut();
+                if s.sleep_hook.is_none() {
+                    s.sleep_hook = cb;
+                }
+            }
+            HookAction::Return(Some(0))
+        });
+    }
+    {
+        let st = Rc::clone(hw);
+        cpu.add_hook(PRCV_MBX, move |c| {
+            let mbxid = c.r[0];
+            let out = c.r[1];
+            if mbxid == 0 || !out_in_sdram(c, out, 4, 4) {
+                return HookAction::Return(Some(E_PAR));
+            }
+            if mbxid == 0x11
+                && let Some(pkt) = st.borrow_mut().mbx_packets.pop_front()
+            {
+                c.w32(out, pkt);
+                HookAction::Return(Some(0))
+            } else {
+                HookAction::Return(Some(E_TMOUT))
+            }
+        });
+    }
+    {
+        let st = Rc::clone(hw);
+        cpu.add_hook(SND_MBX, move |c| {
+            let mbxid = c.r[0];
+            let pkt = c.r[1];
+            if mbxid == 0 || !out_in_sdram(c, pkt, 16, 4) {
+                return HookAction::Return(Some(E_PAR));
+            }
+            if mbxid == 0x11 {
+                st.borrow_mut().mbx_packets.push_back(pkt);
+            }
             HookAction::Return(Some(0))
         });
     }
@@ -771,7 +994,7 @@ fn install_kernel_hooks(cpu: &mut Cpu, hw: &Rc<RefCell<HwState>>) {
     for va in [WAI_FLG, RCV_MBX] {
         cpu.stub(va, Some(E_RLWAI));
     }
-    for va in [POL_FLG, PRCV_MBX, TRCV_MBX, STA_CYC, STP_CYC] {
+    for va in [POL_FLG, TRCV_MBX, STA_CYC, STP_CYC] {
         cpu.stub(va, Some(E_TMOUT));
     }
 }
@@ -884,20 +1107,20 @@ fn heap_size(size: u32) -> Option<u32> {
 }
 
 fn heap_free(st: &mut HwState, ptr: u32) {
-    if let Some(pos) = st.alloc_caps.iter().position(|&(va, _)| va == ptr) {
-        let (va, cap) = st.alloc_caps.swap_remove(pos);
+    if let Some(pos) = st.alloc_caps.iter().position(|&(va, _, _)| va == ptr) {
+        let (va, cap, _) = st.alloc_caps.swap_remove(pos);
         st.free_list.push(HeapBlock { va, cap });
     }
 }
 
-fn heap_alloc(st: &mut HwState, sz: u32) -> u32 {
+fn heap_alloc(st: &mut HwState, sz: u32, is_c_heap: bool) -> u32 {
     if let Some(pos) = st
         .free_list
         .iter()
         .position(|b| b.cap >= sz && b.cap <= sz.saturating_mul(2))
     {
         let blk = st.free_list.swap_remove(pos);
-        st.alloc_caps.push((blk.va, blk.cap));
+        st.alloc_caps.push((blk.va, blk.cap, is_c_heap));
         return blk.va;
     }
     let mut base = st.heap_bump;
@@ -912,7 +1135,7 @@ fn heap_alloc(st: &mut HwState, sz: u32) -> u32 {
         return 0;
     }
     st.heap_bump = next;
-    st.alloc_caps.push((base, sz));
+    st.alloc_caps.push((base, sz, is_c_heap));
     base
 }
 
@@ -979,5 +1202,10 @@ mod tests {
             assert_eq!(call(&mut c, va, &[1, out, 0, out]), error);
             assert_eq!(c.r32_be(out), 0xA5A5_A5A5);
         }
+        let pkt = SCRATCH_VA + 0x100;
+        assert_eq!(call(&mut c, SND_MBX, &[0x11, pkt]), 0);
+        assert_eq!(call(&mut c, PRCV_MBX, &[1, out]), E_TMOUT);
+        assert_eq!(call(&mut c, PRCV_MBX, &[0x11, out]), 0);
+        assert_eq!(c.r32_be(out), pkt);
     }
 }

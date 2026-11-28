@@ -132,12 +132,29 @@ pub(crate) struct HeapBlock {
     pub(crate) cap: u32,
 }
 
+pub(crate) struct OpenSdFile {
+    pub(crate) data: Rc<Vec<u8>>,
+    pub(crate) pos: usize,
+}
+
+pub(crate) type SleepHook = Box<dyn FnMut(&mut Cpu, &mut HwState, usize)>;
+
+pub(crate) fn normalize_sd_name(path: &str) -> String {
+    let mut s = path.trim();
+    if let Some((_, rest)) = s.split_once(':') {
+        s = rest;
+    }
+    s = s.trim_start_matches(['\\', '/']);
+    s.replace('/', "\\").to_ascii_uppercase()
+}
+
 pub(crate) struct HwState {
     pub(crate) events: VecDeque<(u32, u32)>,
+    pub(crate) mbx_packets: VecDeque<u32>,
     pub(crate) nor: [u8; 0x800],
     pub(crate) heap_bump: u32,
     pub(crate) free_list: Vec<HeapBlock>,
-    pub(crate) alloc_caps: Vec<(u32, u32)>,
+    pub(crate) alloc_caps: Vec<(u32, u32, bool)>,
     pub(crate) b2y_mat: [i32; 9],
     pub(crate) b2y_gamma: [u8; 1024],
     pub(crate) b2y_mono_en: bool,
@@ -152,12 +169,19 @@ pub(crate) struct HwState {
     pub(crate) dcf_cur: usize,
     pub(crate) pb_open_idx: Option<usize>,
     pub(crate) pb_vbuf_va: u32,
+    pub(crate) sim_tid: u16,
+    pub(crate) sim_ms: u64,
+    pub(crate) sleep_calls: usize,
+    pub(crate) sleep_hook: Option<SleepHook>,
+    pub(crate) sd_files: Vec<(String, Rc<Vec<u8>>)>,
+    pub(crate) sd_fds: [Option<OpenSdFile>; 16],
 }
 
 impl HwState {
     fn new(b2y_gamma: [u8; 1024]) -> Self {
         Self {
             events: VecDeque::with_capacity(16),
+            mbx_packets: VecDeque::new(),
             nor: [0u8; 0x800],
             heap_bump: HEAP_LO.start,
             free_list: Vec::new(),
@@ -176,6 +200,12 @@ impl HwState {
             dcf_cur: 0,
             pb_open_idx: None,
             pb_vbuf_va: PB_VBUF_DEFAULT_VA,
+            sim_tid: 0,
+            sim_ms: 1_000,
+            sleep_calls: 0,
+            sleep_hook: None,
+            sd_files: Vec::new(),
+            sd_fds: std::array::from_fn(|_| None),
         }
     }
 }
@@ -992,6 +1022,92 @@ impl Camera {
 
     pub fn cpu(&self) -> &Cpu {
         &self.cpu
+    }
+
+    pub fn mount_sd_file(&mut self, path: &str, data: Vec<u8>) {
+        let key = normalize_sd_name(path);
+        let rc = Rc::new(data);
+        let mut st = self.hw.borrow_mut();
+        if let Some(entry) = st.sd_files.iter_mut().find(|(k, _)| k == &key) {
+            entry.1 = rc;
+        } else {
+            st.sd_files.push((key, rc));
+        }
+    }
+
+    pub fn clear_sd_files(&mut self) {
+        let mut st = self.hw.borrow_mut();
+        st.sd_files.clear();
+        for slot in &mut st.sd_fds {
+            *slot = None;
+        }
+    }
+
+    pub fn live_heap_allocations(&self) -> usize {
+        self.hw.borrow().alloc_caps.iter().filter(|&&(_, _, is_c)| is_c).count()
+    }
+
+    pub fn open_sd_fds(&self) -> usize {
+        self.hw.borrow().sd_fds.iter().filter(|slot| slot.is_some()).count()
+    }
+
+    /// Exercises an autonomous task-driven screen (`sim_tid != 0`) by invoking `on_sleep`
+    /// on each `dly_tsk` call so tests can drive live hardware GPIO/shutter/dial registers.
+    pub fn run_autonomous_open(
+        &mut self,
+        screen_id: u32,
+        tid: u16,
+        max_insns: u64,
+        mut on_sleep: impl FnMut(&mut Cpu, usize) + 'static,
+    ) -> Result<u64, String> {
+        {
+            let mut st = self.hw.borrow_mut();
+            st.sim_tid = tid;
+            st.sleep_calls = 0;
+            st.sleep_hook = Some(Box::new(move |cpu, _hw, step| on_sleep(cpu, step)));
+            st.events.push_back((1, screen_id));
+        }
+        let mut total = 0u64;
+        let mut res = Ok(());
+        let mut guard = 0usize;
+        while guard < 64 {
+            let ev = self.hw.borrow_mut().events.pop_front();
+            let Some((ty, val)) = ev else { break };
+            guard += 1;
+            match self.cpu.call(UI_DISPATCH | 1, &[ty, val], &[], CALL_SP, max_insns) {
+                Ok((_, n)) => total += n,
+                Err(e) => {
+                    res = Err(format!("UI_DISPATCH({ty}, {val:#x}) trap: {e:?}"));
+                    break;
+                }
+            }
+        }
+        {
+            let mut st = self.hw.borrow_mut();
+            st.sim_tid = 0;
+            st.sleep_hook = None;
+        }
+        let scr = self.call_thumb(UI_SCREEN_ID, &[]);
+        self.last_screen_id = scr;
+        if scr == 0x15 {
+            total += self.refresh_lv_isp_and_ycap();
+            {
+                let mut st = self.hw.borrow_mut();
+                st.events.push_back((4, 0));
+                st.events.push_back((4, 3));
+            }
+            total += self.drain_events();
+        }
+        self.lcd_dirty = true;
+        res.map(|()| total)
+    }
+
+    pub fn enqueue_mbx_packet(&mut self, pkt_va: u32) {
+        self.hw.borrow_mut().mbx_packets.push_back(pkt_va);
+    }
+
+    pub fn pending_mbx_packets(&self) -> usize {
+        self.hw.borrow().mbx_packets.len()
     }
 
     pub fn cpu_mut(&mut self) -> &mut Cpu {
